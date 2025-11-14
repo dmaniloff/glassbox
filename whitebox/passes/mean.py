@@ -2,17 +2,24 @@ import operator
 
 import torch
 from torch import fx
-
-# Import the attention layer module to ensure the custom op is registered
-from vllm.attention.layer import Attention  # noqa: F401
 from vllm.compilation.inductor_pass import InductorPass
 
+VLLM_UNIFIED_ATTENTION_WITH_OUTPUT = "vllm.unified_attention_with_output.default"
 
-def capture_mean(mean_tensor, layer_name):
-    """Callback to capture mean values at runtime."""
-    mean_val = float(mean_tensor.item())
-    print(f"[RUNTIME] {layer_name} attention mean: {mean_val:.6f}")
-    return mean_tensor  # Return the tensor to keep it in the graph
+
+# Register a custom torch operation
+@torch.library.custom_op("whitebox::capture_mean", mutates_args=())
+def capture_mean_op(x: torch.Tensor, layer_name: str) -> torch.Tensor:
+    """Custom op to capture mean values."""
+    mean_val = float(x.mean().item())
+    print(f"[MEAN_CAPTURE] {layer_name} attention mean: {mean_val:.6f}")
+    return x.clone()  # Passthrough
+
+
+# Register the fake/abstract implementation for torch.compile
+@capture_mean_op.register_fake
+def _(x: torch.Tensor, layer_name: str) -> torch.Tensor:
+    return x.clone()  # "Output has same shape/dtype/device as input"
 
 
 class AttentionMeanPass(InductorPass):
@@ -66,8 +73,7 @@ class AttentionMeanPass(InductorPass):
                 # Check if it's the attention operation
                 if (
                     node.args
-                    and str(node.args[0])
-                    == "vllm.unified_attention_with_output.default"
+                    and str(node.args[0]) == VLLM_UNIFIED_ATTENTION_WITH_OUTPUT
                 ):
                     nodes_to_process.append(node)
 
@@ -110,28 +116,16 @@ class AttentionMeanPass(InductorPass):
         # For each attention output usage, inject a mean calculation
         for att_output_node in attention_output_users:
             with graph.inserting_after(att_output_node):
-                # Calculate mean
-                mean_node = graph.call_function(
-                    torch.ops.aten.mean.default, args=(att_output_node,), kwargs={}
-                )
-
+                # Calculate mean via a capture node
                 capture_node = graph.call_function(
-                    capture_mean, args=(mean_node, layer_name), kwargs={}
+                    torch.ops.whitebox.capture_mean.default,
+                    args=(att_output_node, layer_name),
+                    kwargs={},
                 )
 
-                # # Create a simple print-like operation to "use" the mean
-                # # In practice, you might store this somewhere or use it differently
-                # # For demonstration, we'll add a detach operation to ensure it's computed
-                # detached_node = graph.call_function(
-                #     torch.ops.aten.detach.default, args=(mean_node,), kwargs={}
-                # )
-
-                # # Print using torch's print (works in compiled graphs)
-                # graph.call_function(
-                #     torch.ops.aten._print.default,
-                #     args=(f"{layer_name} mean:", detached_node),
-                #     kwargs={},
-                # )
+                att_output_node.replace_all_uses_with(
+                    capture_node, delete_user_cb=lambda n: n is not capture_node
+                )
 
                 print(
                     f"Injected mean calculation after attention output at {att_output_node.name}"
