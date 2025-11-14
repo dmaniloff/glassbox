@@ -17,6 +17,9 @@ The script will:
 - Print attention means for each layer at each generation step
 - Write the graph before and after the pass to `graph_before.txt` and `graph_after.txt` respectively
 
+## Demo
+Check out `demo/sample_run.txt` for a sample run and the corresponding `graph_before.txt` and `graph_after.txt` files.
+
 ## Implementation Details
 
 The pass is registered via vLLM's [`CompilationConfig`](https://docs.vllm.ai/en/latest/api/vllm/config/#vllm.config.CompilationConfig) using the `inductor_compile_config` parameter with a custom `post_grad_custom_post_pass`.
