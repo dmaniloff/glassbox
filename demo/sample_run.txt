@@ -1,0 +1,209 @@
+$ python -m whitebox.main 
+/opt/pytorch/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+INFO 11-14 02:38:52 [__init__.py:216] Automatically detected platform cuda.
+INFO 11-14 02:38:55 [utils.py:233] non-default args: {'disable_log_stats': True, 'compilation_config': {"level":null,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":[],"use_inductor":true,"compile_sizes":null,"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"cudagraph_mode":0,"use_cudagraph":true,"cudagraph_num_of_warmups":0,"cudagraph_capture_sizes":null,"cudagraph_copy_inputs":false,"full_cuda_graph":false,"use_inductor_graph_partition":false,"pass_config":{},"max_capture_size":null,"local_cache_dir":null}, 'model': 'facebook/opt-125m'}
+INFO 11-14 02:38:55 [model.py:547] Resolved architecture: OPTForCausalLM
+`torch_dtype` is deprecated! Use `dtype` instead!
+INFO 11-14 02:38:55 [model.py:1510] Using max model len 2048
+INFO 11-14 02:38:57 [scheduler.py:205] Chunked prefill is enabled with max_num_batched_tokens=8192.
+WARNING 11-14 02:38:57 [compilation.py:598] Using piecewise compilation with empty splitting_ops and use_inductor_graph_partition=False.
+(EngineCore_DP0 pid=18616) INFO 11-14 02:38:57 [core.py:644] Waiting for init message from front-end.
+(EngineCore_DP0 pid=18616) INFO 11-14 02:38:57 [core.py:77] Initializing a V1 LLM engine (v0.11.0) with config: model='facebook/opt-125m', speculative_config=None, tokenizer='facebook/opt-125m', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=2048, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=facebook/opt-125m, enable_prefix_caching=True, chunked_prefill_enabled=True, pooler_config=None, compilation_config={"level":3,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":[],"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"cudagraph_mode":0,"use_cudagraph":true,"cudagraph_num_of_warmups":1,"cudagraph_capture_sizes":[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"use_inductor_graph_partition":false,"pass_config":{},"max_capture_size":512,"local_cache_dir":null}
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore_DP0 pid=18616) INFO 11-14 02:38:59 [parallel_state.py:1208] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+(EngineCore_DP0 pid=18616) WARNING 11-14 02:39:00 [topk_topp_sampler.py:66] FlashInfer is not available. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please install FlashInfer.
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:00 [gpu_model_runner.py:2602] Starting to load model facebook/opt-125m...
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:00 [gpu_model_runner.py:2634] Loading model from scratch...
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:00 [cuda.py:366] Using Flash Attention backend on V1 engine.
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:00 [weight_utils.py:392] Using model weights format ['*.safetensors', '*.bin', '*.pt']
+Loading pt checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Loading pt checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  4.85it/s]
+Loading pt checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  4.85it/s]
+(EngineCore_DP0 pid=18616) 
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:00 [default_loader.py:267] Loading weights took 0.21 seconds
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:01 [gpu_model_runner.py:2653] Model loading took 0.2389 GiB and 0.417141 seconds
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:02 [backends.py:548] Using cache directory: /home/ubuntu/.cache/vllm/torch_compile_cache/7b37ae26a6/rank_0_0/backbone for vLLM's torch.compile
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:02 [backends.py:559] Dynamo bytecode transform time: 1.39 s
+(EngineCore_DP0 pid=18616) 
+(EngineCore_DP0 pid=18616) ================================================================================
+(EngineCore_DP0 pid=18616) Graph Summary
+(EngineCore_DP0 pid=18616) ================================================================================
+(EngineCore_DP0 pid=18616) Total nodes: 744
+(EngineCore_DP0 pid=18616) ================================================================================
+(EngineCore_DP0 pid=18616) 
+(EngineCore_DP0 pid=18616) Found 12 attention nodes to process
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_6
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_16
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_26
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_36
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_46
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_56
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_66
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_76
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_86
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_96
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_106
+(EngineCore_DP0 pid=18616) Injected mean calculation after attention output at getitem_116
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:11 [backends.py:197] Cache the graph for dynamic shape for later use
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:11 [backends.py:218] Compiling a graph for dynamic shape takes 8.01 s
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:11 [monitor.py:34] torch.compile takes 9.40 s in total
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:12 [gpu_worker.py:298] Available KV cache memory: 19.10 GiB
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:13 [kv_cache_utils.py:1087] GPU KV cache size: 556,320 tokens
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:13 [kv_cache_utils.py:1091] Maximum concurrency for 2,048 tokens per request: 271.64x
+(EngineCore_DP0 pid=18616) WARNING 11-14 02:39:13 [gpu_model_runner.py:3407] Skipping CUDA graph capture. To turn on CUDA graph capture, ensure `cudagraph_mode` was not manually set to `NONE`
+(EngineCore_DP0 pid=18616) WARNING 11-14 02:39:13 [cudagraph_dispatcher.py:106] cudagraph dispatching keys are not initialized. No cudagraph will be used.
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.000000
+(EngineCore_DP0 pid=18616) INFO 11-14 02:39:13 [core.py:210] init engine (profile, create kv cache, warmup model) took 11.85 seconds
+INFO 11-14 02:39:13 [llm.py:306] Supported_tasks: ['generate']
+Adding requests: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 638.21it/s]
+Processed prompts:   0%|                                                                                                              | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: 0.000949
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.000927
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: 0.000075
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.000173
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.000221
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: -0.000278
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: -0.000218
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: 0.000110
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.000535
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: 0.000230
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: -0.001729
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: -0.000256
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: -0.000257
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.000071
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: -0.000193
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.000585
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.001186
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: -0.001471
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: 0.000100
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: -0.000702
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.001403
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: 0.000674
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: -0.001196
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.000583
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: 0.000576
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.002037
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: -0.000055
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.000591
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.001888
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: -0.002085
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: 0.001042
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: 0.000938
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.005165
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: 0.000667
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: -0.000334
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.001392
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: -0.000877
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.000910
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: 0.000514
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.001367
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.003332
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: -0.001840
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: -0.000308
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: 0.001866
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.005337
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: 0.000431
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: 0.000194
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.000479
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: 0.000482
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.000556
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: -0.001017
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.002182
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: -0.000181
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: -0.000492
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: -0.000395
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: -0.000094
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.004078
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: -0.002203
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: -0.001146
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.002623
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: -0.001174
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.001657
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: -0.001198
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.000640
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.001126
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: 0.000019
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: 0.000222
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: 0.000055
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.004742
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: -0.000398
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: -0.000500
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.002060
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: -0.001781
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.002481
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: -0.000761
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.001493
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.001116
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: -0.000828
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: -0.002085
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: -0.000782
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.005108
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: -0.001822
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: 0.002769
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: -0.000082
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: -0.000053
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.002098
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: -0.002523
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.002104
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: 0.000188
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: 0.000691
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: -0.001386
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: -0.000356
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.006779
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: -0.001765
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: -0.001653
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.000998
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: -0.002760
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.001173
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: -0.001940
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.000069
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: -0.000569
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: 0.001773
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: -0.000703
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: -0.000092
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.009338
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: -0.002823
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: 0.000513
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.003618
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.0.self_attn.attn attention mean: -0.000732
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.1.self_attn.attn attention mean: -0.000731
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.2.self_attn.attn attention mean: -0.002882
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.3.self_attn.attn attention mean: -0.000218
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.4.self_attn.attn attention mean: -0.000375
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.5.self_attn.attn attention mean: 0.000077
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.6.self_attn.attn attention mean: -0.000397
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.7.self_attn.attn attention mean: 0.002787
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.8.self_attn.attn attention mean: -0.004208
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.9.self_attn.attn attention mean: -0.001249
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.10.self_attn.attn attention mean: -0.001934
+(EngineCore_DP0 pid=18616) [MEAN_CAPTURE] model.decoder.layers.11.self_attn.attn attention mean: 0.000459
+Processed prompts: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00,  7.43it/s, est. speed input: 44.72 toks/s, output: 74.52 toks/s]
+Prompt: 'Hello, my name is', Generated: ' Joel, my dad is my friend and we are'
