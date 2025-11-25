@@ -1,3 +1,4 @@
+from pathlib import Path
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,7 +10,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # MODEL = "facebook/opt-125m"
+    demo_dir: Path = Path("demo")
+    # model = "facebook/opt-125m"
     model: str = "meta-llama/Meta-Llama-3-8B"
     hf_token: SecretStr
 

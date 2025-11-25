@@ -4,6 +4,8 @@ import torch
 from torch import fx
 from vllm.compilation.inductor_pass import InductorPass
 
+from ..config import config
+
 VLLM_UNIFIED_ATTENTION_WITH_OUTPUT = "vllm.unified_attention_with_output.default"
 
 
@@ -67,7 +69,7 @@ class AttentionMeanPass(InductorPass):
         print(f"Total nodes: {len(list(graph.nodes))}")
         print(f"{'=' * 80}\n")
 
-        self._write_graph_to_file(graph, "graph_before.txt")
+        self._write_graph_to_file(graph, config.demo_dir / "graph_before.txt")
 
         # Keep track of nodes to avoid modifying graph while iterating
         nodes_to_process = []
@@ -92,7 +94,7 @@ class AttentionMeanPass(InductorPass):
         for attention_node in nodes_to_process:
             self._inject_mean_calculation(graph, attention_node)
 
-        self._write_graph_to_file(graph, "graph_after.txt")
+        self._write_graph_to_file(graph, config.demo_dir / "graph_after.txt")
 
     def _inject_mean_calculation(
         self, graph: torch.fx.Graph, attention_node: fx.Node
