@@ -1,3 +1,10 @@
+"""
+Post-attention injection pass for graph instrumentation.
+
+This module provides an inductor pass that intercepts and instruments
+attention operations in torch FX graphs.
+"""
+
 import operator
 
 import torch
@@ -9,27 +16,15 @@ from ..config import config
 VLLM_UNIFIED_ATTENTION_WITH_OUTPUT = "vllm.unified_attention_with_output.default"
 
 
-# Register a custom torch operation
-@torch.library.custom_op("glassbox::capture_mean", mutates_args=())
-def capture_mean_op(x: torch.Tensor, layer_name: str) -> torch.Tensor:
-    """Custom op to capture mean values."""
-    mean_val = float(x.mean().item())
-    print(f"[MEAN_CAPTURE] {layer_name} attention mean: {mean_val:.6f}")
-    return x.clone()  # Passthrough
-
-
-# Register the fake/abstract implementation for torch.compile
-@capture_mean_op.register_fake
-def _(x: torch.Tensor, layer_name: str) -> torch.Tensor:
-    return x.clone()  # "Output has same shape/dtype/device as input"
-
-
-class AttentionMeanPass(InductorPass):
+class PostAttentionInjector(InductorPass):
     """
-    A custom inductor pass that calculates the mean of attention outputs.
+    A custom inductor pass that injects instrumentation after attention operations.
 
-    This pass finds all unified_attention_with_output operations in the graph
-    and injects a mean calculation after each one.
+    This pass intercepts unified_attention_with_output operations in the compiled
+    graph and injects custom operations (e.g., mean calculation) after each one.
+    
+    The injected operations can be used for debugging, monitoring, or analysis
+    without modifying the original model code.
     """
 
     def __init__(self):
@@ -92,15 +87,15 @@ class AttentionMeanPass(InductorPass):
 
         # Process each attention node
         for attention_node in nodes_to_process:
-            self._inject_mean_calculation(graph, attention_node)
+            self._inject_instrumentation(graph, attention_node)
 
         self._write_graph_to_file(graph, config.demo_dir / "graph_after.txt")
 
-    def _inject_mean_calculation(
+    def _inject_instrumentation(
         self, graph: torch.fx.Graph, attention_node: fx.Node
     ) -> None:
         """
-        Inject mean calculation after an attention node.
+        Inject instrumentation after an attention node.
 
         Args:
             graph: The FX graph
@@ -123,7 +118,7 @@ class AttentionMeanPass(InductorPass):
             ):  # Getting index 1 (attention output)
                 attention_output_users.append(user)
 
-        # For each attention output usage, inject a mean calculation
+        # For each attention output usage, inject instrumentation
         for att_output_node in attention_output_users:
             with graph.inserting_after(att_output_node):
                 # Calculate mean via a capture node
@@ -138,9 +133,11 @@ class AttentionMeanPass(InductorPass):
                 )
 
                 print(
-                    f"Injected mean calculation after attention output at {att_output_node.name}"
+                    f"Injected instrumentation after attention output at {att_output_node.name}"
                 )
 
 
-def create_attention_mean_pass():
-    return AttentionMeanPass()
+def create_post_attention_injector():
+    """Factory function to create a PostAttentionInjector instance."""
+    return PostAttentionInjector()
+

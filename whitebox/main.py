@@ -2,8 +2,9 @@ import huggingface_hub as hf
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 
+from . import custom_ops  # noqa: F401 - Register custom ops
 from .config import config
-from .passes.mean import AttentionMeanPass
+from .passes import PostAttentionInjector
 
 
 def main():
@@ -13,9 +14,9 @@ def main():
         # this didn't work
         # inductor_passes={
         #     # make sure this is exposed in __init__.py
-        #     "attention_mean_pass": "glassbox.AttentionMeanPass"
+        #     "post_attention_injector": "glassbox.PostAttentionInjector"
         # }
-        inductor_compile_config={"post_grad_custom_post_pass": AttentionMeanPass()},
+        inductor_compile_config={"post_grad_custom_post_pass": PostAttentionInjector()},
     )
 
     hf.login(token=config.hf_token.get_secret_value())
