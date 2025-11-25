@@ -24,7 +24,7 @@ Check out `demo/sample_run.txt` for a sample run and the corresponding `graph_be
 
 The pass is registered via vLLM's [`CompilationConfig`](https://docs.vllm.ai/en/latest/api/vllm/config/#vllm.config.CompilationConfig) using the `inductor_compile_config` parameter with a custom `post_grad_custom_post_pass`.
 
-See `glassbox/passes/mean.py` for the FX graph transformation logic.
+See `glassbox/passes/injector.py` for the FX graph transformation logic.
 
 ## Dev setup
 There's no pyproject.toml file yet because I set this up manually for now:
