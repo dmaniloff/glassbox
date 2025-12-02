@@ -1,3 +1,4 @@
+import torch
 import huggingface_hub as hf
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
@@ -8,6 +9,9 @@ from .passes import PostAttentionInjector
 
 
 def main():
+    # Use the capture_mean custom op for instrumentation
+    custom_op = torch.ops.glassbox.capture_mean.default
+    
     compilation_config = CompilationConfig(
         splitting_ops=[],
         cudagraph_mode="NONE",
@@ -16,7 +20,7 @@ def main():
         #     # make sure this is exposed in __init__.py
         #     "post_attention_injector": "glassbox.PostAttentionInjector"
         # }
-        inductor_compile_config={"post_grad_custom_post_pass": PostAttentionInjector()},
+        inductor_compile_config={"post_grad_custom_post_pass": PostAttentionInjector(custom_op)},
     )
 
     hf.login(token=config.hf_token.get_secret_value())

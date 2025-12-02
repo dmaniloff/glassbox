@@ -6,6 +6,7 @@ attention operations in torch FX graphs.
 """
 
 import operator
+from typing import Callable
 
 import torch
 from torch import fx
@@ -21,14 +22,20 @@ class PostAttentionInjector(InductorPass):
     A custom inductor pass that injects instrumentation after attention operations.
 
     This pass intercepts unified_attention_with_output operations in the compiled
-    graph and injects custom operations (e.g., mean calculation) after each one.
+    graph and injects custom operations after each one.
     
     The injected operations can be used for debugging, monitoring, or analysis
     without modifying the original model code.
+    
+    Args:
+        custom_op: A callable (typically a torch.ops operation) to inject after
+                   attention outputs. Should accept (tensor, layer_name) and return
+                   a tensor with the same shape/dtype/device as the input.
     """
 
-    def __init__(self):
+    def __init__(self, custom_op: Callable):
         super().__init__()
+        self.custom_op = custom_op
 
     def _write_graph_to_file(self, graph: torch.fx.Graph, filename: str) -> None:
         """
@@ -121,15 +128,15 @@ class PostAttentionInjector(InductorPass):
         # For each attention output usage, inject instrumentation
         for att_output_node in attention_output_users:
             with graph.inserting_after(att_output_node):
-                # Calculate mean via a capture node
-                capture_node = graph.call_function(
-                    torch.ops.glassbox.capture_mean.default,
+                # Inject the custom operation
+                instrumentation_node = graph.call_function(
+                    self.custom_op,
                     args=(att_output_node, layer_name),
                     kwargs={},
                 )
 
                 att_output_node.replace_all_uses_with(
-                    capture_node, delete_user_cb=lambda n: n is not capture_node
+                    instrumentation_node, delete_user_cb=lambda n: n is not instrumentation_node
                 )
 
                 print(
@@ -137,7 +144,17 @@ class PostAttentionInjector(InductorPass):
                 )
 
 
-def create_post_attention_injector():
-    """Factory function to create a PostAttentionInjector instance."""
-    return PostAttentionInjector()
+def create_post_attention_injector(custom_op: Callable):
+    """
+    Factory function to create a PostAttentionInjector instance.
+    
+    Args:
+        custom_op: A callable (typically a torch.ops operation) to inject after
+                   attention outputs. Should accept (tensor, layer_name) and return
+                   a tensor with the same shape/dtype/device as the input.
+                   
+    Returns:
+        A configured PostAttentionInjector instance.
+    """
+    return PostAttentionInjector(custom_op)
 
