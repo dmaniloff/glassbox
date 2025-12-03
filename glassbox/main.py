@@ -1,26 +1,75 @@
-import torch
+"""Glassbox: Graph instrumentation for vLLM attention analysis.
+
+Usage:
+    glassbox [--injector=<type>] [--operation=<op>]
+    glassbox -h | --help
+
+Options:
+    -h --help           Show this help message.
+    -i --injector=<type>  Injector type: "post" or "before" [default: post].
+    -o --operation=<op>   Operation type: "mean" or "qkv" [default: mean].
+
+Notes:
+    - "post" injector with "mean" op: captures attention output mean values
+    - "before" injector with "qkv" op: captures Q, K, V tensors before attention
+    - Other combinations may fail due to signature mismatches
+"""
+
 import huggingface_hub as hf
+import torch
+from docopt import docopt
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 
 from . import custom_ops  # noqa: F401 - Register custom ops
 from .config import config
-from .passes import PostAttentionInjector
+from .passes import BeforeAttentionInjector, PostAttentionInjector
+
+INJECTORS = {
+    "post": PostAttentionInjector,
+    "before": BeforeAttentionInjector,
+}
+
+OPERATIONS = {
+    "mean": torch.ops.glassbox.capture_mean.default,
+    "qkv": torch.ops.glassbox.capture_qkv.default,
+}
 
 
 def main():
-    # Use the capture_mean custom op for instrumentation
-    custom_op = torch.ops.glassbox.capture_mean.default
-    
+    args = docopt(__doc__)
+
+    injector_type = args["--injector"]
+    operation_type = args["--operation"]
+
+    if injector_type not in INJECTORS:
+        raise ValueError(
+            f"Unknown injector: {injector_type}. Choose from: {list(INJECTORS.keys())}"
+        )
+    if operation_type not in OPERATIONS:
+        raise ValueError(
+            f"Unknown operation: {operation_type}. Choose from: {list(OPERATIONS.keys())}"
+        )
+
+    # Warn about potentially incompatible combinations
+    if injector_type == "post" and operation_type == "qkv":
+        print(
+            "Warning: 'post' injector expects single tensor op, 'qkv' returns tuple - may fail"
+        )
+    if injector_type == "before" and operation_type == "mean":
+        print(
+            "Warning: 'before' injector expects (q,k,v) -> (q,k,v) op, 'mean' has different signature - may fail"
+        )
+
+    injector_cls = INJECTORS[injector_type]
+    custom_op = OPERATIONS[operation_type]
+
+    print(f"Using injector: {injector_type}, operation: {operation_type}")
+
     compilation_config = CompilationConfig(
         splitting_ops=[],
         cudagraph_mode="NONE",
-        # this didn't work
-        # inductor_passes={
-        #     # make sure this is exposed in __init__.py
-        #     "post_attention_injector": "glassbox.PostAttentionInjector"
-        # }
-        inductor_compile_config={"post_grad_custom_post_pass": PostAttentionInjector(custom_op)},
+        inductor_compile_config={"post_grad_custom_post_pass": injector_cls(custom_op)},
     )
 
     hf.login(token=config.hf_token.get_secret_value())
