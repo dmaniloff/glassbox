@@ -1,12 +1,13 @@
 """
-Post-attention injection pass for graph instrumentation.
+Attention injection passes for graph instrumentation.
 
-This module provides an inductor pass that intercepts and instruments
+This module provides inductor passes that intercept and instrument
 attention operations in torch FX graphs.
 """
 
 import operator
-from typing import Callable
+from abc import abstractmethod
+from typing import Callable, List
 
 import torch
 from torch import fx
@@ -17,20 +18,14 @@ from ..config import config
 VLLM_UNIFIED_ATTENTION_WITH_OUTPUT = "vllm.unified_attention_with_output.default"
 
 
-class PostAttentionInjector(InductorPass):
+class BaseAttentionInjector(InductorPass):
     """
-    A custom inductor pass that injects instrumentation after attention operations.
+    Base class for attention injectors.
 
-    This pass intercepts unified_attention_with_output operations in the compiled
-    graph and injects custom operations after each one.
-
-    The injected operations can be used for debugging, monitoring, or analysis
-    without modifying the original model code.
+    Provides common functionality for finding attention nodes and writing graphs.
 
     Args:
-        custom_op: A callable (typically a torch.ops operation) to inject after
-                   attention outputs. Should accept (tensor, layer_name) and return
-                   a tensor with the same shape/dtype/device as the input.
+        custom_op: A callable (typically a torch.ops operation) to inject.
     """
 
     def __init__(self, custom_op: Callable):
@@ -47,7 +42,6 @@ class PostAttentionInjector(InductorPass):
         """
         with open(filename, "w") as f:
             try:
-                # mimic graph.print_tabular but print to a file
                 from tabulate import tabulate
 
                 node_specs = [
@@ -60,39 +54,60 @@ class PostAttentionInjector(InductorPass):
                     )
                 )
             except ImportError:
-                # Fallback to string representation
                 f.write(str(graph))
 
+    def _find_attention_nodes(self, graph: torch.fx.Graph) -> List[fx.Node]:
+        """
+        Find all unified_attention_with_output nodes in the graph.
+
+        Args:
+            graph: The FX graph to search
+
+        Returns:
+            List of attention nodes found
+        """
+        nodes = []
+        for node in graph.nodes:
+            if (
+                node.op == "call_function"
+                and node.target == torch.ops.higher_order.auto_functionalized
+            ):
+                if (
+                    node.args
+                    and str(node.args[0]) == VLLM_UNIFIED_ATTENTION_WITH_OUTPUT
+                ):
+                    nodes.append(node)
+        return nodes
+
+    @abstractmethod
+    def _inject_instrumentation(
+        self, graph: torch.fx.Graph, attention_node: fx.Node
+    ) -> None:
+        """Inject instrumentation for a single attention node."""
+        pass
+
+
+class PostAttentionInjector(BaseAttentionInjector):
+    """
+    Injects instrumentation after attention operations.
+
+    Args:
+        custom_op: Should accept (tensor, layer_name) and return
+                   a tensor with the same shape/dtype/device.
+    """
+
     def __call__(self, graph: torch.fx.Graph) -> None:
-        # Print a summary of the graph
         print(f"\n{'=' * 80}")
-        print("Graph Summary")
+        print("PostAttentionInjector - Graph Summary")
         print(f"{'=' * 80}")
         print(f"Total nodes: {len(list(graph.nodes))}")
         print(f"{'=' * 80}\n")
 
         self._write_graph_to_file(graph, config.demo_dir / "graph_before.txt")
 
-        # Keep track of nodes to avoid modifying graph while iterating
-        nodes_to_process = []
-
-        # Find all unified_attention_with_output nodes
-        # How model-specific is this?
-        for node in graph.nodes:
-            if (
-                node.op == "call_function"
-                and node.target == torch.ops.higher_order.auto_functionalized
-            ):
-                # Check if it's the attention operation
-                if (
-                    node.args
-                    and str(node.args[0]) == VLLM_UNIFIED_ATTENTION_WITH_OUTPUT
-                ):
-                    nodes_to_process.append(node)
-
+        nodes_to_process = self._find_attention_nodes(graph)
         print(f"Found {len(nodes_to_process)} attention nodes to process")
 
-        # Process each attention node
         for attention_node in nodes_to_process:
             self._inject_instrumentation(graph, attention_node)
 
@@ -160,49 +175,14 @@ def create_post_attention_injector(custom_op: Callable):
     return PostAttentionInjector(custom_op)
 
 
-class BeforeAttentionInjector(InductorPass):
+class BeforeAttentionInjector(BaseAttentionInjector):
     """
-    A custom inductor pass that injects instrumentation before attention operations.
-
-    This pass intercepts unified_attention_with_output operations in the compiled
-    graph and injects custom operations before each one, with access to Q, K, V tensors.
-
-    The injected operations can be used for debugging, monitoring, or analysis
-    of the query, key, and value tensors before attention is computed.
+    Injects instrumentation before attention operations with access to Q, K, V.
 
     Args:
-        custom_op: A callable (typically a torch.ops operation) to inject before
-                   attention. Should accept (q, k, v, layer_name) and return
+        custom_op: Should accept (q, k, v, layer_name) and return
                    a tuple of tensors (q, k, v) with the same shapes/dtypes/devices.
     """
-
-    def __init__(self, custom_op: Callable):
-        super().__init__()
-        self.custom_op = custom_op
-
-    def _write_graph_to_file(self, graph: torch.fx.Graph, filename: str) -> None:
-        """
-        Write the graph to a file in tabular format if tabulate is available.
-
-        Args:
-            graph: The FX graph to write
-            filename: The output filename
-        """
-        with open(filename, "w") as f:
-            try:
-                from tabulate import tabulate
-
-                node_specs = [
-                    [n.op, n.name, n.target, n.args, n.kwargs] for n in graph.nodes
-                ]
-                f.write(
-                    tabulate(
-                        node_specs,
-                        headers=["opcode", "name", "target", "args", "kwargs"],
-                    )
-                )
-            except ImportError:
-                f.write(str(graph))
 
     def __call__(self, graph: torch.fx.Graph) -> None:
         print(f"\n{'=' * 80}")
@@ -213,24 +193,9 @@ class BeforeAttentionInjector(InductorPass):
 
         self._write_graph_to_file(graph, config.demo_dir / "graph_before_qkv.txt")
 
-        # Keep track of nodes to avoid modifying graph while iterating
-        nodes_to_process = []
-
-        # Find all unified_attention_with_output nodes
-        for node in graph.nodes:
-            if (
-                node.op == "call_function"
-                and node.target == torch.ops.higher_order.auto_functionalized
-            ):
-                if (
-                    node.args
-                    and str(node.args[0]) == VLLM_UNIFIED_ATTENTION_WITH_OUTPUT
-                ):
-                    nodes_to_process.append(node)
-
+        nodes_to_process = self._find_attention_nodes(graph)
         print(f"Found {len(nodes_to_process)} attention nodes to process")
 
-        # Process each attention node
         for attention_node in nodes_to_process:
             self._inject_instrumentation(graph, attention_node)
 

@@ -3,6 +3,7 @@ Custom compilation passes for graph instrumentation.
 """
 
 from .injector import (
+    BaseAttentionInjector,
     BeforeAttentionInjector,
     PostAttentionInjector,
     create_before_attention_injector,
@@ -10,6 +11,7 @@ from .injector import (
 )
 
 __all__ = [
+    "BaseAttentionInjector",
     "BeforeAttentionInjector",
     "PostAttentionInjector",
     "create_before_attention_injector",
