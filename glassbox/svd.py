@@ -91,9 +91,35 @@ def matvec_B(x, d_q_inv_sqrt, d_k_inv_sqrt):
 
 def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
     """
-    Standard randomized SVD for a (dim x dim) linear operator M given matvecs.
+    Matrix-free Randomized SVD for a (dim x dim) linear operator given matvecs.
 
-    Computes a rank-k approximation M ≈ U diag(S) V^T.
+    Computes a rank-k approximation M ≈ U diag(S) V^T without ever forming
+    the full L×L matrix. The key insight is that for S = QK^T, we can compute
+    Sv = Q(K^T v) and S^T u = K(Q^T u) in O(Ld) each, avoiding the O(L^2)
+    cost of materializing S. The caller wraps this into the matvec / matvec_t
+    callables, making this routine agnostic to the operator's internal structure.
+
+    Algorithm (Halko, Martinsson, Tropp 2011):
+      1. Draw a random Gaussian test matrix Ω of shape (dim, k+p).
+      2. Form Y = M Ω via k+p matvec calls.
+      3. (Optional) Run q power iterations for better spectral separation.
+      4. Compute an orthonormal basis Q for range(Y).
+      5. Project: B = Q^T M  (computed via matvec_t on columns of Q).
+      6. SVD of the small (k+p)×dim matrix B, then lift U back.
+
+    Args:
+        matvec:   v -> M v,   callable on vectors of length `dim`.
+        matvec_t: u -> M^T u, callable on vectors of length `dim`.
+        dim: Ambient dimension (L, the sequence length).
+        k:   Number of singular triplets to return.
+        p:   Oversampling parameter (default 5).
+        q:   Number of power iterations (default 2).
+        device: Torch device.
+
+    Returns:
+        U: (dim, k) left singular vectors.
+        S: (k,)    singular values (descending).
+        V: (dim, k) right singular vectors.
     """
     # Step 1: random test matrix Ω
     Omega = torch.randn(dim, k + p, device=device)
@@ -197,6 +223,30 @@ def _principal_angles(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str):
     """
     Compute top-k singular triplets using Lanczos on B = M^T M.
+
+    Like randomized_svd, this never forms the L×L matrix. For S = QK^T the
+    crucial observation is that Sv = Q(K^T v) costs only O(Ld) — two
+    thin matmuls through the L×d factors — so each Lanczos step is O(Ld)
+    rather than O(L^2).
+
+    Lanczos builds a Krylov subspace {v, Bv, B^2 v, ...} for the symmetric
+    operator B = M^T M using the supplied matvec / matvec_t pair. After
+    `iters` steps it eigen-decomposes the resulting small tridiagonal matrix
+    to obtain Ritz values λ_i ≈ σ_i^2 and Ritz vectors (right singular
+    vectors). Left singular vectors are recovered via u_i = M v_i / σ_i.
+
+    Args:
+        matvec:   v -> M v,   callable on vectors of length `dim`.
+        matvec_t: u -> M^T u, callable on vectors of length `dim`.
+        dim:   Ambient dimension (L, the sequence length).
+        k:     Number of singular triplets to return.
+        iters: Number of Lanczos iterations.
+        device: Torch device.
+
+    Returns:
+        U: (dim, k) left singular vectors.
+        S: (k,)    singular values (descending).
+        V: (dim, k) right singular vectors.
     """
     evals, ritz = lanczos(
         operator=lambda v: matvec_t(matvec(v)),
