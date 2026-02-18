@@ -6,20 +6,21 @@ Usage:
     1. Import this module (triggers @register_backend)
     2. Launch vLLM with attention_backend="CUSTOM", enforce_eager=True
 
-Environment variables:
+Configuration via env vars or .env file (see SVDConfig):
     GLASSBOX_SVD_INTERVAL  - run SVD every N decode steps (default: 32)
     GLASSBOX_SVD_RANK      - number of singular values to compute (default: 4)
     GLASSBOX_SVD_METHOD    - "randomized" or "lanczos" (default: "randomized")
-    GLASSBOX_SVD_HEADS     - comma-separated head indices (default: "0")
+    GLASSBOX_SVD_HEADS     - JSON list of head indices (default: '[0]', e.g. '[0,1,2]')
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     register_backend,
@@ -34,10 +35,22 @@ from glassbox.svd import matvec_S, matvec_ST, randomized_svd, svd_via_lanczos
 
 logger = logging.getLogger(__name__)
 
-SVD_INTERVAL = int(os.environ.get("GLASSBOX_SVD_INTERVAL", "32"))
-SVD_RANK = int(os.environ.get("GLASSBOX_SVD_RANK", "4"))
-SVD_METHOD = os.environ.get("GLASSBOX_SVD_METHOD", "randomized")
-SVD_HEADS = [int(h) for h in os.environ.get("GLASSBOX_SVD_HEADS", "0").split(",")]
+
+class SVDConfig(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="GLASSBOX_SVD_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    interval: int = 32
+    rank: int = 4
+    method: Literal["randomized", "lanczos"] = "randomized"
+    heads: list[int] = [0]  # JSON list in env, e.g. GLASSBOX_SVD_HEADS='[0,1,2]'
+
+
+svd_config = SVDConfig()
 
 
 @dataclass
@@ -120,8 +133,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         state.q_buffer.append(query[q_start:q_end].detach().clone())
         state.step += 1
 
-        # 4. Every SVD_INTERVAL steps, extract K and run SVD
-        if state.step % SVD_INTERVAL == 0:
+        # 4. Every svd_config.interval steps, extract K and run SVD
+        if state.step % svd_config.interval == 0:
             try:
                 self._run_svd(layer_name, state, kv_cache, attn_metadata)
             except Exception:
@@ -196,7 +209,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         Q_all = Q_all[:L]
         K_all = K_all[:L]
 
-        for head_idx in SVD_HEADS:
+        for head_idx in svd_config.heads:
             if head_idx >= Q_all.shape[1]:
                 continue
 
@@ -210,9 +223,9 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             matvec = lambda v, Q=Qh, K=Kh: matvec_S(Q, K, v)
             matvec_t = lambda u, Q=Qh, K=Kh: matvec_ST(Q, K, u)
 
-            k = min(SVD_RANK, L - 1)
+            k = min(svd_config.rank, L - 1)
 
-            if SVD_METHOD == "lanczos":
+            if svd_config.method == "lanczos":
                 _, S, _ = svd_via_lanczos(
                     matvec=matvec,
                     matvec_t=matvec_t,

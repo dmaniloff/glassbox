@@ -25,13 +25,15 @@ GLASSBOX_SVD_INTERVAL=16 GLASSBOX_SVD_RANK=2 \
 
 #### Configuration
 
+Configuration is managed by the `SVDConfig` pydantic-settings model in `glassbox/backends/svd_backend.py`. Values can be set via environment variables or a `.env` file.
+
 | Environment variable | Description | Default |
 |---|---|---|
 | `GLASSBOX_SVD_INTERVAL` | Run SVD every N decode steps | `32` |
 | `GLASSBOX_SVD_RANK` | Number of singular values to compute | `4` |
 | `GLASSBOX_SVD_METHOD` | `"randomized"` or `"lanczos"` | `"randomized"` |
-| `GLASSBOX_SVD_HEADS` | Comma-separated head indices | `"0"` |
-| `GLASSBOX_MODEL` | HuggingFace model name | `"facebook/opt-125m"` |
+| `GLASSBOX_SVD_HEADS` | JSON list of head indices, e.g. `'[0,1,2]'` | `[0]` |
+| `GLASSBOX_MODEL` | HuggingFace model name (runner only) | `"facebook/opt-125m"` |
 
 #### How it works
 

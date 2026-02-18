@@ -133,11 +133,11 @@ Plan: Custom vLLM Attention Backend for Matrix-Free SVD
  - Call randomized_svd or svd_via_lanczos from glassbox.svd
  - Log singular values via Python logging
 
- Configuration via env vars:
- - WHITEBOX_SVD_INTERVAL — run SVD every N decode steps (default: 32)
- - WHITEBOX_SVD_RANK — number of singular values (default: 4)
- - WHITEBOX_SVD_METHOD — "randomized" or "lanczos" (default: "randomized")
- - WHITEBOX_SVD_HEADS — comma-separated head indices (default: "0")
+ Configuration — managed by the `SVDConfig` pydantic-settings model. Values can be set via environment variables (prefix `GLASSBOX_SVD_`) or a `.env` file:
+ - GLASSBOX_SVD_INTERVAL — run SVD every N decode steps (default: 32)
+ - GLASSBOX_SVD_RANK — number of singular values (default: 4)
+ - GLASSBOX_SVD_METHOD — "randomized" or "lanczos" (default: "randomized")
+ - GLASSBOX_SVD_HEADS — JSON list of head indices, e.g. '[0,1,2]' (default: [0])
 
  File 2: glassbox/svd_backend_runner.py
 

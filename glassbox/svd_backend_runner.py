@@ -2,25 +2,23 @@
 Entry-point script that launches vLLM with the custom SVD attention backend.
 
 Usage:
-    GLASSBOX_SVD_INTERVAL=16 GLASSBOX_SVD_RANK=2 python -m glassbox.svd_backend_runner
+    python -m glassbox.svd_backend_runner [OPTIONS]
+    python -m glassbox.svd_backend_runner --interval 16 --rank 2 --heads 0 1 2
+    python -m glassbox.svd_backend_runner --model facebook/opt-350m --method lanczos
 
-Environment variables (see glassbox.backends.svd_backend.py):
-    GLASSBOX_SVD_INTERVAL  - run SVD every N decode steps (default: 32)
-    GLASSBOX_SVD_RANK      - number of singular values (default: 4)
-    GLASSBOX_SVD_METHOD    - "randomized" or "lanczos" (default: "randomized")
-    GLASSBOX_SVD_HEADS     - comma-separated head indices (default: "0")
-    GLASSBOX_MODEL         - HuggingFace model name (default: "facebook/opt-125m")
+Options can also be set via environment variables (prefix GLASSBOX_SVD_)
+or a .env file. CLI args take precedence.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 
+import click
 import vllm
 
 # Import triggers @register_backend(AttentionBackendEnum.CUSTOM)
-import glassbox.backends.svd_backend  # noqa: F401
+import glassbox.backends.svd_backend as svd_mod
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,41 +26,97 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MODEL = os.environ.get("GLASSBOX_MODEL", "facebook/opt-125m")
 
+@click.command()
+@click.option(
+    "--model",
+    default="facebook/opt-125m",
+    show_default=True,
+    help="HuggingFace model name.",
+)
+@click.option(
+    "--interval",
+    type=int,
+    default=None,
+    help="Run SVD every N decode steps. [default: from config (32)]",
+)
+@click.option(
+    "--rank",
+    type=int,
+    default=None,
+    help="Number of singular values to compute. [default: from config (4)]",
+)
+@click.option(
+    "--method",
+    type=click.Choice(["randomized", "lanczos"]),
+    default=None,
+    help="SVD algorithm. [default: from config (randomized)]",
+)
+@click.option(
+    "--heads",
+    type=int,
+    multiple=True,
+    help="Head indices to analyze (repeatable). [default: from config ([0])]",
+)
+@click.option(
+    "--max-tokens",
+    type=int,
+    default=64,
+    show_default=True,
+    help="Maximum tokens to generate.",
+)
+@click.option(
+    "--prompt",
+    default="The future of artificial intelligence is",
+    show_default=True,
+    help="Input prompt.",
+)
+def main(
+    model: str,
+    interval: int | None,
+    rank: int | None,
+    method: str | None,
+    heads: tuple[int, ...],
+    max_tokens: int,
+    prompt: str,
+) -> None:
+    """Launch vLLM with the custom SVD attention backend."""
+    # CLI args override the pydantic config (which reads env vars / .env)
+    config = svd_mod.svd_config
+    if interval is not None:
+        config.interval = interval
+    if rank is not None:
+        config.rank = rank
+    if method is not None:
+        config.method = method
+    if heads:
+        config.heads = list(heads)
 
-def main() -> None:
     logger.info("Creating vLLM engine with CUSTOM attention backend")
-    logger.info("Model: %s", MODEL)
+    logger.info("Model: %s", model)
     logger.info(
         "SVD config: interval=%s rank=%s method=%s heads=%s",
-        glassbox.backends.svd_backend.SVD_INTERVAL,
-        glassbox.backends.svd_backend.SVD_RANK,
-        glassbox.backends.svd_backend.SVD_METHOD,
-        glassbox.backends.svd_backend.SVD_HEADS,
+        config.interval,
+        config.rank,
+        config.method,
+        config.heads,
     )
 
     llm = vllm.LLM(
-        model=MODEL,
+        model=model,
         attention_backend="CUSTOM",
         enforce_eager=True,
     )
 
-    prompts = [
-        "The future of artificial intelligence is",
-    ]
-
     logger.info("Starting generation...")
     outputs = llm.generate(
-        prompts,
-        vllm.SamplingParams(temperature=0.8, top_p=0.95, max_tokens=64),
+        [prompt],
+        vllm.SamplingParams(temperature=0.8, top_p=0.95, max_tokens=max_tokens),
     )
 
     for output in outputs:
-        prompt = output.prompt
-        generated = output.outputs[0].text
-        logger.info("Prompt: %s", prompt)
-        logger.info("Generated: %s", generated)
+        logger.info("Prompt: %s", output.prompt)
+        logger.info("Generated: %s", output.outputs[0].text)
 
 
 if __name__ == "__main__":
