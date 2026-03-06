@@ -163,6 +163,149 @@ Plan: Custom vLLM Attention Backend for Matrix-Free SVD
  Expected: normal generation output, plus log lines like:
  [SVD] model.layers.0.self_attn head=0 step=16 L=22 top-2 singular values: [166.75, 84.70]
 
+## Complexity Analysis
+
+Notation:
+- **L** — sequence length (prompt + generated tokens so far)
+- **d** — head dimension (e.g. 64)
+- **H** — number of query heads
+- **H_kv** — number of KV heads (H_kv ≤ H; for GQA, H_kv < H)
+- **k** — desired SVD rank
+- **p** — oversampling parameter (randomized SVD, default 5)
+- **q** — power iterations (randomized SVD, default 2)
+- **n** — Lanczos iterations (default max(2k+2, 20))
+- **|heads|** — number of monitored heads
+- **N** — SVD interval (every N steps)
+
+### Per-step overhead (every forward pass)
+
+Q accumulation (`svd_backend.py:134`):
+```python
+state.q_buffer.append(query[q_start:q_end].detach().clone())
+```
+- **Time**: O(query_len · H · d) — clone of the query slice for sequence 0
+- **Memory**: O(L · H · d) cumulative — the buffer grows by `query_len` tokens each step
+
+This runs on *every* forward pass, not just at SVD intervals. During decode, query_len = 1, so the per-step cost is O(H · d). During prefill, query_len = prompt_len.
+
+Note: we clone all H heads even if we only monitor a subset. The buffer stores the full query tensor because the set of monitored heads may change between runs.
+
+### K extraction (every N steps)
+
+`_extract_k_from_cache` (`svd_backend.py:148-187`):
+```python
+key_cache, _ = kv_cache.unbind(dim=1)       # view — no allocation
+k_blocks = key_cache[block_indices]          # gather — allocates [blocks, block_size, H_kv, d]
+k_flat = k_blocks.reshape(...)              # view of contiguous gather
+return k_flat[:seq_len].float()             # .float() — allocates [L, H_kv, d] if not already fp32
+```
+- **Time**: O(L · H_kv · d) — dominated by the gather and float cast
+- **Memory**: O(L · H_kv · d) transient — two allocations (gather + cast), freed after SVD completes
+
+### Q concatenation (every N steps)
+
+`_run_svd` (`svd_backend.py:197`):
+```python
+Q_all = torch.cat(state.q_buffer, dim=0).float()
+```
+- **Time**: O(L · H · d) — concatenate buffer + float cast
+- **Memory**: O(L · H · d) transient — freed after SVD completes
+
+### SVD computation (every N steps, per head)
+
+#### Randomized SVD
+
+Matvec counting in `randomized_svd` (`svd.py:92-153`):
+
+| Phase | matvec calls | matvec_t calls | Code reference |
+|-------|-------------|----------------|----------------|
+| Initial Y = MΩ | k+p | 0 | `svd.py:128` |
+| Power iterations (q rounds) | q·(k+p) | q·(k+p) | `svd.py:131-135` |
+| Projection B = Q^T M | 0 | k+p | `svd.py:142-144` |
+| **Total** | **(k+p)(q+1)** | **(k+p)(q+1)** | |
+
+Grand total: **(k+p)(2q+2)** matvec calls. Each matvec is two thin matmuls through [L, d] factors (`svd.py:13-19`):
+```
+K^T v → [d]    cost O(Ld)
+Q z   → [L]    cost O(Ld)
+```
+
+Additional linear algebra:
+- QR decomposition of Y [L × (k+p)]: O(L · (k+p)²)
+- SVD of small B [(k+p) × L]: O((k+p)² · L)
+
+Both are dominated by the matvec cost when d·(2q+2) > (k+p), which holds in practice (d=64, 2q+2=6 → 384 >> k+p=9).
+
+**Time per head**: O(Ld · (k+p) · (2q+2))
+
+**Working memory**: Ω, Y, Z, Q each [L × (k+p)], B [(k+p) × L] → O(L · (k+p))
+
+With defaults k=4, p=5, q=2: **(k+p)(2q+2) = 9 × 6 = 54 matvec calls**, each costing 2Ld FLOPs.
+
+#### Lanczos SVD
+
+Matvec counting in `lanczos` + `svd_via_lanczos` (`svd.py:156-271`):
+
+| Phase | Operations | Code reference |
+|-------|-----------|----------------|
+| Lanczos iterations (n steps) | n operator calls, each = matvec_t(matvec(v)) = 2 matvecs | `svd.py:175` |
+| Reorthogonalization at step j | j dot products + j axpy ops, each O(L) | `svd.py:180-182` |
+| Recover U (k vectors) | k matvec calls | `svd.py:268-269` |
+
+- **Matvec calls**: 2n + k
+- **Reorthogonalization**: Σ_{j=1}^{n} O(L·j) = O(L · n²/2)
+- **Tridiagonal eigen**: O(n²) — negligible
+- **Ritz vector recovery** (V = stack(Q) @ evecs): O(L · n²) — matrix multiply [L × n] @ [n × n]
+
+**Time per head**: O(Ld · (2n + k) + L · n²)
+
+**Working memory**: n Lanczos vectors each [L], tridiagonal T [n × n], V [L × n] → O(L · n)
+
+With defaults k=4, n=max(2k+2, 20)=20: **2·20 + 4 = 44 matvec calls** + O(L · 400) reorthogonalization.
+
+The reorthogonalization term O(L · n²) is comparable to the matvec term O(Ld · (2n+k)) when n ≈ d · (2n+k)/n². With d=64, k=4, n=20: Ld·44 vs L·400, so matvecs dominate by ~7x. At larger n the reorthogonalization would start to matter.
+
+### Total per-snapshot cost (all heads)
+
+The SVD loop in `_run_svd` (`svd_backend.py:213-246`) runs independently for each monitored head. Q and K extraction happen once; SVD runs |heads| times.
+
+### Summary table
+
+| Component | Time | Memory | Frequency |
+|-----------|------|--------|-----------|
+| Q accumulation | O(H·d) per decode step | O(L·H·d) cumulative | Every step |
+| K extraction | O(L·H_kv·d) | O(L·H_kv·d) transient | Every N steps |
+| Q concatenation | O(L·H·d) | O(L·H·d) transient | Every N steps |
+| **Randomized SVD** | **O(Ld·(k+p)·(2q+2)·\|heads\|)** | O(L·(k+p)) working set | Every N steps |
+| **Lanczos SVD** | **O((Ld·(2n+k) + L·n²)·\|heads\|)** | O(L·n) working set | Every N steps |
+| Small matrix SVD (rand.) | O((k+p)²·L·\|heads\|) | O((k+p)²) | Every N steps |
+| Tridiagonal eigen (Lanczos) | O(n²·\|heads\|) | O(n²) | Every N steps |
+
+### Concrete numbers (OPT-125m defaults)
+
+Model: H=12, H_kv=12, d=64. Config: k=4, p=5, q=2, n=20, |heads|=1, N=32.
+
+At L=70 (the final snapshot in our sample run):
+
+| Component | FLOPs | Memory |
+|-----------|-------|--------|
+| Q accumulation (per decode step) | 12 × 64 = 768 | 768 bytes (fp16) |
+| Q buffer (cumulative) | — | 70 × 12 × 64 × 2 = 105 KB (fp16) |
+| K extraction | 70 × 12 × 64 = 53,760 | 70 × 12 × 64 × 4 = 210 KB (fp32) |
+| Q concatenation + cast | 70 × 12 × 64 = 53,760 | 70 × 12 × 64 × 4 = 210 KB (fp32) |
+| Randomized SVD (1 head) | 54 × 2 × 70 × 64 = 483,840 | 70 × 9 × 4 = 2.5 KB |
+
+At this scale the overhead is negligible. At L=4096 with a 32-layer, 32-head model monitoring all heads:
+
+| Component | Memory |
+|-----------|--------|
+| Q buffer (per layer) | 4096 × 32 × 64 × 2 = 16 MB |
+| Q buffer (32 layers) | **512 MB** |
+| K extraction (transient) | 4096 × 32 × 64 × 4 = 32 MB |
+| Randomized SVD (32 heads) | 54 × 2 × 4096 × 64 × 32 = 906M FLOPs |
+
+The Q buffer is the dominant memory cost and scales as O(layers × L × H × d). For production use with long contexts, monitoring a subset of layers would be necessary.
+
  ## Sample Run
 
  Run details:
