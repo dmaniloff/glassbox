@@ -129,9 +129,9 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
 
     # Optional: power iterations to improve spectral separation.
     for _ in range(q):
-        Z = torch.stack([matvec_t(Y[:, i]) for i in range(Y.shape[1])], dim=1)  # M^T Y
+        Z = torch.stack([matvec_t(Y[:, i]) for i in range(k + p)], dim=1)  # M^T Y
         Y = torch.stack(
-            [matvec(Z[:, i]) for i in range(Z.shape[1])], dim=1
+            [matvec(Z[:, i]) for i in range(k + p)], dim=1
         )  # M (M^T Y)
 
     # Step 3: orthonormal basis Q for range(Y)
@@ -140,7 +140,7 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
     # Step 4: form small matrix B = Q^T M  (shape (k+p, dim))
     # We can compute B via B^T = M^T Q, using matvec_t.
     Bt = torch.stack(
-        [matvec_t(Q[:, i]) for i in range(Q.shape[1])], dim=1
+        [matvec_t(Q[:, i]) for i in range(k + p)], dim=1
     )  # (dim, k+p)
     B = Bt.T  # (k+p, dim)
 
