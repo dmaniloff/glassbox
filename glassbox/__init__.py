@@ -2,7 +2,10 @@
 Glassbox - A library for instrumenting and inspecting torch graph compilation.
 """
 
-from .passes import custom_ops  # noqa: F401 - Import to register custom ops
-from .passes import PostAttentionInjector, create_post_attention_injector
+from .passes import (  # noqa: F401
+    PostAttentionInjector,
+    create_post_attention_injector,
+    custom_ops,
+)
 
 __all__ = ["PostAttentionInjector", "create_post_attention_injector"]

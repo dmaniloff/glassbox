@@ -1,8 +1,8 @@
 """Glassbox: Graph instrumentation for vLLM attention analysis.
 
 Usage:
-    glassbox [--injector=<type>] [--operation=<op>]
-    glassbox -h | --help
+    python -m glassbox.passes.runner [--injector=<type>] [--operation=<op>]
+    python -m glassbox.passes.runner -h | --help
 
 Options:
     -h --help           Show this help message.
@@ -13,7 +13,13 @@ Notes:
     - "post" injector with "mean" op: captures attention output mean values
     - "before" injector with "qkv" op: captures Q, K, V tensors before attention
     - Other combinations may fail due to signature mismatches
+
+Configuration via environment variables or .env file:
+    GLASSBOX_MODEL     - HuggingFace model name (default: meta-llama/Meta-Llama-3-8B)
+    HF_TOKEN           - HuggingFace API token (required)
 """
+
+import os
 
 import huggingface_hub as hf
 import torch
@@ -21,9 +27,8 @@ from docopt import docopt
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 
-from .passes import custom_ops  # noqa: F401 - Register custom ops
-from .config import config
-from .passes import BeforeAttentionInjector, PostAttentionInjector
+from . import custom_ops  # noqa: F401 - Register custom ops
+from .injector import BeforeAttentionInjector, PostAttentionInjector
 
 INJECTORS = {
     "post": PostAttentionInjector,
@@ -61,8 +66,11 @@ def main():
         inductor_compile_config={"post_grad_custom_post_pass": injector_cls(custom_op)},
     )
 
-    hf.login(token=config.hf_token.get_secret_value())
-    llm = LLM(model=config.model, compilation_config=compilation_config)
+    model = os.environ.get("GLASSBOX_MODEL", "meta-llama/Meta-Llama-3-8B")
+    hf_token = os.environ.get("HF_TOKEN")
+    if hf_token:
+        hf.login(token=hf_token)
+    llm = LLM(model=model, compilation_config=compilation_config)
 
     prompts = ["Hello, my name is"]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=10)

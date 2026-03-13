@@ -7,13 +7,12 @@ attention operations in torch FX graphs.
 
 import operator
 from abc import abstractmethod
+from pathlib import Path
 from typing import Callable, List
 
 import torch
 from torch import fx
 from vllm.compilation.inductor_pass import InductorPass
-
-from ..config import config
 
 VLLM_UNIFIED_ATTENTION_WITH_OUTPUT = "vllm.unified_attention_with_output.default"
 
@@ -28,9 +27,10 @@ class BaseAttentionInjector(InductorPass):
         custom_op: A callable (typically a torch.ops operation) to inject.
     """
 
-    def __init__(self, custom_op: Callable):
+    def __init__(self, custom_op: Callable, demo_dir: Path = Path("demo")):
         super().__init__()
         self.custom_op = custom_op
+        self.demo_dir = demo_dir
 
     def _write_graph_to_file(self, graph: torch.fx.Graph, filename: str) -> None:
         """
@@ -101,7 +101,7 @@ class PostAttentionInjector(BaseAttentionInjector):
         print(f"Total nodes: {len(list(graph.nodes))}")
         print(f"{'=' * 80}\n")
 
-        self._write_graph_to_file(graph, config.demo_dir / "graph_before.txt")
+        self._write_graph_to_file(graph, self.demo_dir / "graph_before.txt")
 
         nodes_to_process = self._find_attention_nodes(graph)
         print(f"Found {len(nodes_to_process)} attention nodes to process")
@@ -109,7 +109,7 @@ class PostAttentionInjector(BaseAttentionInjector):
         for attention_node in nodes_to_process:
             self._inject_instrumentation(graph, attention_node)
 
-        self._write_graph_to_file(graph, config.demo_dir / "graph_after.txt")
+        self._write_graph_to_file(graph, self.demo_dir / "graph_after.txt")
 
     def _inject_instrumentation(
         self, graph: torch.fx.Graph, attention_node: fx.Node
@@ -189,7 +189,7 @@ class BeforeAttentionInjector(BaseAttentionInjector):
         print(f"Total nodes: {len(list(graph.nodes))}")
         print(f"{'=' * 80}\n")
 
-        self._write_graph_to_file(graph, config.demo_dir / "graph_before_qkv.txt")
+        self._write_graph_to_file(graph, self.demo_dir / "graph_before_qkv.txt")
 
         nodes_to_process = self._find_attention_nodes(graph)
         print(f"Found {len(nodes_to_process)} attention nodes to process")
@@ -197,7 +197,7 @@ class BeforeAttentionInjector(BaseAttentionInjector):
         for attention_node in nodes_to_process:
             self._inject_instrumentation(graph, attention_node)
 
-        self._write_graph_to_file(graph, config.demo_dir / "graph_after_qkv.txt")
+        self._write_graph_to_file(graph, self.demo_dir / "graph_after_qkv.txt")
 
     def _inject_instrumentation(
         self, graph: torch.fx.Graph, attention_node: fx.Node

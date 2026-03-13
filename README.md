@@ -50,7 +50,7 @@ See `glassbox/passes/injector.py` for the FX graph transformation logic.
 #### Run
 
 ```bash
-python -m glassbox.main
+python -m glassbox.passes.runner
 ```
 
 #### Demo
