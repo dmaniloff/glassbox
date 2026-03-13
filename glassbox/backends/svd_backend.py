@@ -11,13 +11,16 @@ Configuration via env vars or .env file (see SVDConfig):
     GLASSBOX_SVD_RANK      - number of singular values to compute (default: 4)
     GLASSBOX_SVD_METHOD    - "randomized" or "lanczos" (default: "randomized")
     GLASSBOX_SVD_HEADS     - JSON list of head indices (default: '[0]', e.g. '[0,1,2]')
+    GLASSBOX_SVD_OUTPUT    - path to JSONL output file for structured SVD results (optional)
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import IO, Literal
 
 import torch
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,19 +38,25 @@ from glassbox.svd import matvec_S, matvec_ST, randomized_svd, svd_via_lanczos
 
 logger = logging.getLogger(__name__)
 
+_LAYER_IDX_RE = re.compile(r"layers\.(\d+)")
+
 
 class SVDConfig(BaseSettings):
+    """Configuration for the SVD backend. Immutable after creation."""
+
     model_config = SettingsConfigDict(
         env_prefix="GLASSBOX_SVD_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        frozen=True,
     )
 
     interval: int = 32
     rank: int = 4
     method: Literal["randomized", "lanczos"] = "randomized"
     heads: list[int] = [0]  # JSON list in env, e.g. GLASSBOX_SVD_HEADS='[0,1,2]'
+    output: str | None = None  # JSONL output path; falls back to logger.info if unset
 
 
 @dataclass
@@ -58,8 +67,17 @@ class PerLayerSVDState:
     step: int = 0
 
 
-# Module-level dict keyed by layer_name (e.g. "model.layers.0.self_attn")
-_svd_state: dict[str, PerLayerSVDState] = {}
+@dataclass
+class ReqTracker:
+    """Tracks request boundaries across layers during prefill.
+
+    request_id is incremented once per new request (when the first layer sees
+    prefill). in_prefill is True while we're in a prefill pass so later
+    layers don't double-count.
+    """
+
+    request_id: int = -1
+    in_prefill: bool = False
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
@@ -80,9 +98,24 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     """Wraps TritonAttentionImpl.forward() to accumulate Q and periodically
     extract K from the paged cache for matrix-free SVD."""
 
-    # Class-level config; set before vLLM creates the engine.
-    # vLLM controls the constructor signature so we can't pass it there.
+    # Class-level config; immutable after creation.
+    # If you need to override, set it before vLLM creates the engine.
+    # vLLM controls the constructor signature so we can't pass it in.
     config: SVDConfig = SVDConfig()
+
+    # Class-level layer state; shared mutable.
+    # Shared by all impl instances (one per layer or shared).
+    # Keyed by layer_name (e.g. "model.layers.0.self_attn").
+    state_dict: dict[str, PerLayerSVDState] = {}
+
+    # Class-level request tracking; shared mutable.
+    req_tracker: ReqTracker = ReqTracker()
+
+    # Class-level output file handle; mutable.
+    # Same rationale as other class-level state: vLLM may create one attention
+    # impl per layer (many instances of SVDTritonAttentionImpl).
+    # By keeping one handle on the class (_output_fh), every layer uses the same open file.
+    _output_fh: IO | None = None
 
     def forward(
         self,
@@ -118,10 +151,14 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if layer_name is None:
             return result
 
-        state = _svd_state.get(layer_name)
+        cls = type(self)
+        state = cls.state_dict.get(layer_name)
         if state is None:
             state = PerLayerSVDState()
-            _svd_state[layer_name] = state
+            cls.state_dict[layer_name] = state
+
+        m = _LAYER_IDX_RE.search(layer_name)
+        layer_idx: int | None = int(m.group(1)) if m else None
 
         # query shape: [num_tokens, num_heads, head_size]
         # query_start_loc is a cumulative offset tensor for sequences in the
@@ -131,13 +168,29 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # it is exactly 1.
         q_start = attn_metadata.query_start_loc[0].item()
         q_end = attn_metadata.query_start_loc[1].item()
+        q_span = q_end - q_start
+
+        if q_span > 1:  # prefill = new request
+            # Increment request_id only on the first layer to see this prefill.
+            # All layers see q_span > 1 sequentially during the same prefill;
+            # in_prefill prevents double-counting.
+            if not cls.req_tracker.in_prefill:
+                cls.req_tracker.request_id += 1
+                cls.req_tracker.in_prefill = True
+                # vLLM runs layers in order; the first to see prefill must be layer 0.
+                assert layer_idx == 0, "Expected layer 0 to be first to see prefill"
+            state.q_buffer = []
+            state.step = 0
+        else:
+            cls.req_tracker.in_prefill = False
+
         state.q_buffer.append(query[q_start:q_end].detach().clone())
         state.step += 1
 
         # 4. Every self.config.interval steps, extract K and run SVD
         if state.step % self.config.interval == 0:
             try:
-                self._run_svd(layer_name, state, kv_cache, attn_metadata)
+                self._run_svd(layer_name, layer_idx, state, kv_cache, attn_metadata)
             except Exception:
                 logger.exception(
                     "[SVD] error in layer %s at step %d", layer_name, state.step
@@ -189,6 +242,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     def _run_svd(
         self,
         layer_name: str,
+        layer_idx: int | None,
         state: PerLayerSVDState,
         kv_cache: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
@@ -245,12 +299,29 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 )
 
             sv_list = S.cpu().tolist()
-            logger.info(
-                "[SVD] %s head=%d step=%d L=%d top-%d singular values: %s",
-                layer_name,
-                head_idx,
-                state.step,
-                L,
-                k,
-                sv_list,
-            )
+
+            if self.config.output:
+                cls = type(self)
+                if cls._output_fh is None:
+                    cls._output_fh = open(self.config.output, "a")
+                row = {
+                    "request_id": cls.req_tracker.request_id,
+                    "layer": layer_name,
+                    "layer_idx": layer_idx,  # None if layer_name didn't match regex
+                    "head": head_idx,
+                    "step": state.step,
+                    "L": L,
+                    "singular_values": sv_list,
+                }
+                cls._output_fh.write(json.dumps(row) + "\n")
+                cls._output_fh.flush()
+            else:
+                logger.info(
+                    "[SVD] %s head=%d step=%d L=%d top-%d singular values: %s",
+                    layer_name,
+                    head_idx,
+                    state.step,
+                    L,
+                    k,
+                    sv_list,
+                )
