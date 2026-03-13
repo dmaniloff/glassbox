@@ -7,7 +7,6 @@ M is NOT symmetric in general. We compute SVD, not eigen-decomposition, using ma
 """
 
 import torch
-from rich import print as rprint
 
 
 def matvec_S(Q, K, v):
@@ -344,58 +343,3 @@ def compare_svd_results(matvec, matvec_t, U1, S1, V1, U2, S2, V2, trials: int = 
     }
 
 
-if __name__ == "__main__":
-    # TODO: turn this into a pytest
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    L = 8
-    D = 2
-
-    Q = torch.randn(L, D, device=device)
-    K = torch.randn(L, D, device=device)
-
-    # Matrix-free SVD of the scores matrix S = QK^T
-    matvec = lambda x: matvec_S(Q, K, x)
-    matvec_t = lambda x: matvec_ST(Q, K, x)
-
-    # Lanczos-based top-k
-    U_l, S_l, V_l = svd_via_lanczos(
-        matvec=matvec, matvec_t=matvec_t, dim=L, k=2, iters=20, device=device
-    )
-
-    # Randomized SVD top-k
-    U_r, S_r, V_r = randomized_svd(
-        matvec=matvec, matvec_t=matvec_t, dim=L, k=2, p=6, q=2, device=device
-    )
-
-    # Torch SVD
-    U_t, S_t, V_t = torch.linalg.svd(Q @ K.T, full_matrices=False)
-
-    metrics = compare_svd_results(
-        matvec=matvec, matvec_t=matvec_t, U1=U_l, S1=S_l, V1=V_l, U2=U_r, S2=S_r, V2=V_r
-    )
-    rprint("comparison:", metrics)
-
-    # A = torch.softmax(Q @ K.T / torch.sqrt(D), dim=1)  # [L, L] (attention matrix)
-
-    # _, d_q_inv_sqrt, d_k_inv_sqrt = compute_degree_normalized_M(A)
-
-    # def matvec(v):
-    #     return matvec_M(v, d_q_inv_sqrt, d_k_inv_sqrt)
-
-    # def matvec_t(v):
-    #     return matvec_MT(v, d_q_inv_sqrt, d_k_inv_sqrt)
-
-    # # Lanczos-based top-k
-    # U_l, S_l, V_l = svd_via_lanczos(
-    #     matvec=matvec, matvec_t=matvec_t, dim=L, k=2, iters=20, device=device
-    # )
-
-    # # Randomized SVD top-k
-    # U_r, S_r, V_r = randomized_svd(
-    #     matvec=matvec, matvec_t=matvec_t, dim=L, k=2, p=6, q=2, device=device
-    # )
-
-    # metrics = compare_svd_results(
-    #     matvec=matvec, matvec_t=matvec_t, U1=U_l, S1=S_l, V1=V_l, U2=U_r, S2=S_r, V2=V_r
-    # )
-    # print("comparison:", metrics)
