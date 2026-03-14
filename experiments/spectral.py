@@ -249,7 +249,9 @@ def run(
     log(f"Model: {model}")
     log(f"Mode: {mode}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
-    log(f"SVD: interval={svd_interval}, rank={svd_rank}")
+    log(
+        f"SVD: interval={svd_interval}, rank(number of singular values to compute)={svd_rank}"
+    )
 
     # Set up environment — backend writes structured JSONL via GLASSBOX_SVD_OUTPUT
     svd_features_path = outdir / "svd_features.jsonl"
@@ -269,6 +271,9 @@ def run(
         "--port",
         str(port),
     ]
+    if mode == "evaluate":
+        # Force one request at a time to ensure request_id tracking aligns
+        server_cmd += ["--max-num-seqs", "1"]
 
     kill_port(port)
     time.sleep(1)
@@ -299,54 +304,76 @@ def run(
 
         request_counter = 0
         for i, sample in enumerate(samples):
-            # Send request
             try:
                 if mode == "evaluate":
-                    # Mode A: send full (question + response) as prefill
-                    prompt = f"Q: {sample['question']}\nA: {sample['response']}"
-                    resp = client.completions.create(
-                        model=model,
-                        prompt=prompt,
-                        max_tokens=1,
-                    )
-                    generated = resp.choices[0].text
-                elif request_type == "chat_completions":
-                    resp = client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "user", "content": sample["question"]}],
-                        max_tokens=max_tokens,
-                    )
-                    generated = resp.choices[0].message.content or ""
+                    # Two-phase prefill: question-only baseline, then full
+                    prompt_q = f"Q: {sample['question']}\nA:"
+                    prompt_full = f"Q: {sample['question']}\nA: {sample['response']}"
+
+                    for phase, prompt in [
+                        ("question", prompt_q),
+                        ("full", prompt_full),
+                    ]:
+                        resp = client.completions.create(
+                            model=model,
+                            prompt=prompt,
+                            max_tokens=1,
+                        )
+                        sample_row = {
+                            "request_id": request_counter,
+                            "sample_id": sample["idx"],
+                            "phase": phase,
+                            "dataset": dataset_name,
+                            **sample,
+                            "prompt_length": len(prompt),
+                            "generated": resp.choices[0].text,
+                        }
+                        samples_f.write(json.dumps(sample_row) + "\n")
+                        samples_f.flush()
+                        request_counter += 1
+
                 else:
-                    prompt = f"Q: {sample['question']}\nA:"
-                    resp = client.completions.create(
-                        model=model,
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                    )
-                    generated = resp.choices[0].text
+                    if request_type == "chat_completions":
+                        resp = client.chat.completions.create(
+                            model=model,
+                            messages=[{"role": "user", "content": sample["question"]}],
+                            max_tokens=max_tokens,
+                        )
+                        generated = resp.choices[0].message.content or ""
+                        prompt = sample["question"]
+                    else:
+                        prompt = f"Q: {sample['question']}\nA:"
+                        resp = client.completions.create(
+                            model=model,
+                            prompt=prompt,
+                            max_tokens=max_tokens,
+                        )
+                        generated = resp.choices[0].text
+
+                    sample_row = {
+                        "request_id": request_counter,
+                        "sample_id": sample["idx"],
+                        "phase": "generate",
+                        "dataset": dataset_name,
+                        **sample,
+                        "prompt_length": len(prompt),
+                        "generated": generated,
+                        "response_length": len(sample.get("response", "")),
+                    }
+                    samples_f.write(json.dumps(sample_row) + "\n")
+                    samples_f.flush()
+                    request_counter += 1
+
             except Exception as e:
                 log(f"  [{i + 1}/{len(samples)}] ERROR: {e}")
                 continue
 
-            # Write sample metadata with request_id matching backend counter
-            sample_row = {
-                "request_id": request_counter,
-                "dataset": dataset_name,
-                **sample,
-                "generated": generated,
-                "response_length": len(sample.get("response", "")),
-            }
-            samples_f.write(json.dumps(sample_row) + "\n")
-            samples_f.flush()
-
-            request_counter += 1
             label_str = "HALL" if sample["label"] == 1 else "OK"
             if (i + 1) % 10 == 0 or i == 0:
                 log(f"  [{i + 1}/{len(samples)}] {label_str}")
 
         samples_f.close()
-        log(f"Done! {request_counter} samples processed")
+        log(f"Done! {len(samples)} samples, {request_counter} requests")
         log(f"  samples:      {samples_path}")
         log(f"  svd features: {svd_features_path}")
 
@@ -420,10 +447,26 @@ def analyze(results_dir: str, output_dir: str | None) -> None:
                     sample_rows.append(json.loads(line))
         df_samples = pd.DataFrame(sample_rows)
 
-        df = df_svd.merge(
-            df_samples[["request_id", "label"]], on="request_id", how="left"
+        # Join: always label, plus phase/sample_id/prompt_length if present
+        join_cols = ["request_id", "label"]
+        for col in ["sample_id", "phase", "prompt_length"]:
+            if col in df_samples.columns:
+                join_cols.append(col)
+
+        df_all = df_svd.merge(df_samples[join_cols], on="request_id", how="left")
+
+        has_phases = "phase" in df_all.columns and {"question", "full"} <= set(
+            df_all["phase"].unique()
         )
-        df = df.rename(columns={"request_id": "sample_idx"})
+
+        if has_phases:
+            # Main analysis uses "full" phase (comparable to single-phase)
+            df = df_all[df_all["phase"] == "full"].copy()
+            df = df.rename(columns={"sample_id": "sample_idx"})
+        elif "sample_id" in df_all.columns:
+            df = df_all.rename(columns={"sample_id": "sample_idx"})
+        else:
+            df = df_all.rename(columns={"request_id": "sample_idx"})
 
     elif legacy_path.exists():  # TODO: remove legacy path
         # Backward compat: load old log-parsed features.jsonl
@@ -437,6 +480,7 @@ def analyze(results_dir: str, output_dir: str | None) -> None:
                     row.pop("singular_values", None)
                     rows.append(row)
         df = pd.DataFrame(rows)
+        has_phases = False
     else:
         click.echo(f"No svd_features.jsonl or features.jsonl found in {base}")
         sys.exit(1)
@@ -450,6 +494,9 @@ def analyze(results_dir: str, output_dir: str | None) -> None:
     n_hall = int(labels.sum())
     n_ok = len(labels) - n_hall
     log(f"Label distribution: {n_hall} hallucinated, {n_ok} correct")
+
+    if has_phases:
+        log("Two-phase data detected (question + full); main tables use 'full' phase")
 
     if n_hall < 3 or n_ok < 3:
         click.echo("Too few samples in one class for meaningful analysis.")
@@ -727,6 +774,239 @@ def analyze(results_dir: str, output_dir: str | None) -> None:
     plt.savefig(dist_path, dpi=150, bbox_inches="tight")
     plt.close()
     log(f"Distributions saved to {dist_path}")
+
+    # ── Prompt length analysis ─────────────────────────────────────────────
+    if "L" in df.columns:
+        sample_length = df.groupby("sample_idx")["L"].max().reset_index()
+        sample_length = sample_length.merge(labels.reset_index(), on="sample_idx")
+        sample_length["label_str"] = sample_length["label"].map(
+            {0: "Correct", 1: "Hallucinated"}
+        )
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for lv, ls, c in [(0, "Correct", "steelblue"), (1, "Hallucinated", "tomato")]:
+            subset = sample_length[sample_length["label"] == lv]
+            ax.hist(subset["L"], bins=30, alpha=0.5, label=ls, color=c)
+        ax.set_xlabel("Sequence Length (tokens)")
+        ax.set_ylabel("Count")
+        ax.set_title("Sequence Length Distribution by Label")
+        ax.legend()
+        plt.tight_layout()
+        len_dist_path = str(plot_dir / "seq_length_dist.png")
+        plt.savefig(len_dist_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        log(f"Sequence length distribution saved to {len_dist_path}")
+
+        # Feature vs length scatter for the layer with strongest correlation
+        if corr_matrix:
+            best_layer = max(corr_matrix, key=lambda k: abs(corr_matrix[k][0]))[0]
+        else:
+            best_layer = layer_ids[len(layer_ids) // 2]
+
+        layer_df = df[df["layer_idx"] == best_layer].copy()
+        layer_df["label_str"] = layer_df["label"].map({0: "Correct", 1: "Hallucinated"})
+        n_feats = len(SPECTRAL_FEATURES)
+        fig, axes = plt.subplots(1, n_feats, figsize=(5 * n_feats, 4))
+        if n_feats == 1:
+            axes = [axes]
+        for ax, feat in zip(axes, SPECTRAL_FEATURES):
+            sns.scatterplot(
+                data=layer_df,
+                x="L",
+                y=feat,
+                hue="label_str",
+                alpha=0.4,
+                s=15,
+                ax=ax,
+            )
+            ax.set_title(f"Layer {best_layer}")
+            ax.set_xlabel("Sequence Length (tokens)")
+        plt.suptitle(
+            "Spectral Features vs Sequence Length", fontsize=12, fontweight="bold"
+        )
+        plt.tight_layout()
+        feat_len_path = str(plot_dir / f"feature_vs_length_layer{best_layer}.png")
+        plt.savefig(feat_len_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        log(f"Feature vs length scatter saved to {feat_len_path}")
+
+    # ── Two-phase analysis (evaluate mode) ─────────────────────────────────
+    if has_phases:
+        click.echo("=" * 72)
+        click.echo("Two-Phase Analysis: Question vs Full (evaluate mode)")
+        click.echo("=" * 72)
+
+        df_q = df_all[df_all["phase"] == "question"].copy()
+        df_q = df_q.rename(columns={"sample_id": "sample_idx"})
+        df_f = df  # already filtered to "full" and renamed
+
+        agg_q = (
+            df_q.groupby(["sample_idx", "layer_idx"])[SPECTRAL_FEATURES]
+            .mean()
+            .reset_index()
+        )
+        agg_f = (
+            df_f.groupby(["sample_idx", "layer_idx"])[SPECTRAL_FEATURES]
+            .mean()
+            .reset_index()
+        )
+
+        merged_phases = agg_q.merge(
+            agg_f, on=["sample_idx", "layer_idx"], suffixes=("_q", "_f")
+        )
+        delta_features = [f"{f}_delta" for f in SPECTRAL_FEATURES]
+        for feat in SPECTRAL_FEATURES:
+            merged_phases[f"{feat}_delta"] = (
+                merged_phases[f"{feat}_f"] - merged_phases[f"{feat}_q"]
+            )
+
+        merged_phases = merged_phases.merge(labels.reset_index(), on="sample_idx")
+
+        # Delta correlation table
+        click.echo("")
+        click.echo("Delta Correlations (full - question) vs label:")
+        feat_hdrs = "".join(f" | {f:>20s}" for f in delta_features)
+        click.echo(f"{'Layer':>6s}{feat_hdrs}")
+        click.echo("-" * (8 + 23 * len(delta_features)))
+
+        delta_corr = {}
+        for layer_idx in layer_ids:
+            lm = merged_phases[merged_phases["layer_idx"] == layer_idx]
+            row_str = f"{layer_idx:>6d}"
+            for feat in delta_features:
+                vals = lm[feat].dropna()
+                lbls = lm.loc[vals.index, "label"]
+                if len(vals) < 10 or lbls.nunique() < 2:
+                    row_str += f" | {'n/a':>20s}"
+                    continue
+                r, p = pointbiserialr(lbls, vals)
+                delta_corr[(layer_idx, feat)] = (r, p)
+                sig = "**" if p < 0.01 else ("*" if p < 0.05 else "")
+                row_str += f" | {r:>+7.4f} {sig:<2s}  {p:>5.3f}"
+            click.echo(row_str)
+
+        # Global delta row
+        click.echo("")
+        global_delta = (
+            merged_phases.groupby("sample_idx")[delta_features].mean().reset_index()
+        )
+        global_delta = global_delta.merge(labels.reset_index(), on="sample_idx")
+        row_str = f"{'ALL':>6s}"
+        for feat in delta_features:
+            vals = global_delta[feat].dropna()
+            lbls = global_delta.loc[vals.index, "label"]
+            if len(vals) < 10 or lbls.nunique() < 2:
+                row_str += f" | {'n/a':>20s}"
+                continue
+            r, p = pointbiserialr(lbls, vals)
+            sig = "**" if p < 0.01 else ("*" if p < 0.05 else "")
+            row_str += f" | {r:>+7.4f} {sig:<2s}  {p:>5.3f}"
+        click.echo(row_str)
+
+        # Delta AUROC
+        click.echo("")
+        click.echo("Delta AUROC (full - question) by Layer:")
+        feat_hdrs = "".join(f" | {f:>20s}" for f in delta_features)
+        click.echo(f"{'Layer':>6s}{feat_hdrs}")
+        click.echo("-" * (8 + 23 * len(delta_features)))
+
+        for layer_idx in layer_ids:
+            lm = merged_phases[merged_phases["layer_idx"] == layer_idx]
+            row_str = f"{layer_idx:>6d}"
+            for feat in delta_features:
+                vals = lm[feat].dropna()
+                lbls = lm.loc[vals.index, "label"]
+                if len(vals) < 10 or lbls.nunique() < 2:
+                    row_str += f" | {'n/a':>20s}"
+                    continue
+                auc, lo, hi = bootstrap_auroc(lbls.values, vals.values)
+                if auc is not None and lo is not None:
+                    row_str += f" | {auc:.3f} [{lo:.3f}-{hi:.3f}]"
+                elif auc is not None:
+                    row_str += f" | {auc:.3f} [n/a]"
+                else:
+                    row_str += f" | {'n/a':>20s}"
+            click.echo(row_str)
+        click.echo("")
+
+        # Plot: Delta correlation heatmap
+        if delta_corr:
+            delta_corr_data = pd.DataFrame(
+                index=layer_ids, columns=delta_features, dtype=float
+            )
+            for (li, feat), (r, _) in delta_corr.items():
+                delta_corr_data.loc[li, feat] = r
+
+            fig, ax = plt.subplots(figsize=(8, max(4, len(layer_ids) * 0.5)))
+            sns.heatmap(
+                delta_corr_data.astype(float),
+                annot=True,
+                fmt="+.3f",
+                center=0,
+                cmap="RdBu_r",
+                vmin=-0.5,
+                vmax=0.5,
+                ax=ax,
+                linewidths=0.5,
+            )
+            ax.set_ylabel("Layer")
+            ax.set_xlabel("Feature (full - question)")
+            ax.set_title("Delta Correlation with Hallucination Label")
+            plt.tight_layout()
+            delta_hm_path = str(plot_dir / "delta_heatmap.png")
+            plt.savefig(delta_hm_path, dpi=150, bbox_inches="tight")
+            plt.close()
+            log(f"Delta heatmap saved to {delta_hm_path}")
+
+        # Plot: Delta distributions by label
+        merged_phases["label_str"] = merged_phases["label"].map(
+            {0: "Correct", 1: "Hallucinated"}
+        )
+        delta_plot = merged_phases.melt(
+            id_vars=["sample_idx", "layer_idx", "label_str"],
+            value_vars=delta_features,
+            var_name="feature",
+            value_name="value",
+        ).dropna(subset=["value"])
+
+        n_delta = len(delta_features)
+        fig, axes = plt.subplots(
+            n_delta,
+            1,
+            figsize=(max(10, len(layer_ids) * 0.8), 4 * n_delta),
+            sharex=True,
+        )
+        if n_delta == 1:
+            axes = [axes]
+        for ax, feat in zip(axes, delta_features):
+            feat_df = delta_plot[delta_plot["feature"] == feat]
+            sns.violinplot(
+                data=feat_df,
+                x="layer_idx",
+                y="value",
+                hue="label_str",
+                split=True,
+                inner="quart",
+                cut=0,
+                density_norm="width",
+                alpha=0.6,
+                ax=ax,
+            )
+            ax.set_ylabel(feat)
+            ax.set_xlabel("")
+            ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+            ax.legend(title="", loc="upper right", fontsize=8)
+        axes[-1].set_xlabel("Layer")
+        fig.suptitle(
+            "Delta (Full - Question) Distributions by Layer and Label",
+            fontsize=14,
+            fontweight="bold",
+        )
+        plt.tight_layout()
+        delta_dist_path = str(plot_dir / "delta_distributions.png")
+        plt.savefig(delta_dist_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        log(f"Delta distributions saved to {delta_dist_path}")
 
     # ── Summary ───────────────────────────────────────────────────────────
     if corr_matrix:

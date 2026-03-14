@@ -71,13 +71,13 @@ class PerLayerSVDState:
 class ReqTracker:
     """Tracks request boundaries across layers during prefill.
 
-    request_id is incremented once per new request (when the first layer sees
-    prefill). in_prefill is True while we're in a prefill pass so later
-    layers don't double-count.
+    request_id is incremented once per new request when layer 0 sees a
+    prefill (q_span > 1).  Previous versions used an in_prefill flag that
+    was cleared during decode, but with max_tokens=1 there is no decode
+    step so the flag was never cleared and request_id stopped incrementing.
     """
 
     request_id: int = -1
-    in_prefill: bool = False
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
@@ -171,18 +171,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         q_span = q_end - q_start
 
         if q_span > 1:  # prefill = new request
-            # Increment request_id only on the first layer to see this prefill.
-            # All layers see q_span > 1 sequentially during the same prefill;
-            # in_prefill prevents double-counting.
-            if not cls.req_tracker.in_prefill:
+            # Increment request_id only on layer 0 to avoid double-counting
+            # across the 12 layers that all see the same prefill batch.
+            if layer_idx == 0:
                 cls.req_tracker.request_id += 1
-                cls.req_tracker.in_prefill = True
-                # vLLM runs layers in order; the first to see prefill must be layer 0.
-                assert layer_idx == 0, "Expected layer 0 to be first to see prefill"
             state.q_buffer = []
             state.step = 0
-        else:
-            cls.req_tracker.in_prefill = False
 
         state.q_buffer.append(query[q_start:q_end].detach().clone())
         state.step += 1

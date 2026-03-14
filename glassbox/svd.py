@@ -120,6 +120,9 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
         S: (k,)    singular values (descending).
         V: (dim, k) right singular vectors.
     """
+    # Clamp oversampling so k + p doesn't exceed dim
+    p = min(p, max(dim - k, 0))
+
     # Step 1: random test matrix Ω
     Omega = torch.randn(dim, k + p, device=device)
 
