@@ -38,7 +38,10 @@ from glassbox.svd import matvec_S, matvec_ST, randomized_svd, svd_via_lanczos
 
 logger = logging.getLogger(__name__)
 
-_LAYER_IDX_RE = re.compile(r"layers\.(\d+)")
+# Matches layer index from various model naming conventions:
+#   OPT/Qwen/Llama: "model.layers.0.self_attn"
+#   GPT-2:          "transformer.h.0.attn.attn"
+_LAYER_IDX_RE = re.compile(r"(?:layers|\.h)\.(\d+)")
 
 
 class SVDConfig(BaseSettings):
