@@ -33,6 +33,9 @@ DEFAULT_PORT = 8000
 
 SPECTRAL_FEATURES = ["sv_ratio", "sv1", "sv_entropy"]
 
+LABEL_COLORS = {0: "#1565C0", 1: "#C62828"}
+LABEL_NAMES = {0: "Correct", 1: "Hallucinated"}
+
 
 # ── Shared helpers ─────────────────────────────────────────────────────────
 
@@ -52,6 +55,145 @@ def kill_port(port: int) -> None:
         if pid:
             os.kill(int(pid), signal.SIGKILL)
             log(f"Killed pid {pid} on port {port}")
+
+
+def plot_violin_pointrange(
+    df,
+    features: list[str],
+    feat_labels: list[str],
+    layer_ids: list[int],
+    title: str,
+    out_path: str,
+    show_zero_line: bool = False,
+) -> None:
+    """Half-violin + pointrange + strip plot, split by label.
+
+    Expects *df* to have columns: sample_idx, layer_idx, label, L, and each
+    feature in *features*.  Dot size encodes sequence length (L).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    n_feats = len(features)
+    fig, axes = plt.subplots(
+        n_feats, 1,
+        figsize=(max(12, len(layer_ids) * 1.0), 4.5 * n_feats),
+    )
+    if n_feats == 1:
+        axes = [axes]
+
+    # Sequence-length → dot size mapping
+    L_vals = df["L"].dropna()
+    L_min, L_max = (L_vals.min(), L_vals.max()) if len(L_vals) else (1, 1)
+    s_min, s_max = 15, 120
+
+    def _size(L):
+        t = (L - L_min) / max(L_max - L_min, 1)
+        return s_min + t * (s_max - s_min)
+
+    for ax_i, (feat, feat_label) in enumerate(zip(features, feat_labels)):
+        ax = axes[ax_i]
+
+        for label_val, side in [(0, "left"), (1, "right")]:
+            color = LABEL_COLORS[label_val]
+            sub = df[df["label"] == label_val]
+
+            # Collect per-layer arrays
+            layer_data, layer_pos, layer_pts = [], [], []
+            for li_i, li in enumerate(layer_ids):
+                chunk = sub[sub["layer_idx"] == li]
+                vals = chunk[feat].dropna().values
+                if len(vals) == 0:
+                    continue
+                layer_data.append(vals)
+                layer_pos.append(li_i)
+                Ls = chunk.loc[chunk[feat].notna(), "L"].values
+                layer_pts.append(list(zip(vals, Ls)))
+
+            if not layer_data:
+                continue
+
+            # ── Half violin ───────────────────────────────────────────
+            parts = ax.violinplot(
+                layer_data, positions=layer_pos,
+                widths=0.8, showextrema=False, showmedians=False,
+            )
+            for pc in parts["bodies"]:
+                verts = pc.get_paths()[0].vertices
+                m = np.mean(verts[:, 0])
+                if side == "left":
+                    verts[:, 0] = np.clip(verts[:, 0], -np.inf, m)
+                else:
+                    verts[:, 0] = np.clip(verts[:, 0], m, np.inf)
+                pc.set_facecolor(color)
+                pc.set_alpha(0.2)
+                pc.set_edgecolor(color)
+                pc.set_linewidth(0.8)
+
+            # ── Pointrange (thin whisker, thick IQR, median dot) ──────
+            offset = -0.13 if side == "left" else 0.13
+            for li_i, vals in zip(layer_pos, layer_data):
+                if len(vals) < 2:
+                    ax.plot(li_i + offset, vals[0], "o", color=color, ms=5)
+                    continue
+                q1, med, q3 = np.percentile(vals, [25, 50, 75])
+                iqr = q3 - q1
+                lo = max(vals.min(), q1 - 1.5 * iqr)
+                hi = min(vals.max(), q3 + 1.5 * iqr)
+                x = li_i + offset
+                ax.plot([x, x], [lo, hi], color=color, lw=1,
+                        solid_capstyle="round", zorder=5)
+                ax.plot([x, x], [q1, q3], color=color, lw=4.5,
+                        solid_capstyle="round", alpha=0.7, zorder=6)
+                ax.plot(x, med, "o", color="white", ms=4.5,
+                        mec=color, mew=1.2, zorder=7)
+
+            # ── Strip dots (size = seq length) ────────────────────────
+            jitter_base = -0.28 if side == "left" else 0.22
+            rng = np.random.RandomState(42 + label_val)
+            for li_i, pts in zip(layer_pos, layer_pts):
+                for val, L in pts:
+                    jx = jitter_base + rng.uniform(-0.08, 0.08)
+                    ax.scatter(
+                        li_i + jx, val, c=color, s=_size(L), alpha=0.5,
+                        edgecolors="white", linewidths=0.3, zorder=4,
+                    )
+
+            # Legend entry (first panel only)
+            if ax_i == 0:
+                ax.plot([], [], color=color, lw=6, alpha=0.5,
+                        label=LABEL_NAMES[label_val])
+
+        if show_zero_line:
+            ax.axhline(y=0, color="gray", lw=0.8, ls="--", alpha=0.5)
+
+        ax.set_ylabel(feat_label, fontsize=12, fontweight="bold")
+        ax.grid(axis="y", alpha=0.2, linestyle="--")
+        ax.tick_params(labelsize=10)
+        ax.set_xticks(range(len(layer_ids)))
+        ax.set_xticklabels(
+            [f"L{li}" for li in layer_ids] if ax_i == n_feats - 1 else [],
+            fontsize=10,
+        )
+
+        if ax_i == 0:
+            # Size legend
+            for L_ex, lbl in [
+                (int(L_min), f"L={int(L_min)}"),
+                (int((L_min + L_max) // 2), f"L={int((L_min + L_max) // 2)}"),
+                (int(L_max), f"L={int(L_max)}"),
+            ]:
+                ax.scatter([], [], c="gray", s=_size(L_ex), alpha=0.6,
+                           edgecolors="white", linewidths=0.3, label=lbl)
+            ax.legend(fontsize=9, loc="upper right", framealpha=0.9,
+                      ncol=2, columnspacing=0.8, handletextpad=0.3)
+
+    axes[-1].set_xlabel("Layer", fontsize=12)
+    fig.suptitle(title, fontsize=14, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    log(f"Distributions saved to {out_path}")
 
 
 def wait_for_server(port: int, timeout: int = 120) -> bool:
@@ -77,10 +219,13 @@ def load_halueval(max_samples: int) -> list[dict]:
 
     log("Loading HaluEval qa...")
     ds = load_dataset("pminervini/HaluEval", "qa", split="data")
+    indices = list(range(len(ds)))
+    random.Random(42).shuffle(indices)
     samples = []
-    for i, row in enumerate(ds):
+    for i in indices:
         if len(samples) >= max_samples:
             break
+        row = ds[i]
         question = row["question"]
         # Each row produces 2 samples: right_answer (label=0) + hallucinated_answer (label=1)
         samples.append(
@@ -113,10 +258,13 @@ def load_truthfulqa(max_samples: int) -> list[dict]:
     log("Loading TruthfulQA...")
     ds = load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
     rng = random.Random(42)
+    indices = list(range(len(ds)))
+    rng.shuffle(indices)
     samples = []
-    for row in ds:
+    for i in indices:
         if len(samples) >= max_samples:
             break
+        row = ds[i]
         question = row["question"]
         incorrect = row["incorrect_answers"]
         if not incorrect:
@@ -712,68 +860,21 @@ def analyze(results_dir: str, output_dir: str | None) -> None:
         plt.close()
         log(f"AUROC heatmap saved to {auroc_heatmap_path}")
 
-    # ── Plot 3: Per-layer distributions ───────────────────────────────────
-    # Melt to long form for seaborn
-    df["label_str"] = df["label"].map({0: "Correct", 1: "Hallucinated"})
-    plot_df = df.melt(
-        id_vars=["sample_idx", "layer_idx", "label_str"],
-        value_vars=SPECTRAL_FEATURES,
-        var_name="feature",
-        value_name="value",
-    ).dropna(subset=["value"])
-
-    n_features = len(SPECTRAL_FEATURES)
-    fig, axes = plt.subplots(
-        n_features,
-        1,
-        figsize=(max(10, len(layer_ids) * 0.8), 4 * n_features),
-        sharex=True,
-    )
-    if n_features == 1:
-        axes = [axes]
-
-    for ax, feat in zip(axes, SPECTRAL_FEATURES):
-        feat_df = plot_df[plot_df["feature"] == feat]
-        sns.stripplot(
-            data=feat_df,
-            x="layer_idx",
-            y="value",
-            hue="label_str",
-            dodge=True,
-            alpha=0.25,
-            size=2,
-            jitter=0.3,
-            ax=ax,
-            legend=False,
-        )
-        sns.violinplot(
-            data=feat_df,
-            x="layer_idx",
-            y="value",
-            hue="label_str",
-            split=True,
-            inner="quart",
-            cut=0,
-            density_norm="width",
-            alpha=0.6,
-            ax=ax,
-        )
-        ax.set_ylabel(feat)
-        ax.set_xlabel("")
-        ax.legend(title="", loc="upper right", fontsize=8)
-
-    axes[-1].set_xlabel("Layer")
-    fig.suptitle(
-        "Spectral Feature Distributions by Layer and Label",
-        fontsize=14,
-        fontweight="bold",
-    )
-    plt.tight_layout()
+    # ── Plot 3: Per-layer distributions (half-violin + pointrange) ────────
+    # Need L column for dot sizing; use max L per sample if multiple snapshots
+    if "L" not in df.columns:
+        df["L"] = 0
+    dist_df = df[["sample_idx", "layer_idx", "label", "L"] + SPECTRAL_FEATURES].copy()
 
     dist_path = str(plot_dir / "spectral_distributions.png")
-    plt.savefig(dist_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    log(f"Distributions saved to {dist_path}")
+    plot_violin_pointrange(
+        dist_df,
+        features=SPECTRAL_FEATURES,
+        feat_labels=["σ₁/σ₂ Ratio", "σ₁ (Leading SV)", "SV Entropy"],
+        layer_ids=layer_ids,
+        title="Spectral Feature Distributions (Full Phase) by Layer",
+        out_path=dist_path,
+    )
 
     # ── Prompt length analysis ─────────────────────────────────────────────
     if "L" in df.columns:
@@ -958,55 +1059,27 @@ def analyze(results_dir: str, output_dir: str | None) -> None:
             plt.close()
             log(f"Delta heatmap saved to {delta_hm_path}")
 
-        # Plot: Delta distributions by label
-        merged_phases["label_str"] = merged_phases["label"].map(
-            {0: "Correct", 1: "Hallucinated"}
+        # Plot: Delta distributions (half-violin + pointrange)
+        # Attach L from the full phase for dot sizing
+        L_by_sample = (
+            df_f.groupby("sample_idx")["L"].max().reset_index()
+            if "L" in df_f.columns
+            else pd.DataFrame({"sample_idx": merged_phases["sample_idx"].unique(), "L": 0})
         )
-        delta_plot = merged_phases.melt(
-            id_vars=["sample_idx", "layer_idx", "label_str"],
-            value_vars=delta_features,
-            var_name="feature",
-            value_name="value",
-        ).dropna(subset=["value"])
+        delta_dist_df = merged_phases[
+            ["sample_idx", "layer_idx", "label"] + delta_features
+        ].merge(L_by_sample, on="sample_idx", how="left")
 
-        n_delta = len(delta_features)
-        fig, axes = plt.subplots(
-            n_delta,
-            1,
-            figsize=(max(10, len(layer_ids) * 0.8), 4 * n_delta),
-            sharex=True,
-        )
-        if n_delta == 1:
-            axes = [axes]
-        for ax, feat in zip(axes, delta_features):
-            feat_df = delta_plot[delta_plot["feature"] == feat]
-            sns.violinplot(
-                data=feat_df,
-                x="layer_idx",
-                y="value",
-                hue="label_str",
-                split=True,
-                inner="quart",
-                cut=0,
-                density_norm="width",
-                alpha=0.6,
-                ax=ax,
-            )
-            ax.set_ylabel(feat)
-            ax.set_xlabel("")
-            ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-            ax.legend(title="", loc="upper right", fontsize=8)
-        axes[-1].set_xlabel("Layer")
-        fig.suptitle(
-            "Delta (Full - Question) Distributions by Layer and Label",
-            fontsize=14,
-            fontweight="bold",
-        )
-        plt.tight_layout()
         delta_dist_path = str(plot_dir / "delta_distributions.png")
-        plt.savefig(delta_dist_path, dpi=150, bbox_inches="tight")
-        plt.close()
-        log(f"Delta distributions saved to {delta_dist_path}")
+        plot_violin_pointrange(
+            delta_dist_df,
+            features=delta_features,
+            feat_labels=["Δ σ₁/σ₂ Ratio", "Δ σ₁", "Δ SV Entropy"],
+            layer_ids=layer_ids,
+            title="Delta (Full − Question) Distributions by Layer",
+            out_path=delta_dist_path,
+            show_zero_line=True,
+        )
 
     # ── Summary ───────────────────────────────────────────────────────────
     if corr_matrix:
