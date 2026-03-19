@@ -166,7 +166,7 @@ def _run_one(
     # Write glassbox config for SVD configs
     if config.svd_interval is not None:
         yaml_lines = [
-            "spectral:",
+            "scores_matrix:",
             f"  interval: {config.svd_interval}",
             f"  rank: {config.svd_rank}",
         ]

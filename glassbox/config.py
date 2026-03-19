@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class SpectralConfig(BaseModel):
+class ScoresMatrixConfig(BaseModel):
     """SVD of pre-softmax scores matrix S = QK^T."""
 
     model_config = ConfigDict(frozen=True)
@@ -18,7 +18,7 @@ class SpectralConfig(BaseModel):
     heads: list[int] = [0]
 
 
-class DegreeNormalizedConfig(BaseModel):
+class DegreeNormalizedMatrixConfig(BaseModel):
     """SVD of post-softmax degree-normalized operator M = D_Q^{-1/2} A D_K^{-1/2}."""
 
     model_config = ConfigDict(frozen=True)
@@ -50,8 +50,8 @@ class GlassboxConfig(BaseSettings):
         frozen=True,
     )
 
-    spectral: SpectralConfig = SpectralConfig()
-    degree_normalized: DegreeNormalizedConfig = DegreeNormalizedConfig()
+    scores_matrix: ScoresMatrixConfig = ScoresMatrixConfig()
+    degree_normalized_matrix: DegreeNormalizedMatrixConfig = DegreeNormalizedMatrixConfig()
     output: str | None = None
 
     @classmethod

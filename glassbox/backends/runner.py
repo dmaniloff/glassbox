@@ -142,49 +142,49 @@ def main(
 
     # Build nested config overrides from CLI args
     overrides: dict = {}
-    spectral: dict = {}
-    degree_normalized: dict = {}
+    scores_matrix: dict = {}
+    degree_normalized_matrix: dict = {}
 
     if interval is not None:
-        spectral["interval"] = interval
+        scores_matrix["interval"] = interval
     if rank is not None:
-        spectral["rank"] = rank
+        scores_matrix["rank"] = rank
     if method is not None:
-        spectral["method"] = method
+        scores_matrix["method"] = method
     if heads:
-        spectral["heads"] = list(heads)
+        scores_matrix["heads"] = list(heads)
     if output is not None:
         overrides["output"] = output
 
     # Handle --operator for backward compat
     if operator == "M":
-        spectral["enabled"] = False
-        degree_normalized["enabled"] = True
+        scores_matrix["enabled"] = False
+        degree_normalized_matrix["enabled"] = True
         if interval is not None:
-            degree_normalized["interval"] = interval
+            degree_normalized_matrix["interval"] = interval
         if rank is not None:
-            degree_normalized["rank"] = rank
+            degree_normalized_matrix["rank"] = rank
         if method is not None:
-            degree_normalized["method"] = method
+            degree_normalized_matrix["method"] = method
         if heads:
-            degree_normalized["heads"] = list(heads)
+            degree_normalized_matrix["heads"] = list(heads)
 
     # M-specific params
     if threshold is not None:
-        degree_normalized["threshold"] = threshold
+        degree_normalized_matrix["threshold"] = threshold
     if block_size is not None:
-        degree_normalized["block_size"] = block_size
+        degree_normalized_matrix["block_size"] = block_size
     if hodge is not None:
-        degree_normalized["hodge"] = hodge
+        degree_normalized_matrix["hodge"] = hodge
     if hodge_target_cv is not None:
-        degree_normalized["hodge_target_cv"] = hodge_target_cv
+        degree_normalized_matrix["hodge_target_cv"] = hodge_target_cv
     if hodge_curl_seed is not None:
-        degree_normalized["hodge_curl_seed"] = hodge_curl_seed
+        degree_normalized_matrix["hodge_curl_seed"] = hodge_curl_seed
 
-    if spectral:
-        overrides["spectral"] = spectral
-    if degree_normalized:
-        overrides["degree_normalized"] = degree_normalized
+    if scores_matrix:
+        overrides["scores_matrix"] = scores_matrix
+    if degree_normalized_matrix:
+        overrides["degree_normalized_matrix"] = degree_normalized_matrix
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
@@ -207,25 +207,25 @@ def main(
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
     logger.info(
-        "Config: spectral=%s degree_normalized=%s",
-        "enabled" if config.spectral.enabled else "disabled",
-        "enabled" if config.degree_normalized.enabled else "disabled",
+        "Config: scores_matrix=%s degree_normalized_matrix=%s",
+        "enabled" if config.scores_matrix.enabled else "disabled",
+        "enabled" if config.degree_normalized_matrix.enabled else "disabled",
     )
-    if config.spectral.enabled:
+    if config.scores_matrix.enabled:
         logger.info(
-            "Spectral: interval=%s rank=%s method=%s heads=%s",
-            config.spectral.interval,
-            config.spectral.rank,
-            config.spectral.method,
-            config.spectral.heads,
+            "Scores matrix: interval=%s rank=%s method=%s heads=%s",
+            config.scores_matrix.interval,
+            config.scores_matrix.rank,
+            config.scores_matrix.method,
+            config.scores_matrix.heads,
         )
-    if config.degree_normalized.enabled:
+    if config.degree_normalized_matrix.enabled:
         logger.info(
-            "Degree-normalized: interval=%s rank=%s method=%s heads=%s",
-            config.degree_normalized.interval,
-            config.degree_normalized.rank,
-            config.degree_normalized.method,
-            config.degree_normalized.heads,
+            "Degree-normalized matrix: interval=%s rank=%s method=%s heads=%s",
+            config.degree_normalized_matrix.interval,
+            config.degree_normalized_matrix.rank,
+            config.degree_normalized_matrix.method,
+            config.degree_normalized_matrix.heads,
         )
 
     llm = vllm.LLM(

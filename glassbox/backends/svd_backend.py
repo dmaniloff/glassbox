@@ -145,7 +145,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             return result
 
         # Skip if no signals enabled
-        if not (self.config.spectral.enabled or self.config.degree_normalized.enabled):
+        if not (self.config.scores_matrix.enabled or self.config.degree_normalized_matrix.enabled):
             return result
 
         # 3. Accumulate Q for the first sequence in the batch
@@ -185,12 +185,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         # 4. Check per-signal intervals and run SVD
         spectral_due = (
-            self.config.spectral.enabled
-            and state.step % self.config.spectral.interval == 0
+            self.config.scores_matrix.enabled
+            and state.step % self.config.scores_matrix.interval == 0
         )
         normalized_due = (
-            self.config.degree_normalized.enabled
-            and state.step % self.config.degree_normalized.interval == 0
+            self.config.degree_normalized_matrix.enabled
+            and state.step % self.config.degree_normalized_matrix.interval == 0
         )
         if spectral_due or normalized_due:
             try:
@@ -276,9 +276,9 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # Union of active heads for signals that are due
         heads: set[int] = set()
         if run_spectral:
-            heads.update(self.config.spectral.heads)
+            heads.update(self.config.scores_matrix.heads)
         if run_normalized:
-            heads.update(self.config.degree_normalized.heads)
+            heads.update(self.config.degree_normalized_matrix.heads)
 
         for head_idx in sorted(heads):
             if head_idx >= Q_all.shape[1]:
@@ -290,9 +290,9 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             Qh = Q_all[:, head_idx, :]  # [L, d]
             Kh = K_all[:, kv_head_idx, :]  # [L, d]
 
-            if run_spectral and head_idx in self.config.spectral.heads:
+            if run_spectral and head_idx in self.config.scores_matrix.heads:
                 self._run_svd_scores(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_normalized and head_idx in self.config.degree_normalized.heads:
+            if run_normalized and head_idx in self.config.degree_normalized_matrix.heads:
                 self._run_svd_normalized(
                     layer_name, layer_idx, state, head_idx, Qh, Kh, L
                 )
@@ -308,7 +308,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         L: int,
     ) -> None:
         """SVD of the scores matrix S = QK^T."""
-        cfg = self.config.spectral
+        cfg = self.config.scores_matrix
         device = Qh.device
         matvec = lambda v, Q=Qh, K=Kh: matvec_S(Q, K, v)
         matvec_t = lambda u, Q=Qh, K=Kh: matvec_ST(Q, K, u)
@@ -335,7 +335,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         self._emit_result(
             layer_name, layer_idx, state, head_idx, L, S.cpu().tolist(),
-            signal="spectral",
+            signal="scores_matrix",
         )
 
     def _run_svd_normalized(
@@ -349,7 +349,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         L: int,
     ) -> None:
         """SVD of the degree-normalized cross-operator M."""
-        cfg = self.config.degree_normalized
+        cfg = self.config.degree_normalized_matrix
         scale = 1.0 / math.sqrt(Qh.shape[1])
         k = min(cfg.rank, L - 1)
 
@@ -411,7 +411,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         self._emit_result(
             layer_name, layer_idx, state, head_idx, L, sv_list,
-            signal="degree_normalized", hodge=hodge, tier=tier,
+            signal="degree_normalized_matrix", hodge=hodge, tier=tier,
         )
 
     def _emit_result(
@@ -443,7 +443,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 "L": L,
                 "singular_values": sv_list,
             }
-            if signal == "degree_normalized":
+            if signal == "degree_normalized_matrix":
                 row["tier"] = tier
                 if hodge:
                     row["hodge"] = hodge
