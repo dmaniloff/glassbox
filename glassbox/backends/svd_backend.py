@@ -295,7 +295,9 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             if self.config.operator == "S":
                 self._run_svd_scores(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
             else:
-                self._run_svd_normalized(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+                self._run_svd_normalized(
+                    layer_name, layer_idx, state, head_idx, Qh, Kh, L
+                )
 
     def _run_svd_scores(
         self,
@@ -307,7 +309,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         Kh: torch.Tensor,
         L: int,
     ) -> None:
-        """SVD of the scores matrix S = QK^T (original behavior)."""
+        """SVD of the scores matrix S = QK^T."""
         device = Qh.device
         matvec = lambda v, Q=Qh, K=Kh: matvec_S(Q, K, v)
         matvec_t = lambda u, Q=Qh, K=Kh: matvec_ST(Q, K, u)
@@ -344,7 +346,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         Kh: torch.Tensor,
         L: int,
     ) -> None:
-        """SVD of the degree-normalized cross-operator M, with two-tier dispatch."""
+        """SVD of the degree-normalized cross-operator M."""
         scale = 1.0 / math.sqrt(Qh.shape[1])
         k = min(self.config.rank, L - 1)
 
@@ -357,7 +359,11 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             tier = "materialized"
             hodge = (
                 compute_routing_features_materialized(
-                    M, k, self.config.method, self.config.hodge_target_cv, self.config.hodge_curl_seed
+                    M,
+                    k,
+                    self.config.method,
+                    self.config.hodge_target_cv,
+                    self.config.hodge_curl_seed,
                 )
                 if self.config.hodge
                 else {}
@@ -366,11 +372,17 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             # TIER 2: matrix-free
             _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, self.config.block_size)
             device = Qh.device
-            matvec = lambda v: matvec_M_blocked(Qh, Kh, v, d_k_inv_sqrt, scale, self.config.block_size)
-            matvec_t = lambda u: matvec_MT_blocked(Qh, Kh, u, d_k_inv_sqrt, scale, self.config.block_size)
+            matvec = lambda v: matvec_M_blocked(
+                Qh, Kh, v, d_k_inv_sqrt, scale, self.config.block_size
+            )
+            matvec_t = lambda u: matvec_MT_blocked(
+                Qh, Kh, u, d_k_inv_sqrt, scale, self.config.block_size
+            )
 
             if self.config.method == "lanczos":
-                _, S, _ = svd_via_lanczos(matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device))
+                _, S, _ = svd_via_lanczos(
+                    matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device)
+                )
             else:
                 _, S, _ = randomized_svd(matvec, matvec_t, L, k, device=str(device))
 
@@ -380,14 +392,23 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             if self.config.hodge:
                 lse = compute_logsumexp_blocked(Qh, Kh, scale, self.config.block_size)
                 hodge = compute_routing_features_matrix_free(
-                    Qh, Kh, d_k_inv_sqrt, scale, lse, k,
-                    self.config.method, self.config.block_size,
-                    self.config.hodge_target_cv, self.config.hodge_curl_seed,
+                    Qh,
+                    Kh,
+                    d_k_inv_sqrt,
+                    scale,
+                    lse,
+                    k,
+                    self.config.method,
+                    self.config.block_size,
+                    self.config.hodge_target_cv,
+                    self.config.hodge_curl_seed,
                 )
             else:
                 hodge = {}
 
-        self._emit_result(layer_name, layer_idx, state, head_idx, L, sv_list, hodge, tier)
+        self._emit_result(
+            layer_name, layer_idx, state, head_idx, L, sv_list, hodge, tier
+        )
 
     def _emit_result(
         self,
