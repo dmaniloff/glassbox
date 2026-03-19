@@ -94,6 +94,12 @@ logger = logging.getLogger(__name__)
     help="Seed for curl triangle sampling. [default: from config (42)]",
 )
 @click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="JSONL output file path. [default: from config (log to stderr)]",
+)
+@click.option(
     "--max-tokens",
     type=int,
     default=64,
@@ -112,6 +118,7 @@ def main(
     rank: int | None,
     method: str | None,
     heads: tuple[int, ...],
+    output: str | None,
     operator: str | None,
     threshold: int | None,
     block_size: int | None,
@@ -133,6 +140,8 @@ def main(
         overrides["method"] = method
     if heads:
         overrides["heads"] = list(heads)
+    if output is not None:
+        overrides["output"] = output
     if operator is not None:
         overrides["operator"] = operator
     if threshold is not None:
