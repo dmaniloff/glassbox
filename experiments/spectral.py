@@ -13,23 +13,16 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import random
-import signal
-import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
-from urllib.request import urlopen
 
 import click
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-VLLM = "/opt/pytorch/bin/vllm"
 DEFAULT_MODEL = "facebook/opt-125m"
-DEFAULT_PORT = 8000
 
 SPECTRAL_FEATURES = ["sv_ratio", "sv1", "sv_entropy"]
 
@@ -42,19 +35,6 @@ LABEL_NAMES = {0: "Correct", 1: "Hallucinated"}
 
 def log(msg: str) -> None:
     click.echo(f"[spectral] {msg}")
-
-
-def kill_port(port: int) -> None:
-    try:
-        out = subprocess.check_output(
-            ["lsof", "-ti", f":{port}"], stderr=subprocess.DEVNULL, text=True
-        )
-    except subprocess.CalledProcessError:
-        return
-    for pid in out.strip().split("\n"):
-        if pid:
-            os.kill(int(pid), signal.SIGKILL)
-            log(f"Killed pid {pid} on port {port}")
 
 
 def plot_violin_pointrange(
@@ -196,21 +176,6 @@ def plot_violin_pointrange(
     log(f"Distributions saved to {out_path}")
 
 
-def wait_for_server(port: int, timeout: int = 120) -> bool:
-    log(f"Waiting for server on port {port}...")
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            urlopen(f"http://localhost:{port}/health", timeout=2)
-            elapsed = int(time.time() - start)
-            log(f"Server ready after {elapsed}s")
-            return True
-        except Exception:
-            time.sleep(2)
-    log(f"ERROR: Server failed to start within {timeout}s")
-    return False
-
-
 # ── Dataset loading ───────────────────────────────────────────────────────
 
 
@@ -323,7 +288,6 @@ def cli():
 @click.option(
     "--max-samples", default=200, show_default=True, help="Max samples to process."
 )
-@click.option("--port", default=DEFAULT_PORT, show_default=True, help="Server port.")
 @click.option(
     "--svd-interval", default=16, show_default=True, help="SVD snapshot interval."
 )
@@ -335,12 +299,6 @@ def cli():
     show_default=True,
     type=click.Choice(["text_completions", "chat_completions"]),
     help="Request type (use chat_completions for instruct models).",
-)
-@click.option(
-    "--server-timeout",
-    default=300,
-    show_default=True,
-    help="Max seconds to wait for server.",
 )
 @click.option(
     "--max-tokens", default=128, show_default=True, help="Max tokens per completion."
@@ -356,16 +314,17 @@ def run(
     model: str,
     dataset_name: str,
     max_samples: int,
-    port: int,
     svd_interval: int,
     svd_rank: int,
     request_type: str,
-    server_timeout: int,
     max_tokens: int,
     mode: str,
 ) -> None:
     """Run spectral feature extraction on a labeled dataset."""
-    import openai
+    import vllm
+
+    import glassbox.backends.svd_backend as svd_mod
+    from glassbox.config import GlassboxConfig
 
     # Load dataset
     samples = DATASET_LOADERS[dataset_name](max_samples)
@@ -393,144 +352,103 @@ def run(
     }
     (outdir / "config.json").write_text(json.dumps(config, indent=2))
 
+    svd_features_path = outdir / "svd_features.jsonl"
+
     log(f"Results directory: {outdir}")
     log(f"Model: {model}")
     log(f"Mode: {mode}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
-    log(
-        f"SVD: interval={svd_interval}, rank(number of singular values to compute)={svd_rank}"
+    log(f"SVD: interval={svd_interval}, rank={svd_rank}")
+
+    # Configure glassbox backend
+    gb_config = GlassboxConfig(
+        spectral={"interval": svd_interval, "rank": svd_rank},
+        output=str(svd_features_path),
+    )
+    svd_mod.SVDTritonAttentionImpl.config = gb_config
+
+    # Create vLLM engine
+    log("Creating vLLM engine with CUSTOM attention backend")
+    llm = vllm.LLM(
+        model=model,
+        attention_backend="CUSTOM",
+        enforce_eager=True,
     )
 
-    # Set up environment — backend writes structured JSONL via GLASSBOX_SVD_OUTPUT
-    svd_features_path = outdir / "svd_features.jsonl"
-    env = os.environ.copy()
-    env["GLASSBOX_SVD_INTERVAL"] = str(svd_interval)
-    env["GLASSBOX_SVD_RANK"] = str(svd_rank)
-    env["GLASSBOX_SVD_OUTPUT"] = str(svd_features_path)
+    samples_path = outdir / "samples.jsonl"
+    samples_f = open(samples_path, "w")
 
-    # Build and start server
-    server_cmd = [
-        VLLM,
-        "serve",
-        model,
-        "--attention-backend",
-        "CUSTOM",
-        "--enforce-eager",
-        "--port",
-        str(port),
-    ]
-    if mode == "evaluate":
-        # Force one request at a time to ensure request_id tracking aligns
-        server_cmd += ["--max-num-seqs", "1"]
+    request_counter = 0
+    for i, sample in enumerate(samples):
+        try:
+            if mode == "evaluate":
+                # Two-phase prefill: question-only baseline, then full
+                prompt_q = f"Q: {sample['question']}\nA:"
+                prompt_full = f"Q: {sample['question']}\nA: {sample['response']}"
 
-    kill_port(port)
-    time.sleep(1)
-
-    log(f"Starting server: {' '.join(server_cmd)}")
-    server_log_path = outdir / "server.log"
-    server_log_w = open(server_log_path, "w")
-    server_proc = subprocess.Popen(
-        server_cmd,
-        stdout=server_log_w,
-        stderr=subprocess.STDOUT,
-        env=env,
-        start_new_session=True,
-    )
-
-    try:
-        if not wait_for_server(port, timeout=server_timeout):
-            log("Server log tail:")
-            server_log_w.flush()
-            click.echo(server_log_path.read_text()[-2000:])
-            os.killpg(server_proc.pid, signal.SIGKILL)
-            sys.exit(1)
-
-        client = openai.OpenAI(base_url=f"http://localhost:{port}/v1", api_key="dummy")
-
-        samples_path = outdir / "samples.jsonl"
-        samples_f = open(samples_path, "w")
-
-        request_counter = 0
-        for i, sample in enumerate(samples):
-            try:
-                if mode == "evaluate":
-                    # Two-phase prefill: question-only baseline, then full
-                    prompt_q = f"Q: {sample['question']}\nA:"
-                    prompt_full = f"Q: {sample['question']}\nA: {sample['response']}"
-
-                    for phase, prompt in [
-                        ("question", prompt_q),
-                        ("full", prompt_full),
-                    ]:
-                        resp = client.completions.create(
-                            model=model,
-                            prompt=prompt,
-                            max_tokens=1,
-                        )
-                        sample_row = {
-                            "request_id": request_counter,
-                            "sample_id": sample["idx"],
-                            "phase": phase,
-                            "dataset": dataset_name,
-                            **sample,
-                            "prompt_length": len(prompt),
-                            "generated": resp.choices[0].text,
-                        }
-                        samples_f.write(json.dumps(sample_row) + "\n")
-                        samples_f.flush()
-                        request_counter += 1
-
-                else:
-                    if request_type == "chat_completions":
-                        resp = client.chat.completions.create(
-                            model=model,
-                            messages=[{"role": "user", "content": sample["question"]}],
-                            max_tokens=max_tokens,
-                        )
-                        generated = resp.choices[0].message.content or ""
-                        prompt = sample["question"]
-                    else:
-                        prompt = f"Q: {sample['question']}\nA:"
-                        resp = client.completions.create(
-                            model=model,
-                            prompt=prompt,
-                            max_tokens=max_tokens,
-                        )
-                        generated = resp.choices[0].text
-
+                for phase, prompt in [
+                    ("question", prompt_q),
+                    ("full", prompt_full),
+                ]:
+                    outputs = llm.generate(
+                        [prompt],
+                        vllm.SamplingParams(max_tokens=1),
+                    )
                     sample_row = {
                         "request_id": request_counter,
                         "sample_id": sample["idx"],
-                        "phase": "generate",
+                        "phase": phase,
                         "dataset": dataset_name,
                         **sample,
                         "prompt_length": len(prompt),
-                        "generated": generated,
-                        "response_length": len(sample.get("response", "")),
+                        "generated": outputs[0].outputs[0].text,
                     }
                     samples_f.write(json.dumps(sample_row) + "\n")
                     samples_f.flush()
                     request_counter += 1
 
-            except Exception as e:
-                log(f"  [{i + 1}/{len(samples)}] ERROR: {e}")
-                continue
+            else:
+                sampling_params = vllm.SamplingParams(max_tokens=max_tokens)
+                if request_type == "chat_completions":
+                    outputs = llm.chat(
+                        messages=[{"role": "user", "content": sample["question"]}],
+                        sampling_params=sampling_params,
+                    )
+                    generated = outputs[0].outputs[0].text
+                    prompt = sample["question"]
+                else:
+                    prompt = f"Q: {sample['question']}\nA:"
+                    outputs = llm.generate(
+                        [prompt], sampling_params,
+                    )
+                    generated = outputs[0].outputs[0].text
 
-            label_str = "HALL" if sample["label"] == 1 else "OK"
-            if (i + 1) % 10 == 0 or i == 0:
-                log(f"  [{i + 1}/{len(samples)}] {label_str}")
+                sample_row = {
+                    "request_id": request_counter,
+                    "sample_id": sample["idx"],
+                    "phase": "generate",
+                    "dataset": dataset_name,
+                    **sample,
+                    "prompt_length": len(prompt),
+                    "generated": generated,
+                    "response_length": len(sample.get("response", "")),
+                }
+                samples_f.write(json.dumps(sample_row) + "\n")
+                samples_f.flush()
+                request_counter += 1
 
-        samples_f.close()
-        log(f"Done! {len(samples)} samples, {request_counter} requests")
-        log(f"  samples:      {samples_path}")
-        log(f"  svd features: {svd_features_path}")
+        except Exception as e:
+            log(f"  [{i + 1}/{len(samples)}] ERROR: {e}")
+            continue
 
-    finally:
-        os.killpg(server_proc.pid, signal.SIGKILL)
-        server_proc.wait()
-        server_log_w.close()
-        kill_port(port)
-        time.sleep(2)
+        label_str = "HALL" if sample["label"] == 1 else "OK"
+        if (i + 1) % 10 == 0 or i == 0:
+            log(f"  [{i + 1}/{len(samples)}] {label_str}")
+
+    samples_f.close()
+    log(f"Done! {len(samples)} samples, {request_counter} requests")
+    log(f"  samples:      {samples_path}")
+    log(f"  svd features: {svd_features_path}")
 
 
 @cli.command()

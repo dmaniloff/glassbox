@@ -163,16 +163,16 @@ def _run_one(
     metadata = {"model": model, **asdict(config)}
     (outdir / "config.json").write_text(json.dumps(metadata, indent=2))
 
-    # Set up environment for SVD configs
-    env = os.environ.copy()
-    env.pop("GLASSBOX_SVD_INTERVAL", None)
-    env.pop("GLASSBOX_SVD_RANK", None)
-    env.pop("GLASSBOX_SVD_METHOD", None)
+    # Write glassbox config for SVD configs
     if config.svd_interval is not None:
-        env["GLASSBOX_SVD_INTERVAL"] = str(config.svd_interval)
-        env["GLASSBOX_SVD_RANK"] = str(config.svd_rank)
-    if config.svd_method is not None:
-        env["GLASSBOX_SVD_METHOD"] = config.svd_method
+        yaml_lines = [
+            "spectral:",
+            f"  interval: {config.svd_interval}",
+            f"  rank: {config.svd_rank}",
+        ]
+        if config.svd_method is not None:
+            yaml_lines.append(f"  method: {config.svd_method}")
+        (outdir / "glassbox.yaml").write_text("\n".join(yaml_lines) + "\n")
 
     # Build server command
     server_cmd = [
@@ -194,7 +194,7 @@ def _run_one(
         server_cmd,
         stdout=server_log,
         stderr=subprocess.STDOUT,
-        env=env,
+        cwd=str(outdir),
         start_new_session=True,
     )
 
