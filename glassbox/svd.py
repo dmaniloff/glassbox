@@ -24,14 +24,77 @@ def matvec_ST(Q, K, u):
     return K @ z  # [L]
 
 
-def matvec_A(x):
-    """This is attention @ x."""
-    pass
+def apply_A_blocked(Q, K, v, scale, block_size=256):
+    """A @ v via blocked row-streaming. Peak memory: O(block_size * L_k)."""
+    L_q = Q.shape[0]
+    result = torch.zeros(L_q, device=Q.device, dtype=Q.dtype)
+    for i0 in range(0, L_q, block_size):
+        i1 = min(i0 + block_size, L_q)
+        scores = Q[i0:i1] @ K.T * scale          # [bs, L_k]
+        attn = torch.softmax(scores, dim=-1)       # [bs, L_k]
+        result[i0:i1] = attn @ v                   # [bs]
+    return result
 
 
-def matvec_AT(x):
-    """This is attention^T @ x."""
-    pass
+def apply_AT_blocked(Q, K, u, scale, block_size=256):
+    """A^T @ u via blocked row-streaming."""
+    L_k = K.shape[0]
+    result = torch.zeros(L_k, device=K.device, dtype=K.dtype)
+    for i0 in range(0, Q.shape[0], block_size):
+        i1 = min(i0 + block_size, Q.shape[0])
+        scores = Q[i0:i1] @ K.T * scale
+        attn = torch.softmax(scores, dim=-1)       # [bs, L_k]
+        result += attn.T @ u[i0:i1]                # [L_k]
+    return result
+
+
+def compute_dk_blocked(Q, K, scale, block_size=256):
+    """Compute D_K (column sums of A) via apply_AT_blocked."""
+    ones = torch.ones(Q.shape[0], device=Q.device, dtype=Q.dtype)
+    d_k = apply_AT_blocked(Q, K, ones, scale, block_size)
+    d_k_inv_sqrt = 1.0 / torch.sqrt(d_k + 1e-8)
+    return d_k, d_k_inv_sqrt
+
+
+def compute_logsumexp_blocked(Q, K, scale, block_size=256):
+    """Precompute lse[i] = logsumexp(Q_i . K^T * scale) for all rows."""
+    L_q = Q.shape[0]
+    lse = torch.zeros(L_q, device=Q.device, dtype=Q.dtype)
+    for i0 in range(0, L_q, block_size):
+        i1 = min(i0 + block_size, L_q)
+        scores = Q[i0:i1] @ K.T * scale          # [bs, L_k]
+        lse[i0:i1] = torch.logsumexp(scores, dim=-1)
+    return lse
+
+
+def get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, ii, jj):
+    """Compute M[ii, jj] on the fly. O(N*d) cost."""
+    scores = (Q[ii] * K[jj]).sum(dim=-1) * scale   # [N]
+    A_ij = torch.exp(scores - lse[ii])              # [N]
+    return A_ij * d_k_inv_sqrt[jj]                  # [N]
+
+
+def matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+    """M @ x = A @ (D_K^{-1/2} * x). D_Q^{-1/2} = I for row-stochastic A."""
+    return apply_A_blocked(Q, K, d_k_inv_sqrt * x, scale, block_size)
+
+
+def matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+    """M^T @ x = D_K^{-1/2} * (A^T @ x)."""
+    return d_k_inv_sqrt * apply_AT_blocked(Q, K, x, scale, block_size)
+
+
+def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256):
+    """Compute ||M||_F without materializing M."""
+    L_q = Q.shape[0]
+    norm_sq = torch.tensor(0.0, device=Q.device, dtype=Q.dtype)
+    for i0 in range(0, L_q, block_size):
+        i1 = min(i0 + block_size, L_q)
+        scores = Q[i0:i1] @ K.T * scale
+        attn = torch.softmax(scores, dim=-1)       # [bs, L_k]
+        M_block = attn * d_k_inv_sqrt.unsqueeze(0)  # broadcast [bs, L_k]
+        norm_sq = norm_sq + (M_block ** 2).sum()
+    return torch.sqrt(norm_sq)
 
 
 def compute_degree_normalized_M(A, epsilon=1e-8):
@@ -68,24 +131,10 @@ def compute_degree_normalized_M(A, epsilon=1e-8):
     return M, d_q_inv_sqrt, d_k_inv_sqrt
 
 
-def matvec_M(x, d_q_inv_sqrt, d_k_inv_sqrt):
-    # diag-scale input (d*_inv_sqrt are vectors)
-    x1 = d_k_inv_sqrt * x  # [L]
-    y1 = matvec_A(x1)  # attention @ x1   (FlashAttn-like run with dv=1)
-    y = d_q_inv_sqrt * y1  # [L]
-    return y
-
-
-def matvec_MT(x, d_q_inv_sqrt, d_k_inv_sqrt):
-    x1 = d_q_inv_sqrt * x
-    y1 = matvec_AT(x1)
-    y = d_k_inv_sqrt * y1
-    return y
-
-
-def matvec_B(x, d_q_inv_sqrt, d_k_inv_sqrt):
-    y = matvec_M(x, d_q_inv_sqrt, d_k_inv_sqrt)
-    return matvec_MT(y, d_q_inv_sqrt, d_k_inv_sqrt)
+def matvec_B_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+    """B @ x = M^T @ (M @ x)."""
+    y = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    return matvec_MT_blocked(Q, K, y, d_k_inv_sqrt, scale, block_size)
 
 
 def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
