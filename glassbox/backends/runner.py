@@ -5,9 +5,10 @@ Usage:
     python -m glassbox.backends.runner [OPTIONS]
     python -m glassbox.backends.runner --interval 16 --rank 2 --heads 0 1 2
     python -m glassbox.backends.runner --model facebook/opt-350m --method lanczos
+    python -m glassbox.backends.runner --config glassbox.yaml
 
-Options can also be set via environment variables (prefix GLASSBOX_SVD_)
-or a .env file. CLI args take precedence.
+Options can also be set via glassbox.yaml or legacy GLASSBOX_SVD_* env vars.
+CLI args take highest precedence.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import vllm
 
 # Import triggers @register_backend(AttentionBackendEnum.CUSTOM)
 import glassbox.backends.svd_backend as svd_mod
+from glassbox.config import GlassboxConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,6 +102,13 @@ logger = logging.getLogger(__name__)
     help="JSONL output file path. [default: from config (log to stderr)]",
 )
 @click.option(
+    "--config",
+    "config_file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to YAML config file. [default: glassbox.yaml if present]",
+)
+@click.option(
     "--max-tokens",
     type=int,
     default=64,
@@ -119,6 +128,7 @@ def main(
     method: str | None,
     heads: tuple[int, ...],
     output: str | None,
+    config_file: str | None,
     operator: str | None,
     threshold: int | None,
     block_size: int | None,
@@ -130,45 +140,93 @@ def main(
 ) -> None:
     """Launch vLLM with the custom SVD attention backend."""
 
-    # Build config: start from env vars / .env defaults, override with CLI args
+    # Build nested config overrides from CLI args
     overrides: dict = {}
+    scores_matrix: dict = {}
+    degree_normalized_matrix: dict = {}
+
     if interval is not None:
-        overrides["interval"] = interval
+        scores_matrix["interval"] = interval
     if rank is not None:
-        overrides["rank"] = rank
+        scores_matrix["rank"] = rank
     if method is not None:
-        overrides["method"] = method
+        scores_matrix["method"] = method
     if heads:
-        overrides["heads"] = list(heads)
+        scores_matrix["heads"] = list(heads)
     if output is not None:
         overrides["output"] = output
-    if operator is not None:
-        overrides["operator"] = operator
-    if threshold is not None:
-        overrides["threshold"] = threshold
-    if block_size is not None:
-        overrides["block_size"] = block_size
-    if hodge is not None:
-        overrides["hodge"] = hodge
-    if hodge_target_cv is not None:
-        overrides["hodge_target_cv"] = hodge_target_cv
-    if hodge_curl_seed is not None:
-        overrides["hodge_curl_seed"] = hodge_curl_seed
 
-    # vLLM calls impl_cls(). There doesn't seem to be a way to inject extra args through the vLLM call path.
-    # So we set the config as a class variable on SVDTritonAttentionImpl before vLLM creates the engine.
-    config = svd_mod.SVDConfig(**overrides)
+    # Handle --operator for backward compat
+    if operator == "M":
+        scores_matrix["enabled"] = False
+        degree_normalized_matrix["enabled"] = True
+        if interval is not None:
+            degree_normalized_matrix["interval"] = interval
+        if rank is not None:
+            degree_normalized_matrix["rank"] = rank
+        if method is not None:
+            degree_normalized_matrix["method"] = method
+        if heads:
+            degree_normalized_matrix["heads"] = list(heads)
+
+    # M-specific params
+    if threshold is not None:
+        degree_normalized_matrix["threshold"] = threshold
+    if block_size is not None:
+        degree_normalized_matrix["block_size"] = block_size
+    if hodge is not None:
+        degree_normalized_matrix["hodge"] = hodge
+    if hodge_target_cv is not None:
+        degree_normalized_matrix["hodge_target_cv"] = hodge_target_cv
+    if hodge_curl_seed is not None:
+        degree_normalized_matrix["hodge_curl_seed"] = hodge_curl_seed
+
+    if scores_matrix:
+        overrides["scores_matrix"] = scores_matrix
+    if degree_normalized_matrix:
+        overrides["degree_normalized_matrix"] = degree_normalized_matrix
+
+    # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
+    if config_file:
+        import yaml
+
+        with open(config_file) as f:
+            yaml_data = yaml.safe_load(f) or {}
+        for key, val in yaml_data.items():
+            if key not in overrides:
+                overrides[key] = val
+            elif isinstance(overrides[key], dict) and isinstance(val, dict):
+                overrides[key] = {**val, **overrides[key]}
+
+    # vLLM calls impl_cls(). There doesn't seem to be a way to inject extra
+    # args through the vLLM call path. So we set the config as a class
+    # variable on SVDTritonAttentionImpl before vLLM creates the engine.
+    config = GlassboxConfig(**overrides)
     svd_mod.SVDTritonAttentionImpl.config = config
 
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
     logger.info(
-        "SVD config: interval=%s rank=%s method=%s heads=%s",
-        config.interval,
-        config.rank,
-        config.method,
-        config.heads,
+        "Config: scores_matrix=%s degree_normalized_matrix=%s",
+        "enabled" if config.scores_matrix.enabled else "disabled",
+        "enabled" if config.degree_normalized_matrix.enabled else "disabled",
     )
+    if config.scores_matrix.enabled:
+        logger.info(
+            "Scores matrix: interval=%s rank=%s method=%s heads=%s",
+            config.scores_matrix.interval,
+            config.scores_matrix.rank,
+            config.scores_matrix.method,
+            config.scores_matrix.heads,
+        )
+    if config.degree_normalized_matrix.enabled:
+        logger.info(
+            "Degree-normalized matrix: interval=%s rank=%s method=%s heads=%s",
+            config.degree_normalized_matrix.interval,
+            config.degree_normalized_matrix.rank,
+            config.degree_normalized_matrix.method,
+            config.degree_normalized_matrix.heads,
+        )
 
     llm = vllm.LLM(
         model=model,
