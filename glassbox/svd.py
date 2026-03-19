@@ -47,11 +47,17 @@ def apply_AT_blocked(Q, K, u, scale, block_size=256):
     return result
 
 
-def compute_dk_blocked(Q, K, scale, block_size=256):
-    """Compute D_K (column sums of A) via apply_AT_blocked."""
+def compute_dk_blocked(Q, K, scale, block_size=256, epsilon=1e-10):
+    """Compute D_K (column sums of A) via apply_AT_blocked.
+
+    Uses Moore-Penrose pseudoinverse: zero-degree positions get 0 instead of
+    large values.
+    """
     ones = torch.ones(Q.shape[0], device=Q.device, dtype=Q.dtype)
     d_k = apply_AT_blocked(Q, K, ones, scale, block_size)
-    d_k_inv_sqrt = 1.0 / torch.sqrt(d_k + 1e-8)
+    d_k_inv_sqrt = torch.where(
+        d_k > epsilon, 1.0 / torch.sqrt(d_k), torch.zeros_like(d_k)
+    )
     return d_k, d_k_inv_sqrt
 
 
@@ -96,7 +102,7 @@ def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256):
     return torch.sqrt(norm_sq)
 
 
-def compute_degree_normalized_M(A, epsilon=1e-8):
+def compute_degree_normalized_M(A, epsilon=1e-10):
     """
     Compute the degree-normalized cross-operator M from attention matrix A (materialized version).
 
@@ -106,26 +112,29 @@ def compute_degree_normalized_M(A, epsilon=1e-8):
 
     Args:
         A: Attention matrix of shape (n_q, n_k)
-        epsilon: Small value for numerical stability (default: 1e-8)
+        epsilon: Threshold below which degrees are treated as zero (default: 1e-10)
 
     Returns:
         M: Degree-normalized cross-operator of shape (n_q, n_k)
-        d_q_inv_sqrt: Inverse sqrt of query degree vector d_q^{-1/2} of shape (n_q,)
-        d_k_inv_sqrt: Inverse sqrt of key degree vector d_k^{-1/2} of shape (n_k,)
+        d_q_inv_sqrt: Inverse sqrt of query degree vector of shape (n_q,)
+        d_k_inv_sqrt: Inverse sqrt of key degree vector of shape (n_k,)
     """
     # Compute row sums (query degrees): d_Q_i = sum_j A_ij
-    d_q = A.sum(dim=1)  # shape: (n_q,); if A is softmax over rows, then D_Q = I
+    # shape: (n_q,); if A is softmax over rows, then D_Q = I
+    d_q = A.sum(dim=1)
 
     # Compute column sums (key degrees): d_K_j = sum_i A_ij
-    d_k = A.sum(
-        dim=0
-    )  # shape: (n_k,); in a real implementation, get the column degrees with a call to matvec_AT on an all‑ones vector.
+    # shape: (n_k,)
+    d_k = A.sum(dim=0)
 
-    # Compute inverse sqrt degree *vectors* (we only need elementwise scaling for matvecs).
-    d_q_inv_sqrt = 1.0 / torch.sqrt(d_q + epsilon)  # (n_q,)
-    d_k_inv_sqrt = 1.0 / torch.sqrt(d_k + epsilon)  # (n_k,)
+    # Moore-Penrose pseudoinverse: zero out near-zero degrees
+    d_q_inv_sqrt = torch.where(
+        d_q > epsilon, 1.0 / torch.sqrt(d_q), torch.zeros_like(d_q)
+    )
+    d_k_inv_sqrt = torch.where(
+        d_k > epsilon, 1.0 / torch.sqrt(d_k), torch.zeros_like(d_k)
+    )
 
-    # Explicit M (optional / for debugging)
     M = (d_q_inv_sqrt[:, None] * A) * d_k_inv_sqrt[None, :]
 
     return M, d_q_inv_sqrt, d_k_inv_sqrt

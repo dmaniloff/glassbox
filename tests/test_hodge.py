@@ -1,22 +1,21 @@
 import math
 
 import torch
-import pytest
 
-from glassbox.svd import (
-    compute_degree_normalized_M,
-    compute_dk_blocked,
-    compute_logsumexp_blocked,
-)
 from glassbox.hodge import (
-    sample_triangles,
     adaptive_curl_samples,
-    estimate_curl_materialized,
-    estimate_curl_matrix_free,
     compute_G_materialized,
     compute_G_matrix_free,
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
+    estimate_curl_materialized,
+    estimate_curl_matrix_free,
+    sample_triangles,
+)
+from glassbox.svd import (
+    compute_degree_normalized_M,
+    compute_dk_blocked,
+    compute_logsumexp_blocked,
 )
 
 
@@ -69,7 +68,9 @@ def test_curl_materialized_vs_matrix_free():
     M_fro = torch.linalg.norm(M, "fro").item()
 
     C_mat = estimate_curl_materialized(M, target_cv=0.05, seed=42)
-    C_mf = estimate_curl_matrix_free(Q, K, lse, d_k_inv_sqrt, scale, M_fro, target_cv=0.05, seed=42)
+    C_mf = estimate_curl_matrix_free(
+        Q, K, lse, d_k_inv_sqrt, scale, M_fro, target_cv=0.05, seed=42
+    )
     # They use the same triangle samples and same M entries, so should be close
     assert abs(C_mat - C_mf) < 0.05, f"Curl mismatch: mat={C_mat}, mf={C_mf}"
 
@@ -91,15 +92,27 @@ def test_pythagorean_identity():
     C = features["C"]
     Gamma = features["Gamma"]
     # Pythagorean: G^2 = Gamma^2 + C^2 (approximately)
-    assert abs(G**2 - Gamma**2 - C**2) < 0.01, f"Pythagorean violation: G={G}, Gamma={Gamma}, C={C}"
+    assert abs(G**2 - Gamma**2 - C**2) < 0.01, (
+        f"Pythagorean violation: G={G}, Gamma={Gamma}, C={C}"
+    )
 
 
 def test_routing_features_consistency():
     """All features should have expected keys and reasonable ranges."""
     Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
     features = compute_routing_features_materialized(M, rank=4)
-    expected_keys = {"phi_hat", "sigma2", "G", "Gamma", "C", "curl_ratio", "sigma2_asym", "commutator_norm"}
+    expected_keys = {
+        "phi_hat",
+        "sigma2",
+        "G",
+        "Gamma",
+        "C",
+        "curl_ratio",
+        "sigma2_asym",
+        "commutator_norm",
+    }
     assert set(features.keys()) == expected_keys
+    # sigma2 is the second singular value (raw), should be in [0, 1] for M
     assert 0.0 <= features["sigma2"] <= 1.0
     assert 0.0 <= features["phi_hat"] <= 1.0
     assert features["G"] >= 0.0
