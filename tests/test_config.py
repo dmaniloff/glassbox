@@ -25,10 +25,9 @@ def test_programmatic_kwargs():
 
 def test_programmatic_kwargs_degree_normalized():
     config = GlassboxConfig(
-        degree_normalized_matrix={"enabled": True, "hodge": True, "threshold": 1024}
+        degree_normalized_matrix={"enabled": True, "threshold": 1024}
     )
     assert config.degree_normalized_matrix.enabled is True
-    assert config.degree_normalized_matrix.hodge is True
     assert config.degree_normalized_matrix.threshold == 1024
     assert config.degree_normalized_matrix.rank == 4  # default preserved
 
@@ -47,7 +46,6 @@ def test_yaml_degree_normalized(tmp_path, monkeypatch):
         "degree_normalized_matrix:\n"
         "  enabled: true\n"
         "  interval: 64\n"
-        "  hodge: true\n"
         "output: /var/log/glassbox/signals.jsonl\n"
     )
     (tmp_path / "glassbox.yaml").write_text(yaml_content)
@@ -55,7 +53,6 @@ def test_yaml_degree_normalized(tmp_path, monkeypatch):
     config = GlassboxConfig()
     assert config.degree_normalized_matrix.enabled is True
     assert config.degree_normalized_matrix.interval == 64
-    assert config.degree_normalized_matrix.hodge is True
     assert config.output == "/var/log/glassbox/signals.jsonl"
 
 

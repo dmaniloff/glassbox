@@ -30,7 +30,6 @@ class DegreeNormalizedMatrixConfig(BaseModel):
     heads: list[int] = [0]
     threshold: int = 2048
     block_size: int = 256
-    hodge: bool = False
     hodge_target_cv: float = 0.05
     hodge_curl_seed: int = 42
 
