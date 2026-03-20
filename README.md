@@ -182,7 +182,7 @@ This format is designed to feed downstream systems directly. You can:
 - monitor drift across prompts or tasks
 - aggregate by head, layer, request, or dataset
 
-The dataset extraction pipeline in `experiments/extract.py` also writes a wide Parquet file for downstream modeling workflows.
+The dataset extraction pipeline in `experiments/extract.py` can also write a wide Parquet file.
 
 ## Example Downstream Uses
 
