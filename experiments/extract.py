@@ -276,11 +276,6 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
     help="Seq length threshold for materialized vs matrix-free. [default: 2048]",
 )
 @click.option(
-    "--hodge/--no-hodge",
-    default=None,
-    help="Compute Hodge decomposition features. [default: disabled]",
-)
-@click.option(
     "--request-type",
     "request_type",
     default="text_completions",
@@ -313,7 +308,6 @@ def main(
     scores_matrix: bool,
     degree_normalized: bool,
     threshold: int | None,
-    hodge: bool | None,
     request_type: str,
     max_tokens: int,
     mode: str,
@@ -365,7 +359,7 @@ def main(
     if heads:
         log(f"Heads: {list(heads)}")
     if degree_normalized:
-        log(f"Degree-normalized: enabled (threshold={threshold or 2048}, hodge={hodge or False})")
+        log(f"Degree-normalized: enabled (threshold={threshold or 2048})")
 
     if not scores_matrix and not degree_normalized:
         raise click.UsageError("At least one of --scores-matrix or --degree-normalized must be enabled.")
@@ -389,8 +383,6 @@ def main(
             dn_cfg["heads"] = list(heads)
         if threshold is not None:
             dn_cfg["threshold"] = threshold
-        if hodge is not None:
-            dn_cfg["hodge"] = hodge
         gb_kwargs["degree_normalized_matrix"] = dn_cfg
 
     gb_config = GlassboxConfig(**gb_kwargs)

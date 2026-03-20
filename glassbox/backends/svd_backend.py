@@ -374,16 +374,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             sigma = torch.linalg.svdvals(M)
             sv_list = sigma[:k].cpu().tolist()
             tier = "materialized"
-            hodge = (
-                compute_routing_features_materialized(
-                    M,
-                    k,
-                    cfg.method,
-                    cfg.hodge_target_cv,
-                    cfg.hodge_curl_seed,
-                )
-                if cfg.hodge
-                else None
+            hodge = compute_routing_features_materialized(
+                M,
+                k,
+                cfg.method,
+                cfg.hodge_target_cv,
+                cfg.hodge_curl_seed,
             )
         else:
             # TIER 2: matrix-free
@@ -406,22 +402,19 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             sv_list = S.cpu().tolist()
             tier = "matrix_free"
 
-            if cfg.hodge:
-                lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size)
-                hodge = compute_routing_features_matrix_free(
-                    Qh,
-                    Kh,
-                    d_k_inv_sqrt,
-                    scale,
-                    lse,
-                    k,
-                    cfg.method,
-                    cfg.block_size,
-                    cfg.hodge_target_cv,
-                    cfg.hodge_curl_seed,
-                )
-            else:
-                hodge = None
+            lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size)
+            hodge = compute_routing_features_matrix_free(
+                Qh,
+                Kh,
+                d_k_inv_sqrt,
+                scale,
+                lse,
+                k,
+                cfg.method,
+                cfg.block_size,
+                cfg.hodge_target_cv,
+                cfg.hodge_curl_seed,
+            )
 
         snapshot = SVDSnapshot(
             feature_group="degree_normalized_matrix",
@@ -434,7 +427,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             singular_values=sv_list,
             tier=tier,
             features=DegreeNormalizedFeatures.from_singular_values(
-                sv_list, routing=hodge if hodge else None,
+                sv_list, routing=hodge,
             ),
         )
         self._emit_result(snapshot)
