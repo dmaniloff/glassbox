@@ -147,7 +147,7 @@ The routing and Hodge-style metrics live in `glassbox/hodge.py`. The feature sch
 NOTE: `sigma2_asym` and `commutator_norm` are not yet implemented for the matrix-free normalized-operator path.
 
 
-### Coming soon
+### More features coming soon
 
 #### Transport features from the Degree-normalized matrix (post-softmax attention, value-weighted routing)
 
