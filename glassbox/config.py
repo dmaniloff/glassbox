@@ -28,10 +28,13 @@ class DegreeNormalizedMatrixConfig(BaseModel):
     rank: int = 4
     method: Literal["randomized", "lanczos"] = "randomized"
     heads: list[int] = [0]
-    threshold: int = 2048
+    threshold: int = 2048  # Deprecated: all paths are now matrix-free
     block_size: int = 256
     hodge_target_cv: float = 0.05
     hodge_curl_seed: int = 42
+    hodge_confidence: float = 0.95
+    hodge_pilot_size: int = 100
+    hodge_min_samples: int = 200
 
 
 class GlassboxConfig(BaseSettings):

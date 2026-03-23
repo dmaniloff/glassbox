@@ -146,6 +146,32 @@ def matvec_B_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
     return matvec_MT_blocked(Q, K, y, d_k_inv_sqrt, scale, block_size)
 
 
+def matvec_Masym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+    """(M - M^T)/2 @ x = (M@x - M^T@x) / 2."""
+    Mx = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    MTx = matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    return (Mx - MTx) / 2.0
+
+
+def matvec_Msym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+    """(M + M^T)/2 @ x = (M@x + M^T@x) / 2."""
+    Mx = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    MTx = matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    return (Mx + MTx) / 2.0
+
+
+def matvec_commutator_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+    """[M_sym, M_asym] @ x = M_sym(M_asym(x)) - M_asym(M_sym(x)).
+
+    Cost: 8 matvecs per application (2 per sym/asym call, 4 calls total).
+    """
+    asym_x = matvec_Masym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    term1 = matvec_Msym_blocked(Q, K, asym_x, d_k_inv_sqrt, scale, block_size)
+    sym_x = matvec_Msym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    term2 = matvec_Masym_blocked(Q, K, sym_x, d_k_inv_sqrt, scale, block_size)
+    return term1 - term2
+
+
 def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
     """
     Matrix-free Randomized SVD for a (dim x dim) linear operator given matvecs.

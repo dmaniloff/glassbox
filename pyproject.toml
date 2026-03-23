@@ -19,3 +19,9 @@ include = ["glassbox*"]
 
 [project.entry-points."vllm.general_plugins"]
 glassbox_svd = "glassbox.vllm_plugin:register_svd_backend"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

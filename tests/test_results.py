@@ -124,11 +124,11 @@ class TestSVDSnapshot:
         features = DegreeNormalizedFeatures.from_singular_values([1.0, 0.5], routing=routing)
         snap = self._make_snapshot(
             feature_group="degree_normalized_matrix",
-            tier="materialized",
+            tier="matrix_free",
             features=features,
         )
         d = snap.model_dump(exclude_none=True)
-        assert d["tier"] == "materialized"
+        assert d["tier"] == "matrix_free"
         assert d["features"]["phi_hat"] == 0.3
         restored = SVDSnapshot.from_jsonl_row(d)
         assert restored.features.phi_hat == 0.3

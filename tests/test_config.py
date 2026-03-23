@@ -13,7 +13,10 @@ def test_defaults():
     assert config.scores_matrix.method == "randomized"
     assert config.scores_matrix.heads == [0]
     assert config.degree_normalized_matrix.interval == 32
-    assert config.degree_normalized_matrix.threshold == 2048
+    assert config.degree_normalized_matrix.threshold == 2048  # deprecated but still present
+    assert config.degree_normalized_matrix.hodge_confidence == 0.95
+    assert config.degree_normalized_matrix.hodge_pilot_size == 100
+    assert config.degree_normalized_matrix.hodge_min_samples == 200
     assert config.output is None
 
 

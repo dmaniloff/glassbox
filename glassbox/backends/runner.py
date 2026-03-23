@@ -70,7 +70,8 @@ logger = logging.getLogger(__name__)
     "--threshold",
     type=int,
     default=None,
-    help="Sequence length threshold for materialized vs matrix-free. [default: from config (2048)]",
+    hidden=True,
+    help="Deprecated: all paths are now matrix-free.",
 )
 @click.option(
     "--block-size",
@@ -94,6 +95,24 @@ logger = logging.getLogger(__name__)
     type=int,
     default=None,
     help="Seed for curl triangle sampling. [default: from config (42)]",
+)
+@click.option(
+    "--hodge-confidence",
+    type=float,
+    default=None,
+    help="Bernstein bound confidence level. [default: from config (0.95)]",
+)
+@click.option(
+    "--hodge-pilot-size",
+    type=int,
+    default=None,
+    help="Pilot triangle samples for kurtosis estimation. [default: from config (100)]",
+)
+@click.option(
+    "--hodge-min-samples",
+    type=int,
+    default=None,
+    help="Minimum triangle sample count. [default: from config (200)]",
 )
 @click.option(
     "--output",
@@ -135,6 +154,9 @@ def main(
     hodge: bool | None,
     hodge_target_cv: float | None,
     hodge_curl_seed: int | None,
+    hodge_confidence: float | None,
+    hodge_pilot_size: int | None,
+    hodge_min_samples: int | None,
     max_tokens: int,
     prompt: str,
 ) -> None:
@@ -171,7 +193,12 @@ def main(
 
     # M-specific params
     if threshold is not None:
-        degree_normalized_matrix["threshold"] = threshold
+        import warnings
+        warnings.warn(
+            "--threshold is deprecated (all paths are now matrix-free)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     if block_size is not None:
         degree_normalized_matrix["block_size"] = block_size
     if hodge is not None:
@@ -180,6 +207,12 @@ def main(
         degree_normalized_matrix["hodge_target_cv"] = hodge_target_cv
     if hodge_curl_seed is not None:
         degree_normalized_matrix["hodge_curl_seed"] = hodge_curl_seed
+    if hodge_confidence is not None:
+        degree_normalized_matrix["hodge_confidence"] = hodge_confidence
+    if hodge_pilot_size is not None:
+        degree_normalized_matrix["hodge_pilot_size"] = hodge_pilot_size
+    if hodge_min_samples is not None:
+        degree_normalized_matrix["hodge_min_samples"] = hodge_min_samples
 
     if scores_matrix:
         overrides["scores_matrix"] = scores_matrix

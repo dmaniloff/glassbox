@@ -38,16 +38,10 @@ from glassbox.results import (
     SVDSnapshot,
     ScoresMatrixFeatures,
 )
-from glassbox.hodge import (
-    compute_routing_features_materialized,
-    compute_routing_features_matrix_free,
-)
+from glassbox.hodge import compute_routing_features
 from glassbox.svd import (
-    compute_degree_normalized_M,
     compute_dk_blocked,
     compute_logsumexp_blocked,
-    matvec_M_blocked,
-    matvec_MT_blocked,
     matvec_S,
     matvec_ST,
     randomized_svd,
@@ -362,59 +356,30 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         Kh: torch.Tensor,
         L: int,
     ) -> None:
-        """SVD of the degree-normalized cross-operator M."""
+        """SVD of the degree-normalized cross-operator M (always matrix-free)."""
         cfg = self.config.degree_normalized_matrix
         scale = 1.0 / math.sqrt(Qh.shape[1])
-        k = min(cfg.rank, L - 1)
 
-        if L <= cfg.threshold:
-            # TIER 1: materialize
-            A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
-            M, _, d_k_inv_sqrt = compute_degree_normalized_M(A)
-            sigma = torch.linalg.svdvals(M)
-            sv_list = sigma[:k].cpu().tolist()
-            tier = "materialized"
-            hodge = compute_routing_features_materialized(
-                M,
-                k,
-                cfg.method,
-                cfg.hodge_target_cv,
-                cfg.hodge_curl_seed,
-            )
-        else:
-            # TIER 2: matrix-free
-            _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, cfg.block_size)
-            device = Qh.device
-            matvec = lambda v: matvec_M_blocked(
-                Qh, Kh, v, d_k_inv_sqrt, scale, cfg.block_size
-            )
-            matvec_t = lambda u: matvec_MT_blocked(
-                Qh, Kh, u, d_k_inv_sqrt, scale, cfg.block_size
-            )
+        _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, cfg.block_size)
+        lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size)
 
-            if cfg.method == "lanczos":
-                _, S, _ = svd_via_lanczos(
-                    matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device)
-                )
-            else:
-                _, S, _ = randomized_svd(matvec, matvec_t, L, k, device=str(device))
+        hodge = compute_routing_features(
+            Qh,
+            Kh,
+            d_k_inv_sqrt,
+            scale,
+            lse,
+            rank=min(cfg.rank, L - 1),
+            svd_method=cfg.method,
+            block_size=cfg.block_size,
+            target_cv=cfg.hodge_target_cv,
+            confidence=cfg.hodge_confidence,
+            pilot_size=cfg.hodge_pilot_size,
+            min_samples=cfg.hodge_min_samples,
+            seed=cfg.hodge_curl_seed,
+        )
 
-            sv_list = S.cpu().tolist()
-            tier = "matrix_free"
-
-            lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size)
-            hodge = compute_routing_features_matrix_free(
-                Qh,
-                Kh,
-                d_k_inv_sqrt,
-                scale,
-                lse,
-                k,
-                cfg.method,
-                cfg.block_size,
-                cfg.hodge_target_cv,
-                cfg.hodge_curl_seed,
-            )
+        sv_list = hodge.pop("singular_values")
 
         snapshot = SVDSnapshot(
             feature_group="degree_normalized_matrix",
@@ -425,7 +390,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             step=state.step,
             L=L,
             singular_values=sv_list,
-            tier=tier,
+            tier="matrix_free",
             features=DegreeNormalizedFeatures.from_singular_values(
                 sv_list, routing=hodge,
             ),
