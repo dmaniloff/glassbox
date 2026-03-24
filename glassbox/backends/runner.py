@@ -58,7 +58,9 @@ logger = logging.getLogger(__name__)
     "--heads",
     type=str,
     default=None,
-    callback=lambda ctx, param, value: tuple(int(x.strip()) for x in value.split(",")) if value else (),
+    callback=lambda ctx, param, value: tuple(int(x.strip()) for x in value.split(","))
+    if value
+    else (),
     help="Comma-separated head indices to analyze. [default: from config ([0])]",
 )
 @click.option(
