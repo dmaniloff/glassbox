@@ -573,13 +573,180 @@ def _analyze_signal(
         )
 
 
+# ── Bird's-eye summary ─────────────────────────────────────────────────────
+
+
+def _build_summary(df_all, signals, labels, layer_ids, has_phases):
+    """Compute per-feature best-layer correlation & AUROC across all signals."""
+    from scipy.stats import pointbiserialr
+
+    SIG_PREFIX = {
+        "scores_matrix": "S",
+        "degree_normalized_matrix": "DN",
+    }
+
+    summary_rows = []
+    corr_grid = {}   # col_label -> {layer_idx: r}
+    auroc_grid = {}  # col_label -> {layer_idx: auc}
+
+    for signal_name in signals:
+        if "signal" in df_all.columns:
+            df_sig = df_all[df_all["signal"] == signal_name].copy()
+        else:
+            df_sig = df_all.copy()
+
+        if has_phases:
+            df_sig = df_sig[df_sig["phase"] == "full"].copy()
+
+        if df_sig.empty:
+            continue
+
+        features = list(SPECTRAL_FEATURE_NAMES)
+        hodge_cols = sorted([
+            c for c in df_sig.columns
+            if c.startswith("hodge_") and df_sig[c].notna().any()
+        ])
+        features.extend(hodge_cols)
+
+        prefix = SIG_PREFIX.get(signal_name, signal_name[:8])
+
+        agg = df_sig.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
+        agg = agg.merge(labels.reset_index(), on="sample_idx")
+
+        for feat in features:
+            feat_clean = feat.replace("hodge_", "")
+            col_label = f"{prefix}:{feat_clean}"
+
+            best_r, best_p, best_layer = 0.0, 1.0, None
+            best_auc, best_lo, best_hi, best_auc_layer = 0.5, None, None, None
+
+            for li in layer_ids:
+                la = agg[agg["layer_idx"] == li]
+                vals = la[feat].dropna()
+                lbls = la.loc[vals.index, "label"]
+                if len(vals) < 10 or lbls.nunique() < 2:
+                    continue
+
+                r, p = pointbiserialr(lbls, vals)
+                corr_grid.setdefault(col_label, {})[li] = r
+                if abs(r) > abs(best_r):
+                    best_r, best_p, best_layer = r, p, li
+
+                auc, lo, hi = bootstrap_auroc(lbls.values, vals.values)
+                if auc is not None:
+                    auroc_grid.setdefault(col_label, {})[li] = auc
+                    if abs(auc - 0.5) > abs(best_auc - 0.5):
+                        best_auc, best_lo, best_hi, best_auc_layer = auc, lo, hi, li
+
+            summary_rows.append({
+                "signal": prefix,
+                "feature": feat_clean,
+                "best_layer": best_layer if best_layer is not None else best_auc_layer,
+                "r": best_r,
+                "p": best_p,
+                "auc": best_auc,
+                "auc_lo": best_lo,
+                "auc_hi": best_hi,
+            })
+
+    return summary_rows, corr_grid, auroc_grid
+
+
+def _print_summary_table(summary_rows):
+    """Print a unified text summary table to stdout."""
+    click.echo("")
+    click.echo("=" * 95)
+    click.echo("Bird's-Eye Summary: Best Per-Feature Correlation & AUROC")
+    click.echo("=" * 95)
+    click.echo(
+        f"{'Signal':<8s} {'Feature':<20s} {'Layer':>5s}"
+        f" {'r':>8s}  {'p':>6s}"
+        f" {'AUROC':>7s} {'95% CI':>17s}"
+    )
+    click.echo("-" * 95)
+
+    for row in summary_rows:
+        layer_str = f"L{row['best_layer']}" if row["best_layer"] is not None else "  n/a"
+        sig = "**" if row["p"] < 0.01 else ("*" if row["p"] < 0.05 else " ")
+
+        if row["auc_lo"] is not None:
+            ci = f"[{row['auc_lo']:.3f}-{row['auc_hi']:.3f}]"
+        else:
+            ci = ""
+
+        click.echo(
+            f"{row['signal']:<8s} {row['feature']:<20s} {layer_str:>5s}"
+            f" {row['r']:>+7.4f}{sig} {row['p']:>6.4f}"
+            f" {row['auc']:>7.3f} {ci:>17s}"
+        )
+
+    click.echo("")
+
+
+def _plot_summary_heatmap(corr_grid, auroc_grid, layer_ids, out_path):
+    """Render a combined AUROC + correlation heatmap across all signals."""
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import seaborn as sns
+
+    col_labels = list(auroc_grid.keys()) or list(corr_grid.keys())
+    if not col_labels:
+        return
+
+    auroc_df = pd.DataFrame(index=layer_ids, columns=col_labels, dtype=float)
+    corr_df = pd.DataFrame(index=layer_ids, columns=col_labels, dtype=float)
+
+    for col in col_labels:
+        for li in layer_ids:
+            if col in auroc_grid and li in auroc_grid[col]:
+                auroc_df.loc[li, col] = auroc_grid[col][li]
+            if col in corr_grid and li in corr_grid[col]:
+                corr_df.loc[li, col] = corr_grid[col][li]
+
+    n_cols = len(col_labels)
+    n_rows = len(layer_ids)
+    annot_size = 7 if n_rows > 16 else 9
+
+    fig, (ax1, ax2) = plt.subplots(
+        1, 2,
+        figsize=(max(8, n_cols * 1.2) * 2 + 3, max(5, n_rows * 0.45 + 2)),
+    )
+    fig.subplots_adjust(wspace=0.35, top=0.93)
+
+    sns.heatmap(
+        auroc_df.astype(float), annot=True, fmt=".2f", center=0.5,
+        cmap="RdYlGn", vmin=0.3, vmax=0.7, ax=ax1, linewidths=0.5,
+        annot_kws={"size": annot_size}, cbar_kws={"shrink": 0.8},
+    )
+    ax1.set_title("AUROC by Layer", fontsize=12, fontweight="bold")
+    ax1.set_ylabel("Layer")
+    ax1.set_xticklabels(ax1.get_xticklabels(), rotation=45, ha="right", fontsize=9)
+
+    sns.heatmap(
+        corr_df.astype(float), annot=True, fmt="+.2f", center=0,
+        cmap="RdBu_r", vmin=-0.5, vmax=0.5, ax=ax2, linewidths=0.5,
+        annot_kws={"size": annot_size}, cbar_kws={"shrink": 0.8},
+    )
+    ax2.set_title("Point-Biserial r by Layer", fontsize=12, fontweight="bold")
+    ax2.set_ylabel("")
+    ax2.set_xticklabels(ax2.get_xticklabels(), rotation=45, ha="right", fontsize=9)
+
+    fig.suptitle(
+        "Bird's-Eye Summary — All Signals", fontsize=14, fontweight="bold",
+    )
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    log(f"Summary heatmap saved to {out_path}")
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 
 @click.command()
 @click.argument("results_dir", type=click.Path(exists=True, file_okay=False))
 @click.option("--output-dir", default=None, help="Override plot output directory.")
-def main(results_dir: str, output_dir: str | None) -> None:
+@click.option("--detailed", is_flag=True, help="Run per-signal detailed analysis with all plots.")
+def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
     """Analyze spectral features and correlate with hallucination labels."""
     import matplotlib
 
@@ -700,6 +867,19 @@ def main(results_dir: str, output_dir: str | None) -> None:
     # ── Per-signal analysis ───────────────────────────────────────────────
     signals = sorted(df_all["signal"].unique()) if "signal" in df_all.columns else ["scores_matrix"]
     log(f"Signals found: {signals}")
+
+    # ── Bird's-eye summary (always) ───────────────────────────────────────
+    summary_rows, corr_grid, auroc_grid = _build_summary(
+        df_all, signals, labels, layer_ids, has_phases,
+    )
+    _print_summary_table(summary_rows)
+    _plot_summary_heatmap(
+        corr_grid, auroc_grid, layer_ids, str(plot_dir / "summary_heatmap.png"),
+    )
+
+    if not detailed:
+        click.echo("")
+        return
 
     for signal_name in signals:
         # Filter to this signal
