@@ -33,21 +33,19 @@ from vllm.v1.attention.backends.triton_attn import (
 )
 
 from glassbox.config import GlassboxConfig
-from glassbox.results import (
-    DegreeNormalizedFeatures,
-    SVDSnapshot,
-    ScoresMatrixFeatures,
-)
 from glassbox.hodge import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
+)
+from glassbox.results import (
+    DegreeNormalizedFeatures,
+    ScoresMatrixFeatures,
+    SVDSnapshot,
 )
 from glassbox.svd import (
     compute_degree_normalized_M,
     compute_dk_blocked,
     compute_logsumexp_blocked,
-    matvec_M_blocked,
-    matvec_MT_blocked,
     matvec_S,
     matvec_ST,
     randomized_svd,
@@ -150,7 +148,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             return result
 
         # Skip if no signals enabled
-        if not (self.config.scores_matrix.enabled or self.config.degree_normalized_matrix.enabled):
+        if not (
+            self.config.scores_matrix.enabled
+            or self.config.degree_normalized_matrix.enabled
+        ):
             return result
 
         # 3. Accumulate Q for the first sequence in the batch
@@ -200,8 +201,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if spectral_due or normalized_due:
             try:
                 self._run_svd(
-                    layer_name, layer_idx, state, kv_cache, attn_metadata,
-                    run_spectral=spectral_due, run_normalized=normalized_due,
+                    layer_name,
+                    layer_idx,
+                    state,
+                    kv_cache,
+                    attn_metadata,
+                    run_spectral=spectral_due,
+                    run_normalized=normalized_due,
                 )
             except Exception:
                 logger.exception(
@@ -297,7 +303,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
             if run_spectral and head_idx in self.config.scores_matrix.heads:
                 self._run_svd_scores(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_normalized and head_idx in self.config.degree_normalized_matrix.heads:
+            if (
+                run_normalized
+                and head_idx in self.config.degree_normalized_matrix.heads
+            ):
                 self._run_svd_normalized(
                     layer_name, layer_idx, state, head_idx, Qh, Kh, L
                 )
@@ -368,53 +377,38 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         k = min(cfg.rank, L - 1)
 
         if L <= cfg.threshold:
-            # TIER 1: materialize
+            # Materialized: dense tensor ops, much faster at small L
             A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
-            M, _, d_k_inv_sqrt = compute_degree_normalized_M(A)
-            sigma = torch.linalg.svdvals(M)
-            sv_list = sigma[:k].cpu().tolist()
+            M, _, _ = compute_degree_normalized_M(A)
             tier = "materialized"
             hodge = compute_routing_features_materialized(
                 M,
-                k,
-                cfg.method,
-                cfg.hodge_target_cv,
-                cfg.hodge_curl_seed,
+                rank=k,
+                target_cv=cfg.hodge_target_cv,
+                seed=cfg.hodge_curl_seed,
             )
         else:
-            # TIER 2: matrix-free
+            # Matrix-free: O(Ld) matvecs, avoids materializing L×L matrix
             _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, cfg.block_size)
-            device = Qh.device
-            matvec = lambda v: matvec_M_blocked(
-                Qh, Kh, v, d_k_inv_sqrt, scale, cfg.block_size
-            )
-            matvec_t = lambda u: matvec_MT_blocked(
-                Qh, Kh, u, d_k_inv_sqrt, scale, cfg.block_size
-            )
-
-            if cfg.method == "lanczos":
-                _, S, _ = svd_via_lanczos(
-                    matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device)
-                )
-            else:
-                _, S, _ = randomized_svd(matvec, matvec_t, L, k, device=str(device))
-
-            sv_list = S.cpu().tolist()
-            tier = "matrix_free"
-
             lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size)
+            tier = "matrix_free"
             hodge = compute_routing_features_matrix_free(
                 Qh,
                 Kh,
                 d_k_inv_sqrt,
                 scale,
                 lse,
-                k,
-                cfg.method,
-                cfg.block_size,
-                cfg.hodge_target_cv,
-                cfg.hodge_curl_seed,
+                rank=k,
+                svd_method=cfg.method,
+                block_size=cfg.block_size,
+                target_cv=cfg.hodge_target_cv,
+                confidence=cfg.hodge_confidence,
+                pilot_size=cfg.hodge_pilot_size,
+                min_samples=cfg.hodge_min_samples,
+                seed=cfg.hodge_curl_seed,
             )
+
+        sv_list = hodge.pop("singular_values")
 
         snapshot = SVDSnapshot(
             feature_group="degree_normalized_matrix",
@@ -427,7 +421,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             singular_values=sv_list,
             tier=tier,
             features=DegreeNormalizedFeatures.from_singular_values(
-                sv_list, routing=hodge,
+                sv_list,
+                routing=hodge,
             ),
         )
         self._emit_result(snapshot)

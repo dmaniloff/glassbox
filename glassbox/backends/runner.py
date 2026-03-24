@@ -3,7 +3,7 @@ Entry-point script that launches vLLM with the custom SVD attention backend.
 
 Usage:
     python -m glassbox.backends.runner [OPTIONS]
-    python -m glassbox.backends.runner --interval 16 --rank 2 --heads 0 1 2
+    python -m glassbox.backends.runner --interval 16 --rank 2 --heads 0,1,2
     python -m glassbox.backends.runner --model facebook/opt-350m --method lanczos
     python -m glassbox.backends.runner --config glassbox.yaml
 
@@ -56,9 +56,12 @@ logger = logging.getLogger(__name__)
 )
 @click.option(
     "--heads",
-    type=int,
-    multiple=True,
-    help="Head indices to analyze (repeatable). [default: from config ([0])]",
+    type=str,
+    default=None,
+    callback=lambda ctx, param, value: tuple(int(x.strip()) for x in value.split(","))
+    if value
+    else (),
+    help="Comma-separated head indices to analyze. [default: from config ([0])]",
 )
 @click.option(
     "--operator",
@@ -94,6 +97,24 @@ logger = logging.getLogger(__name__)
     type=int,
     default=None,
     help="Seed for curl triangle sampling. [default: from config (42)]",
+)
+@click.option(
+    "--hodge-confidence",
+    type=float,
+    default=None,
+    help="Bernstein bound confidence level. [default: from config (0.95)]",
+)
+@click.option(
+    "--hodge-pilot-size",
+    type=int,
+    default=None,
+    help="Pilot triangle samples for kurtosis estimation. [default: from config (100)]",
+)
+@click.option(
+    "--hodge-min-samples",
+    type=int,
+    default=None,
+    help="Minimum triangle sample count. [default: from config (200)]",
 )
 @click.option(
     "--output",
@@ -135,6 +156,9 @@ def main(
     hodge: bool | None,
     hodge_target_cv: float | None,
     hodge_curl_seed: int | None,
+    hodge_confidence: float | None,
+    hodge_pilot_size: int | None,
+    hodge_min_samples: int | None,
     max_tokens: int,
     prompt: str,
 ) -> None:
@@ -180,6 +204,12 @@ def main(
         degree_normalized_matrix["hodge_target_cv"] = hodge_target_cv
     if hodge_curl_seed is not None:
         degree_normalized_matrix["hodge_curl_seed"] = hodge_curl_seed
+    if hodge_confidence is not None:
+        degree_normalized_matrix["hodge_confidence"] = hodge_confidence
+    if hodge_pilot_size is not None:
+        degree_normalized_matrix["hodge_pilot_size"] = hodge_pilot_size
+    if hodge_min_samples is not None:
+        degree_normalized_matrix["hodge_min_samples"] = hodge_min_samples
 
     if scores_matrix:
         overrides["scores_matrix"] = scores_matrix
