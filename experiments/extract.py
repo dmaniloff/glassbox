@@ -111,11 +111,11 @@ from glassbox.results import SPECTRAL_FEATURE_NAMES, SVDSnapshot
 
 
 def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) -> None:
-    """Pivot JSONL results into shade-compatible wide Parquet.
+    """Pivot JSONL results into wide Parquet.
 
-    Output has one row per sample with columns:
-        {feature}_L{layer}_H{head}  (e.g. sv_ratio_L0_H0)
-        label, source, length
+    Output has one row per request (i.e. per phase in evaluate mode) with columns:
+        {signal}_{feature}_L{layer}_H{head}  (e.g. scores_matrix_sv_ratio_L0_H0)
+        label, source, length, phase, sample_id
     """
     import pandas as pd
     import pyarrow as pa
@@ -142,6 +142,8 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
                 row["tier"] = snap.tier
             feat_dict = snap.features.model_dump(exclude_none=True)
             for k, v in feat_dict.items():
+                if isinstance(v, list):
+                    continue  # skip list fields (e.g. singular_values)
                 if k in SPECTRAL_FEATURE_NAMES:
                     row[k] = v
                 else:
@@ -166,8 +168,9 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
             join_cols.append(col)
     df = df_svd.merge(df_samples[join_cols], on="request_id", how="left")
 
-    # Identify sample key
-    sample_col = "sample_id" if "sample_id" in df.columns else "request_id"
+    # Pivot key: request_id (unique per phase) so question and full
+    # phases get separate rows instead of being averaged together.
+    pivot_col = "request_id"
 
     # Determine features to pivot
     features = list(SPECTRAL_FEATURE_NAMES)
@@ -176,8 +179,8 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
     ]
     features.extend(sorted(hodge_cols))
 
-    # Aggregate: mean per (sample, signal, layer, head) across steps
-    group_keys = [sample_col, "layer_idx", "head"]
+    # Aggregate: mean per (request, signal, layer, head) across steps
+    group_keys = [pivot_col, "layer_idx", "head"]
     if "signal" in df.columns:
         group_keys.insert(1, "signal")
     agg = df.groupby(group_keys)[features].mean().reset_index()
@@ -186,11 +189,11 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
     signals = agg["signal"].unique() if "signal" in agg.columns else [""]
     use_signal_prefix = len(signals) > 1
 
-    # Pivot to wide format: one row per sample
+    # Pivot to wide format: one row per request
     wide_rows = []
-    for sample_id, sample_group in agg.groupby(sample_col):
+    for rid, request_group in agg.groupby(pivot_col):
         wide: dict = {}
-        for _, r in sample_group.iterrows():
+        for _, r in request_group.iterrows():
             li = int(r["layer_idx"])
             hi = int(r["head"])
             prefix = f"{r['signal']}_" if use_signal_prefix else ""
@@ -198,33 +201,36 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
                 val = r[feat]
                 if pd.notna(val):
                     wide[f"{prefix}{feat}_L{li}_H{hi}"] = val
-        wide[sample_col] = sample_id
+        wide[pivot_col] = rid
         wide_rows.append(wide)
 
     df_wide = pd.DataFrame(wide_rows)
 
     # Join back sample-level metadata
-    meta_cols = [sample_col, "label"]
-    for col in ["dataset", "phase"]:
-        if col in df_samples.columns:
+    meta_cols = [pivot_col, "label"]
+    for col in ["sample_id", "phase", "dataset", "prompt_length"]:
+        if col in df.columns:
             meta_cols.append(col)
     sample_meta = (
-        df.groupby(sample_col)
-        .first()[[c for c in ["label", "dataset", "L"] if c in df.columns]]
+        df.groupby(pivot_col)
+        .first()[[c for c in meta_cols if c in df.columns and c != pivot_col]]
         .reset_index()
     )
     if "dataset" in sample_meta.columns:
         sample_meta = sample_meta.rename(columns={"dataset": "source"})
-    if "L" in sample_meta.columns:
-        sample_meta = sample_meta.rename(columns={"L": "length"})
-    df_wide = df_wide.merge(sample_meta, on=sample_col, how="left")
+    # Add sequence length from SVD data
+    len_meta = df.groupby(pivot_col)["L"].first().reset_index()
+    len_meta = len_meta.rename(columns={"L": "length"})
+    sample_meta = sample_meta.merge(len_meta, on=pivot_col, how="left")
+
+    df_wide = df_wide.merge(sample_meta, on=pivot_col, how="left")
 
     pq.write_table(pa.Table.from_pandas(df_wide), out_path, compression="snappy")
     n_features = len(
         [c for c in df_wide.columns if any(c.startswith(f) for f in features)]
     )
     log(
-        f"Parquet saved: {out_path} ({len(df_wide)} samples, {n_features} feature columns)"
+        f"Parquet saved: {out_path} ({len(df_wide)} rows, {n_features} feature columns)"
     )
 
 
