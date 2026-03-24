@@ -10,6 +10,7 @@ from glassbox.svd import (
     compute_dk_blocked,
     compute_logsumexp_blocked,
     compute_M_fro_norm_blocked,
+    compute_scores_matrix_features,
     get_M_entries_batch,
     matvec_M_blocked,
     matvec_MT_blocked,
@@ -215,3 +216,47 @@ def test_two_tier_agreement():
 
     rel_err = (S_mf_sorted - sigma_mat).abs() / (sigma_mat + 1e-12)
     assert rel_err.max().item() < 0.01, f"Two-tier disagreement: {rel_err}"
+
+
+# --- compute_scores_matrix_features end-to-end tests ---
+
+
+def test_compute_scores_matrix_features_vs_torch():
+    """compute_scores_matrix_features should match torch.linalg.svd on S=QK^T."""
+    torch.manual_seed(42)
+    L_test = 32
+    D_test = 8
+    Q = torch.randn(L_test, D_test)
+    K = torch.randn(L_test, D_test)
+
+    S_full = Q @ K.T
+    sigma_ref = torch.linalg.svdvals(S_full)[:4].tolist()
+
+    features = compute_scores_matrix_features(Q, K, rank=4)
+
+    assert len(features.singular_values) == 4
+    for sv_feat, sv_ref in zip(features.singular_values, sigma_ref):
+        assert abs(sv_feat - sv_ref) < 0.05, f"sv mismatch: {sv_feat} vs {sv_ref}"
+
+    assert features.sv1 == features.singular_values[0]
+    assert features.sv_ratio is not None
+    assert abs(features.sv_ratio - sigma_ref[0] / sigma_ref[1]) < 0.1
+    assert features.sv_entropy is not None
+    assert features.sv_entropy > 0
+
+
+def test_compute_scores_matrix_features_lanczos_vs_randomized():
+    """Both SVD methods should agree on scores-matrix features."""
+    torch.manual_seed(99)
+    L_test = 32
+    D_test = 8
+    Q = torch.randn(L_test, D_test)
+    K = torch.randn(L_test, D_test)
+
+    f_rand = compute_scores_matrix_features(Q, K, rank=4, method="randomized")
+    f_lanc = compute_scores_matrix_features(Q, K, rank=4, method="lanczos")
+
+    for sv_r, sv_l in zip(f_rand.singular_values, f_lanc.singular_values):
+        assert abs(sv_r - sv_l) < 0.05, f"method mismatch: {sv_r} vs {sv_l}"
+
+    assert abs(f_rand.sv_ratio - f_lanc.sv_ratio) < 0.1
