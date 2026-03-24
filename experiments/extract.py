@@ -271,9 +271,11 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
 )
 @click.option(
     "--heads",
-    type=int,
-    multiple=True,
-    help="Head indices to analyze (repeatable). [default: [0]]",
+    type=str,
+    default="0",
+    callback=lambda ctx, param, value: tuple(int(x.strip()) for x in value.split(",")),
+    show_default=True,
+    help="Comma-separated head indices to analyze.",
 )
 @click.option(
     "--scores-matrix",
@@ -426,10 +428,19 @@ def main(
 
     # Create vLLM engine
     log("Creating vLLM engine with CUSTOM attention backend")
+    # Chunked prefill and prefix caching both cause the SVD backend to
+    # see partial Q tensors instead of the full sequence:
+    # - Chunked prefill splits long sequences into multiple forward passes
+    # - Prefix caching skips cached prefix tokens, only forwarding the
+    #   uncached suffix (e.g., in evaluate mode the full phase shares the
+    #   question prefix, so only the response tokens are forwarded)
+    # Disable both until the backend can reconstruct full Q from partial views.
     llm = vllm.LLM(
         model=model,
         attention_backend="CUSTOM",
         enforce_eager=True,
+        enable_chunked_prefill=False,
+        enable_prefix_caching=False,
     )
 
     samples_path = outdir / "samples.jsonl"
