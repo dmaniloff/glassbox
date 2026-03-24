@@ -11,9 +11,9 @@ from itertools import combinations
 import torch
 
 from glassbox.hodge import (
-    _compute_G_materialized,
-    _estimate_curl_materialized,
-    _sample_triangles,
+    compute_G_materialized,
+    estimate_curl_materialized,
+    sample_triangles,
     adaptive_curl_samples,
     compute_G_matrix_free,
     compute_routing_features_materialized,
@@ -107,41 +107,41 @@ def _matrix_to_edge_flow(M, edges):
 
 class TestTriangleSampling:
     def test_valid_ordering(self):
-        tri = _sample_triangles(10, 20, seed=0)
+        tri = sample_triangles(10, 20, seed=0)
         assert tri.shape[1] == 3
         assert len(tri) == 20
         assert (tri[:, 0] < tri[:, 1]).all()
         assert (tri[:, 1] < tri[:, 2]).all()
 
     def test_no_duplicates(self):
-        tri = _sample_triangles(10, 20, seed=0)
+        tri = sample_triangles(10, 20, seed=0)
         tri_set = set(map(tuple, tri.tolist()))
         assert len(tri_set) == len(tri)
 
     def test_small_n(self):
-        tri = _sample_triangles(2, 10)
+        tri = sample_triangles(2, 10)
         assert len(tri) == 0
 
     def test_exhaustive_small(self):
-        tri = _sample_triangles(4, 100, seed=0)
+        tri = sample_triangles(4, 100, seed=0)
         assert len(tri) == 4  # C(4,3) = 4
         canonical = {(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)}
         actual = set(map(tuple, tri.tolist()))
         assert actual == canonical
 
     def test_lru_cache(self):
-        _sample_triangles.cache_clear()
-        t1 = _sample_triangles(10, 20, seed=42)
-        t2 = _sample_triangles(10, 20, seed=42)
+        sample_triangles.cache_clear()
+        t1 = sample_triangles(10, 20, seed=42)
+        t2 = sample_triangles(10, 20, seed=42)
         assert t1 is t2
-        t3 = _sample_triangles(10, 20, seed=99)
+        t3 = sample_triangles(10, 20, seed=99)
         assert t1 is not t3
 
     def test_deterministic(self):
-        _sample_triangles.cache_clear()
-        t1 = _sample_triangles(10, 20, seed=7)
-        _sample_triangles.cache_clear()
-        t2 = _sample_triangles(10, 20, seed=7)
+        sample_triangles.cache_clear()
+        t1 = sample_triangles(10, 20, seed=7)
+        sample_triangles.cache_clear()
+        t2 = sample_triangles(10, 20, seed=7)
         assert torch.equal(t1, t2)
 
 
@@ -204,7 +204,7 @@ class TestCurl:
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         M_fro = torch.linalg.norm(M, "fro").item()
-        C_mat = _estimate_curl_materialized(M, target_cv=0.05, seed=42)
+        C_mat = estimate_curl_materialized(M, target_cv=0.05, seed=42)
         C_mf = estimate_curl_matrix_free(
             Q,
             K,
@@ -235,7 +235,7 @@ class TestCurl:
         curls = []
         for alpha in [0.0, 0.5, 1.0, 2.0]:
             M_scaled = M_sym + alpha * M_asym
-            C = _estimate_curl_materialized(M_scaled, seed=42)
+            C = estimate_curl_materialized(M_scaled, seed=42)
             curls.append(C)
         # Monotonically increasing (approximately)
         for i in range(len(curls) - 1):
@@ -250,7 +250,7 @@ class TestCurl:
 class TestAsymmetryG:
     def test_matrix_free_matches_materialized(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
-        G_ref, fro_ref = _compute_G_materialized(M)
+        G_ref, fro_ref = compute_G_materialized(M)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         G_mf, fro_mf = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=4)
         assert abs(G_ref - G_mf) < 0.01, f"G: ref={G_ref}, mf={G_mf}"

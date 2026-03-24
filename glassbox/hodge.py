@@ -37,14 +37,14 @@ from glassbox.svd import (
 
 
 @lru_cache(maxsize=64)
-def _sample_triangles(n: int, n_samples: int, seed: int = 42) -> torch.Tensor:
+def sample_triangles(n: int, n_samples: int, seed: int = 42) -> torch.Tensor:
     """Generate triangle vertex indices for curl estimation (cached, CPU).
 
     Returns a (m, 3) int64 tensor of strictly-ordered triangle vertices
     (i < j < k) on CPU.  Cached by (n, n_samples, seed) so that repeated
     calls at the same sequence length reuse indices across heads.
 
-    Ported from shade.functional.hodge_ops._sample_triangles.
+    Ported from shade.functional.hodge_ops.sample_triangles.
     """
     n_tri = n * (n - 1) * (n - 2) // 6
     actual = min(n_samples, n_tri)
@@ -113,7 +113,7 @@ def adaptive_curl_samples(
 
     has_pilot = all(x is not None for x in (Q, K, lse, d_k_inv_sqrt, scale))
     if has_pilot:
-        tri = _sample_triangles(n, pilot_size, seed=0)
+        tri = sample_triangles(n, pilot_size, seed=0)
         if len(tri) < 10:
             return min(floor, n_tri)
         ii = tri[:, 0].to(Q.device)
@@ -161,7 +161,7 @@ def estimate_curl_matrix_free(
     """Triangle-sampling curl using on-the-fly M[i,j] lookups.
 
     Uses Bernstein-bound adaptive sizing.  Triangle indices are cached via
-    _sample_triangles for reuse across heads at the same sequence length.
+    sample_triangles for reuse across heads at the same sequence length.
     """
     n = Q.shape[0]
     n_samp = adaptive_curl_samples(
@@ -179,7 +179,7 @@ def estimate_curl_matrix_free(
     if n_samp == 0:
         return 0.0
 
-    tri = _sample_triangles(n, n_samp, seed)
+    tri = sample_triangles(n, n_samp, seed)
     if len(tri) == 0:
         return 0.0
     ii = tri[:, 0].to(Q.device)
@@ -417,14 +417,14 @@ def compute_routing_features_matrix_free(
 # ---------------------------------------------------------------------------
 
 
-def _estimate_curl_materialized(M, target_cv=0.05, seed=42):
+def estimate_curl_materialized(M, target_cv=0.05, seed=42):
     """Triangle-sampling curl on a materialized M tensor."""
     n = M.shape[0]
     if n < 4:
         return 0.0
     n_tri = n * (n - 1) * (n - 2) // 6
     n_samp = min(max(200, int(math.ceil(1.0 / (target_cv**2)))), n_tri)
-    tri = _sample_triangles(n, n_samp, seed)
+    tri = sample_triangles(n, n_samp, seed)
     if len(tri) == 0:
         return 0.0
     ii = tri[:, 0]
@@ -437,7 +437,7 @@ def _estimate_curl_materialized(M, target_cv=0.05, seed=42):
     return C
 
 
-def _compute_G_materialized(M):
+def compute_G_materialized(M):
     """Asymmetry coefficient from materialized M."""
     M_fro = torch.linalg.norm(M, "fro")
     M_asym = (M - M.T) / 2.0
@@ -459,7 +459,7 @@ def compute_routing_features_materialized(
     sigma2 = sigma[1].item() if len(sigma) > 1 else 0.0
     phi_hat = 1.0 - sigma2
 
-    G, M_fro = _compute_G_materialized(M)
+    G, M_fro = compute_G_materialized(M)
 
     M_sym = (M + M.T) / 2.0
     M_asym = (M - M.T) / 2.0
@@ -469,7 +469,7 @@ def compute_routing_features_materialized(
     comm = M_sym @ M_asym - M_asym @ M_sym
     commutator_norm = torch.linalg.norm(comm, "fro").item() / (M_fro + EPSILON)
 
-    C = _estimate_curl_materialized(M, target_cv, seed)
+    C = estimate_curl_materialized(M, target_cv, seed)
     Gamma = math.sqrt(max(G**2 - C**2, 0.0))
     curl_ratio = C / (G + EPSILON)
 

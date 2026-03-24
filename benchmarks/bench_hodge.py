@@ -23,8 +23,8 @@ import click
 import torch
 
 from glassbox.hodge import (
-    _compute_G_materialized,
-    _estimate_curl_materialized,
+    compute_G_materialized,
+    estimate_curl_materialized,
     compute_G_matrix_free,
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
@@ -202,12 +202,12 @@ def bench_materialized(
     )
 
     timings["G"] = _time_fn(
-        lambda: _compute_G_materialized(M),
+        lambda: compute_G_materialized(M),
         warmup, repeats, device,
     )
 
     timings["C"] = _time_fn(
-        lambda: _estimate_curl_materialized(M),
+        lambda: estimate_curl_materialized(M),
         warmup, repeats, device,
     )
 
