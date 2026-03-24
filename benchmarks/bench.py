@@ -414,9 +414,7 @@ def print_table(rows: list[dict], label_col: str = "label") -> None:
                 w = max(w, len(fmt.format(val)))
         widths.append(w)
 
-    click.echo(
-        " | ".join(h.ljust(w) for (h, _, _), w in zip(columns, widths))
-    )
+    click.echo(" | ".join(h.ljust(w) for (h, _, _), w in zip(columns, widths)))
     click.echo("-+-".join("-" * w for w in widths))
 
     for row in rows:
@@ -561,7 +559,9 @@ def compare(results_dir: str) -> None:
         return
 
     # Baseline header + table
-    click.echo(f"Baseline: {format_config_header(baseline.get('_meta'), baseline['name'])}")
+    click.echo(
+        f"Baseline: {format_config_header(baseline.get('_meta'), baseline['name'])}"
+    )
     print_table([{"label": baseline["name"], **baseline}])
 
     # Per-config comparison

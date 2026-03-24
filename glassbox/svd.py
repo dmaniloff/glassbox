@@ -1,12 +1,16 @@
 """
-Explorations of matrix-free SVD algorithms.
+Matrix-free SVD algorithms and spectral feature computation.
 
 A = softmax(QK^T / sqrt(d))
 M = Dq_inv_sqrt * A * Dk_inv_sqrt
 M is NOT symmetric in general. We compute SVD, not eigen-decomposition, using matrix–vector products with M and M^T
 """
 
+from __future__ import annotations
+
 import torch
+
+from glassbox.results import ScoresMatrixFeatures
 
 
 def matvec_S(Q, K, v):
@@ -424,3 +428,29 @@ def compare_svd_results(matvec, matvec_t, U1, S1, V1, U2, S2, V2, trials: int = 
         "recon_method_diff_mean": recon[:, 2].mean().item(),
         "recon_method_diff_max": recon[:, 2].max().item(),
     }
+
+
+def compute_scores_matrix_features(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    rank: int,
+    method: str = "randomized",
+) -> ScoresMatrixFeatures:
+    """Compute spectral features of the scores matrix S = QK^T.
+
+    Returns a ScoresMatrixFeatures with singular_values and derived
+    spectral features (sv1, sv_ratio, sv_entropy) populated.
+    """
+    L = Q.shape[0]
+    device = Q.device
+    k = min(rank, L - 1)
+
+    mv = lambda v: matvec_S(Q, K, v)
+    mv_t = lambda u: matvec_ST(Q, K, u)
+
+    if method == "lanczos":
+        _, S, _ = svd_via_lanczos(mv, mv_t, L, k, max(2 * k + 2, 20), str(device))
+    else:
+        _, S, _ = randomized_svd(mv, mv_t, L, k, device=str(device))
+
+    return ScoresMatrixFeatures.from_singular_values(S.cpu().tolist())

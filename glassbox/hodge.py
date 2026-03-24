@@ -16,6 +16,8 @@ References:
     Jiang et al (2011): HodgeRank (Mathematical Programming)
 """
 
+from __future__ import annotations
+
 import math
 from functools import lru_cache
 
@@ -23,6 +25,7 @@ import torch
 
 EPSILON = 1e-10
 
+from glassbox.results import DegreeNormalizedFeatures
 from glassbox.svd import (
     compute_logsumexp_blocked,
     compute_M_fro_norm_blocked,
@@ -340,8 +343,8 @@ def compute_routing_features_matrix_free(
 ):
     """Compute all Hodge routing features matrix-free.
 
-    Returns dict with: phi_hat, sigma2, G, Gamma, C, curl_ratio,
-    sigma2_asym, commutator_norm, singular_values.
+    Returns a DegreeNormalizedFeatures with singular_values, spectral
+    features, and Hodge decomposition features populated.
 
     The Pythagorean identity G^2 = Gamma^2 + C^2 holds by construction:
     G is exact (blocked streaming), C is sampled (Bernstein-bound adaptive),
@@ -403,17 +406,17 @@ def compute_routing_features_matrix_free(
         Q, K, d_k_inv_sqrt, scale, M_fro_val, block_size, n_hutchinson, seed
     )
 
-    return {
-        "phi_hat": phi_hat,
-        "sigma2": sigma2,
-        "G": G,
-        "Gamma": Gamma,
-        "C": C,
-        "curl_ratio": curl_ratio,
-        "sigma2_asym": sigma2_asym,
-        "commutator_norm": commutator_norm,
-        "singular_values": S_sorted[:k].cpu().tolist(),
-    }
+    return DegreeNormalizedFeatures.from_hodge(
+        singular_values=S_sorted[:k].cpu().tolist(),
+        phi_hat=phi_hat,
+        sigma2=sigma2,
+        G=G,
+        Gamma=Gamma,
+        C=C,
+        curl_ratio=curl_ratio,
+        sigma2_asym=sigma2_asym,
+        commutator_norm=commutator_norm,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -452,8 +455,11 @@ def compute_G_materialized(M):
 
 def compute_routing_features_materialized(
     M, rank, svd_method="randomized", target_cv=0.05, seed=42
-):
+) -> DegreeNormalizedFeatures:
     """All routing features from materialized M.
+
+    Returns a DegreeNormalizedFeatures with singular_values, spectral
+    features, and Hodge decomposition features populated.
 
     Used when L <= threshold. Dense tensor ops are much faster than
     iterative matvec approaches at small sequence lengths.
@@ -477,14 +483,14 @@ def compute_routing_features_materialized(
     Gamma = math.sqrt(max(G**2 - C**2, 0.0))
     curl_ratio = C / (G + EPSILON)
 
-    return {
-        "phi_hat": phi_hat,
-        "sigma2": sigma2,
-        "G": G,
-        "Gamma": Gamma,
-        "C": C,
-        "curl_ratio": curl_ratio,
-        "sigma2_asym": sigma2_asym,
-        "commutator_norm": commutator_norm,
-        "singular_values": sigma[:k].cpu().tolist(),
-    }
+    return DegreeNormalizedFeatures.from_hodge(
+        singular_values=sigma[:k].cpu().tolist(),
+        phi_hat=phi_hat,
+        sigma2=sigma2,
+        G=G,
+        Gamma=Gamma,
+        C=C,
+        curl_ratio=curl_ratio,
+        sigma2_asym=sigma2_asym,
+        commutator_norm=commutator_norm,
+    )

@@ -37,19 +37,12 @@ from glassbox.hodge import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
 )
-from glassbox.results import (
-    DegreeNormalizedFeatures,
-    ScoresMatrixFeatures,
-    SVDSnapshot,
-)
+from glassbox.results import SVDSnapshot
 from glassbox.svd import (
     compute_degree_normalized_M,
     compute_dk_blocked,
     compute_logsumexp_blocked,
-    matvec_S,
-    matvec_ST,
-    randomized_svd,
-    svd_via_lanczos,
+    compute_scores_matrix_features,
 )
 
 logger = logging.getLogger(__name__)
@@ -323,31 +316,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     ) -> None:
         """SVD of the scores matrix S = QK^T."""
         cfg = self.config.scores_matrix
-        device = Qh.device
-        matvec = lambda v, Q=Qh, K=Kh: matvec_S(Q, K, v)
-        matvec_t = lambda u, Q=Qh, K=Kh: matvec_ST(Q, K, u)
-
-        k = min(cfg.rank, L - 1)
-
-        if cfg.method == "lanczos":
-            _, S, _ = svd_via_lanczos(
-                matvec=matvec,
-                matvec_t=matvec_t,
-                dim=L,
-                k=k,
-                iters=max(2 * k + 2, 20),
-                device=str(device),
-            )
-        else:
-            _, S, _ = randomized_svd(
-                matvec=matvec,
-                matvec_t=matvec_t,
-                dim=L,
-                k=k,
-                device=str(device),
-            )
-
-        sv_list = S.cpu().tolist()
+        features = compute_scores_matrix_features(
+            Qh,
+            Kh,
+            rank=cfg.rank,
+            method=cfg.method,
+        )
         snapshot = SVDSnapshot(
             feature_group="scores_matrix",
             request_id=type(self).req_tracker.request_id,
@@ -356,8 +330,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             head=head_idx,
             step=state.step,
             L=L,
-            singular_values=sv_list,
-            features=ScoresMatrixFeatures.from_singular_values(sv_list),
+            singular_values=features.singular_values,
+            features=features,
         )
         self._emit_result(snapshot)
 
@@ -381,7 +355,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
             M, _, _ = compute_degree_normalized_M(A)
             tier = "materialized"
-            hodge = compute_routing_features_materialized(
+            features = compute_routing_features_materialized(
                 M,
                 rank=k,
                 target_cv=cfg.hodge_target_cv,
@@ -392,7 +366,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, cfg.block_size)
             lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size)
             tier = "matrix_free"
-            hodge = compute_routing_features_matrix_free(
+            features = compute_routing_features_matrix_free(
                 Qh,
                 Kh,
                 d_k_inv_sqrt,
@@ -408,8 +382,6 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 seed=cfg.hodge_curl_seed,
             )
 
-        sv_list = hodge.pop("singular_values")
-
         snapshot = SVDSnapshot(
             feature_group="degree_normalized_matrix",
             request_id=type(self).req_tracker.request_id,
@@ -418,12 +390,9 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             head=head_idx,
             step=state.step,
             L=L,
-            singular_values=sv_list,
+            singular_values=features.singular_values,
             tier=tier,
-            features=DegreeNormalizedFeatures.from_singular_values(
-                sv_list,
-                routing=hodge,
-            ),
+            features=features,
         )
         self._emit_result(snapshot)
 

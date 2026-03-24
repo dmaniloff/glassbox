@@ -45,9 +45,14 @@ def test_randomized_svd_vs_lanczos(qk):
     )
 
     metrics = compare_svd_results(
-        matvec=matvec, matvec_t=matvec_t,
-        U1=U_l, S1=S_l, V1=V_l,
-        U2=U_r, S2=S_r, V2=V_r,
+        matvec=matvec,
+        matvec_t=matvec_t,
+        U1=U_l,
+        S1=S_l,
+        V1=V_l,
+        U2=U_r,
+        S2=S_r,
+        V2=V_r,
     )
 
     assert metrics["sv_rel_max"] < 0.1

@@ -115,49 +115,83 @@ def bench_matrix_free(
             compute_dk_blocked(Q, K, scale, block_size),
             compute_logsumexp_blocked(Q, K, scale, block_size),
         ),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["SVD"] = _time_fn(
         lambda: randomized_svd(matvec, matvec_t, L, k, device=device),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["||M||"] = _time_fn(
         lambda: compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["G"] = _time_fn(
         lambda: compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["C"] = _time_fn(
         lambda: estimate_curl_matrix_free(
-            Q, K, lse, d_k_inv_sqrt, scale, M_fro, min_samples=200,
+            Q,
+            K,
+            lse,
+            d_k_inv_sqrt,
+            scale,
+            M_fro,
+            min_samples=200,
         ),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["s2asym"] = _time_fn(
         lambda: compute_sigma2_asym_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["[comm]"] = _time_fn(
         lambda: estimate_commutator_norm_matrix_free(
-            Q, K, d_k_inv_sqrt, scale, M_fro, block_size, n_hutchinson=10,
+            Q,
+            K,
+            d_k_inv_sqrt,
+            scale,
+            M_fro,
+            block_size,
+            n_hutchinson=10,
         ),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["total"] = _time_fn(
         lambda: compute_routing_features_matrix_free(
-            Q, K, d_k_inv_sqrt, scale, lse, rank=rank, block_size=block_size,
+            Q,
+            K,
+            d_k_inv_sqrt,
+            scale,
+            lse,
+            rank=rank,
+            block_size=block_size,
             min_samples=200,
         ),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     return timings
@@ -188,39 +222,53 @@ def bench_materialized(
 
     timings["A+M"] = _time_fn(
         lambda: compute_degree_normalized_M(torch.softmax(Q @ K.T * scale, dim=-1)),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["SVD"] = _time_fn(
         lambda: torch.linalg.svdvals(M),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["||M||"] = _time_fn(
         lambda: torch.linalg.norm(M, "fro"),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["G"] = _time_fn(
         lambda: compute_G_materialized(M),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["C"] = _time_fn(
         lambda: estimate_curl_materialized(M),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["s2asym"] = _time_fn(
         lambda: torch.linalg.svdvals((M - M.T) / 2.0),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     M_sym = (M + M.T) / 2.0
     M_asym = (M - M.T) / 2.0
     timings["[comm]"] = _time_fn(
         lambda: torch.linalg.norm(M_sym @ M_asym - M_asym @ M_sym, "fro"),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     timings["total"] = _time_fn(
@@ -228,7 +276,9 @@ def bench_materialized(
             compute_degree_normalized_M(torch.softmax(Q @ K.T * scale, dim=-1))[0],
             rank=rank,
         ),
-        warmup, repeats, device,
+        warmup,
+        repeats,
+        device,
     )
 
     return timings
@@ -264,7 +314,13 @@ def bench_comparison(
 
     def run_mf():
         return compute_routing_features_matrix_free(
-            Q, K, d_k_inv_sqrt, scale, lse, rank=rank, block_size=block_size,
+            Q,
+            K,
+            d_k_inv_sqrt,
+            scale,
+            lse,
+            rank=rank,
+            block_size=block_size,
             min_samples=200,
         )
 
@@ -320,9 +376,7 @@ def print_comparison_report(
         t_mat = comp["materialized"]
         t_mf = comp["matrix_free"]
         ratio = t_mf / t_mat if t_mat > 0 else float("inf")
-        print(
-            f"{L:>6} | {_fmt_ms(t_mat):>14} | {_fmt_ms(t_mf):>14} | {ratio:>7.1f}x"
-        )
+        print(f"{L:>6} | {_fmt_ms(t_mat):>14} | {_fmt_ms(t_mf):>14} | {ratio:>7.1f}x")
 
     # Scaling exponents
     print("-" * len(header))
@@ -393,22 +447,48 @@ def _parse_int_list(ctx, param, value):
 
 @click.command()
 @click.option(
-    "--lengths", type=str, default=",".join(str(x) for x in DEFAULT_LENGTHS),
-    callback=_parse_int_list, show_default=True,
+    "--lengths",
+    type=str,
+    default=",".join(str(x) for x in DEFAULT_LENGTHS),
+    callback=_parse_int_list,
+    show_default=True,
     help="Comma-separated sequence lengths to sweep.",
 )
-@click.option("--d-model", type=int, default=64, show_default=True, help="Head dimension.")
-@click.option("--rank", type=int, default=4, show_default=True, help="SVD rank.")
-@click.option("--block-size", type=int, default=256, show_default=True, help="Block size.")
-@click.option("--warmup", type=int, default=2, show_default=True, help="Warmup iterations.")
-@click.option("--repeats", type=int, default=3, show_default=True, help="Timed repeats, report median.")
-@click.option("--json", "json_path", type=click.Path(), default=None, help="Write JSON results to file.")
 @click.option(
-    "--comparison-only", is_flag=True, default=False,
+    "--d-model", type=int, default=64, show_default=True, help="Head dimension."
+)
+@click.option("--rank", type=int, default=4, show_default=True, help="SVD rank.")
+@click.option(
+    "--block-size", type=int, default=256, show_default=True, help="Block size."
+)
+@click.option(
+    "--warmup", type=int, default=2, show_default=True, help="Warmup iterations."
+)
+@click.option(
+    "--repeats",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Timed repeats, report median.",
+)
+@click.option(
+    "--json",
+    "json_path",
+    type=click.Path(),
+    default=None,
+    help="Write JSON results to file.",
+)
+@click.option(
+    "--comparison-only",
+    is_flag=True,
+    default=False,
     help="Only run materialized vs matrix-free comparison (skip component breakdown).",
 )
 @click.option(
-    "--device", type=str, default="cpu", show_default=True,
+    "--device",
+    type=str,
+    default="cpu",
+    show_default=True,
     help="Torch device (cpu, cuda, cuda:0, etc.).",
 )
 def main(
@@ -426,7 +506,9 @@ def main(
     lengths_list = list(lengths)
 
     if device != "cpu" and not torch.cuda.is_available():
-        raise click.UsageError(f"Device '{device}' requested but CUDA is not available.")
+        raise click.UsageError(
+            f"Device '{device}' requested but CUDA is not available."
+        )
 
     print(f"Config: d={d_model}, rank={rank}, block_size={block_size}, device={device}")
     print(f"Warmup={warmup}, repeats={repeats}")
@@ -440,8 +522,14 @@ def main(
         sys.stdout.flush()
         comp = bench_comparison(L, d_model, rank, block_size, warmup, repeats, device)
         all_comparisons.append(comp)
-        ratio = comp["matrix_free"] / comp["materialized"] if comp["materialized"] > 0 else float("inf")
-        print(f" mat={_fmt_ms(comp['materialized'])}, mf={_fmt_ms(comp['matrix_free'])} ({ratio:.1f}x)")
+        ratio = (
+            comp["matrix_free"] / comp["materialized"]
+            if comp["materialized"] > 0
+            else float("inf")
+        )
+        print(
+            f" mat={_fmt_ms(comp['materialized'])}, mf={_fmt_ms(comp['matrix_free'])} ({ratio:.1f}x)"
+        )
 
     print_comparison_report(lengths_list, all_comparisons, d_model, rank)
 
@@ -459,20 +547,26 @@ def main(
 
         print_component_report(
             f"Materialized Component Breakdown — d={d_model}, rank={rank}",
-            MAT_COMPONENTS, lengths_list, all_mat_timings,
+            MAT_COMPONENTS,
+            lengths_list,
+            all_mat_timings,
         )
 
         print("\n--- Matrix-Free Component Breakdown ---")
         for L in lengths_list:
             sys.stdout.write(f"  L={L}...")
             sys.stdout.flush()
-            timings = bench_matrix_free(L, d_model, rank, block_size, warmup, repeats, device)
+            timings = bench_matrix_free(
+                L, d_model, rank, block_size, warmup, repeats, device
+            )
             all_mf_timings.append(timings)
             print(f" {_fmt_ms(timings['total'])}")
 
         print_component_report(
             f"Matrix-Free Component Breakdown — d={d_model}, rank={rank}, block_size={block_size}",
-            MF_COMPONENTS, lengths_list, all_mf_timings,
+            MF_COMPONENTS,
+            lengths_list,
+            all_mf_timings,
         )
 
     if json_path:
@@ -485,19 +579,16 @@ def main(
                 "repeats": repeats,
             },
             "comparison": [
-                {"L": L, **c}
-                for L, c in zip(lengths_list, all_comparisons)
+                {"L": L, **c} for L, c in zip(lengths_list, all_comparisons)
             ],
         }
         if all_mat_timings:
             output["materialized_components"] = [
-                {"L": L, **t}
-                for L, t in zip(lengths_list, all_mat_timings)
+                {"L": L, **t} for L, t in zip(lengths_list, all_mat_timings)
             ]
         if all_mf_timings:
             output["matrix_free_components"] = [
-                {"L": L, **t}
-                for L, t in zip(lengths_list, all_mf_timings)
+                {"L": L, **t} for L, t in zip(lengths_list, all_mf_timings)
             ]
         Path(json_path).write_text(json.dumps(output, indent=2))
         print(f"JSON written to {json_path}")

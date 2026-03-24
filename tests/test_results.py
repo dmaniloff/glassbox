@@ -1,15 +1,12 @@
-import math
-
 import pytest
 
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
     DegreeNormalizedFeatures,
-    SVDSnapshot,
     ScoresMatrixFeatures,
+    SVDSnapshot,
     _spectral_from_svs,
 )
-
 
 # ── _spectral_from_svs ────────────────────────────────────────────────────
 
@@ -49,14 +46,14 @@ class TestSpectralFromSvs:
 
 
 class TestScoresMatrixFeatures:
-    def test_from_singular_values(self):
+    def test_from_svd(self):
         f = ScoresMatrixFeatures.from_singular_values([429.6, 59.0, 41.9])
         assert f.sv1 == 429.6
         assert f.sv_ratio == pytest.approx(429.6 / 59.0)
         assert f.sv_entropy is not None
 
     def test_frozen(self):
-        f = ScoresMatrixFeatures(sv1=1.0)
+        f = ScoresMatrixFeatures.from_singular_values([1.0, 0.5])
         with pytest.raises(Exception):
             f.sv1 = 2.0
 
@@ -65,20 +62,19 @@ class TestScoresMatrixFeatures:
 
 
 class TestDegreeNormalizedFeatures:
-    def test_spectral_only(self):
-        f = DegreeNormalizedFeatures.from_singular_values([1.0, 0.5])
+    def test_from_hodge(self):
+        f = DegreeNormalizedFeatures.from_hodge(
+            singular_values=[1.0, 0.5],
+            phi_hat=0.31,
+            G=0.15,
+            curl_ratio=0.42,
+        )
         assert f.sv1 == 1.0
         assert f.sv_ratio == pytest.approx(2.0)
-        assert f.phi_hat is None
-
-    def test_with_routing(self):
-        routing = {"phi_hat": 0.31, "G": 0.15, "curl_ratio": 0.42}
-        f = DegreeNormalizedFeatures.from_singular_values([1.0, 0.5], routing=routing)
-        assert f.sv1 == 1.0
         assert f.phi_hat == 0.31
         assert f.G == 0.15
         assert f.curl_ratio == 0.42
-        assert f.sigma2 is None  # not in routing dict
+        assert f.sigma2 is None  # not passed
 
 
 # ── SVDSnapshot ───────────────────────────────────────────────────────────
@@ -120,8 +116,11 @@ class TestSVDSnapshot:
         assert restored.features.sv_ratio == snap.features.sv_ratio
 
     def test_degree_normalized_round_trip(self):
-        routing = {"phi_hat": 0.3, "G": 0.15}
-        features = DegreeNormalizedFeatures.from_singular_values([1.0, 0.5], routing=routing)
+        features = DegreeNormalizedFeatures.from_hodge(
+            singular_values=[1.0, 0.5],
+            phi_hat=0.3,
+            G=0.15,
+        )
         snap = self._make_snapshot(
             feature_group="degree_normalized_matrix",
             tier="materialized",

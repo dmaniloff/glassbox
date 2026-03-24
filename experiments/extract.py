@@ -178,7 +178,9 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
 
     # Determine features to pivot
     features = list(SPECTRAL_FEATURE_NAMES)
-    hodge_cols = [c for c in df.columns if c.startswith("hodge_") and df[c].notna().any()]
+    hodge_cols = [
+        c for c in df.columns if c.startswith("hodge_") and df[c].notna().any()
+    ]
     features.extend(sorted(hodge_cols))
 
     # Aggregate: mean per (sample, signal, layer, head) across steps
@@ -213,9 +215,11 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
     for col in ["dataset", "phase"]:
         if col in df_samples.columns:
             meta_cols.append(col)
-    sample_meta = df.groupby(sample_col).first()[
-        [c for c in ["label", "dataset", "L"] if c in df.columns]
-    ].reset_index()
+    sample_meta = (
+        df.groupby(sample_col)
+        .first()[[c for c in ["label", "dataset", "L"] if c in df.columns]]
+        .reset_index()
+    )
     if "dataset" in sample_meta.columns:
         sample_meta = sample_meta.rename(columns={"dataset": "source"})
     if "L" in sample_meta.columns:
@@ -223,8 +227,12 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
     df_wide = df_wide.merge(sample_meta, on=sample_col, how="left")
 
     pq.write_table(pa.Table.from_pandas(df_wide), out_path, compression="snappy")
-    n_features = len([c for c in df_wide.columns if any(c.startswith(f) for f in features)])
-    log(f"Parquet saved: {out_path} ({len(df_wide)} samples, {n_features} feature columns)")
+    n_features = len(
+        [c for c in df_wide.columns if any(c.startswith(f) for f in features)]
+    )
+    log(
+        f"Parquet saved: {out_path} ({len(df_wide)} samples, {n_features} feature columns)"
+    )
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -262,11 +270,17 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
     help="Head indices to analyze (repeatable). [default: [0]]",
 )
 @click.option(
-    "--scores-matrix", "scores_matrix", is_flag=True, default=False,
+    "--scores-matrix",
+    "scores_matrix",
+    is_flag=True,
+    default=False,
     help="Compute scores-matrix SVD features.",
 )
 @click.option(
-    "--degree-normalized", "degree_normalized", is_flag=True, default=False,
+    "--degree-normalized",
+    "degree_normalized",
+    is_flag=True,
+    default=False,
     help="Compute degree-normalized matrix features.",
 )
 @click.option(
@@ -294,7 +308,10 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
     help="Mode: generate (Mode B) or evaluate (Mode A, prefill-only).",
 )
 @click.option(
-    "--parquet", "parquet", is_flag=True, default=False,
+    "--parquet",
+    "parquet",
+    is_flag=True,
+    default=False,
     help="Also save results as wide Parquet (shade-compatible format).",
 )
 def main(
@@ -355,14 +372,18 @@ def main(
     log(f"Model: {model}")
     log(f"Mode: {mode}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
-    log(f"SVD: interval={svd_interval}, rank={svd_rank}, method={method or 'randomized'}")
+    log(
+        f"SVD: interval={svd_interval}, rank={svd_rank}, method={method or 'randomized'}"
+    )
     if heads:
         log(f"Heads: {list(heads)}")
     if degree_normalized:
         log(f"Degree-normalized: enabled (threshold={threshold or 2048})")
 
     if not scores_matrix and not degree_normalized:
-        raise click.UsageError("At least one of --scores-matrix or --degree-normalized must be enabled.")
+        raise click.UsageError(
+            "At least one of --scores-matrix or --degree-normalized must be enabled."
+        )
 
     # Configure glassbox backend
     gb_kwargs: dict = {"output": str(svd_features_path)}
@@ -440,7 +461,8 @@ def main(
                 else:
                     prompt = f"Q: {sample['question']}\nA:"
                     outputs = llm.generate(
-                        [prompt], sampling_params,
+                        [prompt],
+                        sampling_params,
                     )
                     generated = outputs[0].outputs[0].text
 
