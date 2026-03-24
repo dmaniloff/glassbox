@@ -47,7 +47,8 @@ def plot_violin_pointrange(
 
     n_feats = len(features)
     fig, axes = plt.subplots(
-        n_feats, 1,
+        n_feats,
+        1,
         figsize=(max(12, len(layer_ids) * 1.0), 4.5 * n_feats),
     )
     if n_feats == 1:
@@ -86,8 +87,11 @@ def plot_violin_pointrange(
 
             # ── Half violin ───────────────────────────────────────────
             parts = ax.violinplot(
-                layer_data, positions=layer_pos,
-                widths=0.8, showextrema=False, showmedians=False,
+                layer_data,
+                positions=layer_pos,
+                widths=0.8,
+                showextrema=False,
+                showmedians=False,
             )
             for pc in parts["bodies"]:
                 verts = pc.get_paths()[0].vertices
@@ -112,12 +116,26 @@ def plot_violin_pointrange(
                 lo = max(vals.min(), q1 - 1.5 * iqr)
                 hi = min(vals.max(), q3 + 1.5 * iqr)
                 x = li_i + offset
-                ax.plot([x, x], [lo, hi], color=color, lw=1,
-                        solid_capstyle="round", zorder=5)
-                ax.plot([x, x], [q1, q3], color=color, lw=4.5,
-                        solid_capstyle="round", alpha=0.7, zorder=6)
-                ax.plot(x, med, "o", color="white", ms=4.5,
-                        mec=color, mew=1.2, zorder=7)
+                ax.plot(
+                    [x, x],
+                    [lo, hi],
+                    color=color,
+                    lw=1,
+                    solid_capstyle="round",
+                    zorder=5,
+                )
+                ax.plot(
+                    [x, x],
+                    [q1, q3],
+                    color=color,
+                    lw=4.5,
+                    solid_capstyle="round",
+                    alpha=0.7,
+                    zorder=6,
+                )
+                ax.plot(
+                    x, med, "o", color="white", ms=4.5, mec=color, mew=1.2, zorder=7
+                )
 
             # ── Strip dots (size = seq length) ────────────────────────
             jitter_base = -0.28 if side == "left" else 0.22
@@ -126,14 +144,21 @@ def plot_violin_pointrange(
                 for val, L in pts:
                     jx = jitter_base + rng.uniform(-0.08, 0.08)
                     ax.scatter(
-                        li_i + jx, val, c=color, s=_size(L), alpha=0.5,
-                        edgecolors="white", linewidths=0.3, zorder=4,
+                        li_i + jx,
+                        val,
+                        c=color,
+                        s=_size(L),
+                        alpha=0.5,
+                        edgecolors="white",
+                        linewidths=0.3,
+                        zorder=4,
                     )
 
             # Legend entry (first panel only)
             if ax_i == 0:
-                ax.plot([], [], color=color, lw=6, alpha=0.5,
-                        label=LABEL_NAMES[label_val])
+                ax.plot(
+                    [], [], color=color, lw=6, alpha=0.5, label=LABEL_NAMES[label_val]
+                )
 
         if show_zero_line:
             ax.axhline(y=0, color="gray", lw=0.8, ls="--", alpha=0.5)
@@ -154,10 +179,24 @@ def plot_violin_pointrange(
                 (int((L_min + L_max) // 2), f"L={int((L_min + L_max) // 2)}"),
                 (int(L_max), f"L={int(L_max)}"),
             ]:
-                ax.scatter([], [], c="gray", s=_size(L_ex), alpha=0.6,
-                           edgecolors="white", linewidths=0.3, label=lbl)
-            ax.legend(fontsize=9, loc="upper right", framealpha=0.9,
-                      ncol=2, columnspacing=0.8, handletextpad=0.3)
+                ax.scatter(
+                    [],
+                    [],
+                    c="gray",
+                    s=_size(L_ex),
+                    alpha=0.6,
+                    edgecolors="white",
+                    linewidths=0.3,
+                    label=lbl,
+                )
+            ax.legend(
+                fontsize=9,
+                loc="upper right",
+                framealpha=0.9,
+                ncol=2,
+                columnspacing=0.8,
+                handletextpad=0.3,
+            )
 
     axes[-1].set_xlabel("Layer", fontsize=12)
     fig.suptitle(title, fontsize=14, fontweight="bold", y=1.01)
@@ -215,7 +254,9 @@ def _analyze_signal(
 
     n_samples = df["sample_idx"].nunique()
     n_layers = df["layer_idx"].nunique()
-    log(f"[{signal_label}] {len(df)} snapshots from {n_samples} samples across {n_layers} layers")
+    log(
+        f"[{signal_label}] {len(df)} snapshots from {n_samples} samples across {n_layers} layers"
+    )
 
     # ── Per-layer correlation table ───────────────────────────────────────
     agg = df.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
@@ -297,7 +338,10 @@ def _analyze_signal(
     # ── Aggregated AUROC (mean/max across layers per sample) ─────────────
     click.echo("")
     sample_layer_agg = agg.pivot_table(
-        index="sample_idx", columns="layer_idx", values=features, aggfunc="mean",
+        index="sample_idx",
+        columns="layer_idx",
+        values=features,
+        aggfunc="mean",
     )
     sample_labels = labels.loc[sample_layer_agg.index].values
 
@@ -338,14 +382,23 @@ def _analyze_signal(
         figsize=(max(6, len(features) * 1.5), max(4, len(layer_ids) * 0.5))
     )
     sns.heatmap(
-        corr_data.astype(float), annot=True, fmt="+.3f", center=0,
-        cmap="RdBu_r", vmin=-0.5, vmax=0.5, ax=ax, linewidths=0.5,
+        corr_data.astype(float),
+        annot=True,
+        fmt="+.3f",
+        center=0,
+        cmap="RdBu_r",
+        vmin=-0.5,
+        vmax=0.5,
+        ax=ax,
+        linewidths=0.5,
     )
     ax.set_ylabel("Layer")
     ax.set_xlabel("Feature")
     ax.set_title(f"Point-Biserial Correlation — {signal_label}")
     plt.tight_layout()
-    plt.savefig(str(plot_dir / f"{signal_name}_heatmap.png"), dpi=150, bbox_inches="tight")
+    plt.savefig(
+        str(plot_dir / f"{signal_name}_heatmap.png"), dpi=150, bbox_inches="tight"
+    )
     plt.close()
     log(f"Heatmap saved to {signal_name}_heatmap.png")
 
@@ -359,15 +412,24 @@ def _analyze_signal(
             figsize=(max(6, len(features) * 1.5), max(4, len(layer_ids) * 0.5))
         )
         sns.heatmap(
-            auroc_data.astype(float), annot=True, fmt=".3f", center=0.5,
-            cmap="RdYlGn", vmin=0.3, vmax=0.7, ax=ax, linewidths=0.5,
+            auroc_data.astype(float),
+            annot=True,
+            fmt=".3f",
+            center=0.5,
+            cmap="RdYlGn",
+            vmin=0.3,
+            vmax=0.7,
+            ax=ax,
+            linewidths=0.5,
         )
         ax.set_ylabel("Layer")
         ax.set_xlabel("Feature")
         ax.set_title(f"AUROC by Layer — {signal_label}")
         plt.tight_layout()
         plt.savefig(
-            str(plot_dir / f"{signal_name}_auroc_heatmap.png"), dpi=150, bbox_inches="tight",
+            str(plot_dir / f"{signal_name}_auroc_heatmap.png"),
+            dpi=150,
+            bbox_inches="tight",
         )
         plt.close()
         log(f"AUROC heatmap saved to {signal_name}_auroc_heatmap.png")
@@ -378,7 +440,9 @@ def _analyze_signal(
         df_plot["L"] = 0
     dist_df = df_plot[["sample_idx", "layer_idx", "label", "L"] + features].copy()
     plot_violin_pointrange(
-        dist_df, features=features, feat_labels=feat_plot_labels,
+        dist_df,
+        features=features,
+        feat_labels=feat_plot_labels,
         layer_ids=layer_ids,
         title=f"Feature Distributions — {signal_label}",
         out_path=str(plot_dir / f"{signal_name}_distributions.png"),
@@ -395,22 +459,31 @@ def _analyze_signal(
             axes = [axes]
         for ax, feat in zip(axes, features):
             sns.scatterplot(
-                data=layer_df, x="L", y=feat, hue="label_str",
-                alpha=0.4, s=15, ax=ax,
+                data=layer_df,
+                x="L",
+                y=feat,
+                hue="label_str",
+                alpha=0.4,
+                s=15,
+                ax=ax,
             )
             ax.set_title(f"Layer {best_layer}")
             ax.set_xlabel("Sequence Length (tokens)")
         plt.suptitle(
             f"Features vs Sequence Length — {signal_label}",
-            fontsize=12, fontweight="bold",
+            fontsize=12,
+            fontweight="bold",
         )
         plt.tight_layout()
         plt.savefig(
             str(plot_dir / f"{signal_name}_feature_vs_length_layer{best_layer}.png"),
-            dpi=150, bbox_inches="tight",
+            dpi=150,
+            bbox_inches="tight",
         )
         plt.close()
-        log(f"Feature vs length scatter saved to {signal_name}_feature_vs_length_layer{best_layer}.png")
+        log(
+            f"Feature vs length scatter saved to {signal_name}_feature_vs_length_layer{best_layer}.png"
+        )
 
     # ── Two-phase analysis (evaluate mode) ────────────────────────────────
     if has_phases and df_all is not None:
@@ -421,12 +494,8 @@ def _analyze_signal(
         df_q = df_all[df_all["phase"] == "question"].copy()
         df_f = df  # already filtered to "full"
 
-        agg_q = (
-            df_q.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
-        )
-        agg_f = (
-            df_f.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
-        )
+        agg_q = df_q.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
+        agg_f = df_f.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
 
         merged_phases = agg_q.merge(
             agg_f, on=["sample_idx", "layer_idx"], suffixes=("_q", "_f")
@@ -518,8 +587,15 @@ def _analyze_signal(
                 figsize=(max(8, len(delta_features) * 2), max(4, len(layer_ids) * 0.5))
             )
             sns.heatmap(
-                delta_corr_data.astype(float), annot=True, fmt="+.3f", center=0,
-                cmap="RdBu_r", vmin=-0.5, vmax=0.5, ax=ax, linewidths=0.5,
+                delta_corr_data.astype(float),
+                annot=True,
+                fmt="+.3f",
+                center=0,
+                cmap="RdBu_r",
+                vmin=-0.5,
+                vmax=0.5,
+                ax=ax,
+                linewidths=0.5,
             )
             ax.set_ylabel("Layer")
             ax.set_xlabel("Feature (full - question)")
@@ -527,7 +603,8 @@ def _analyze_signal(
             plt.tight_layout()
             plt.savefig(
                 str(plot_dir / f"{signal_name}_delta_heatmap.png"),
-                dpi=150, bbox_inches="tight",
+                dpi=150,
+                bbox_inches="tight",
             )
             plt.close()
             log(f"Delta heatmap saved to {signal_name}_delta_heatmap.png")
@@ -586,7 +663,7 @@ def _build_summary(df_all, signals, labels, layer_ids, has_phases):
     }
 
     summary_rows = []
-    corr_grid = {}   # col_label -> {layer_idx: r}
+    corr_grid = {}  # col_label -> {layer_idx: r}
     auroc_grid = {}  # col_label -> {layer_idx: auc}
 
     for signal_name in signals:
@@ -602,10 +679,13 @@ def _build_summary(df_all, signals, labels, layer_ids, has_phases):
             continue
 
         features = list(SPECTRAL_FEATURE_NAMES)
-        hodge_cols = sorted([
-            c for c in df_sig.columns
-            if c.startswith("hodge_") and df_sig[c].notna().any()
-        ])
+        hodge_cols = sorted(
+            [
+                c
+                for c in df_sig.columns
+                if c.startswith("hodge_") and df_sig[c].notna().any()
+            ]
+        )
         features.extend(hodge_cols)
 
         prefix = SIG_PREFIX.get(signal_name, signal_name[:8])
@@ -638,16 +718,20 @@ def _build_summary(df_all, signals, labels, layer_ids, has_phases):
                     if abs(auc - 0.5) > abs(best_auc - 0.5):
                         best_auc, best_lo, best_hi, best_auc_layer = auc, lo, hi, li
 
-            summary_rows.append({
-                "signal": prefix,
-                "feature": feat_clean,
-                "best_layer": best_layer if best_layer is not None else best_auc_layer,
-                "r": best_r,
-                "p": best_p,
-                "auc": best_auc,
-                "auc_lo": best_lo,
-                "auc_hi": best_hi,
-            })
+            summary_rows.append(
+                {
+                    "signal": prefix,
+                    "feature": feat_clean,
+                    "best_layer": best_layer
+                    if best_layer is not None
+                    else best_auc_layer,
+                    "r": best_r,
+                    "p": best_p,
+                    "auc": best_auc,
+                    "auc_lo": best_lo,
+                    "auc_hi": best_hi,
+                }
+            )
 
     return summary_rows, corr_grid, auroc_grid
 
@@ -666,7 +750,9 @@ def _print_summary_table(summary_rows):
     click.echo("-" * 95)
 
     for row in summary_rows:
-        layer_str = f"L{row['best_layer']}" if row["best_layer"] is not None else "  n/a"
+        layer_str = (
+            f"L{row['best_layer']}" if row["best_layer"] is not None else "  n/a"
+        )
         sig = "**" if row["p"] < 0.01 else ("*" if row["p"] < 0.05 else " ")
 
         if row["auc_lo"] is not None:
@@ -708,31 +794,50 @@ def _plot_summary_heatmap(corr_grid, auroc_grid, layer_ids, out_path):
     annot_size = 7 if n_rows > 16 else 9
 
     fig, (ax1, ax2) = plt.subplots(
-        1, 2,
+        1,
+        2,
         figsize=(max(8, n_cols * 1.2) * 2 + 3, max(5, n_rows * 0.45 + 2)),
     )
     fig.subplots_adjust(wspace=0.35, top=0.93)
 
     sns.heatmap(
-        auroc_df.astype(float), annot=True, fmt=".2f", center=0.5,
-        cmap="RdYlGn", vmin=0.3, vmax=0.7, ax=ax1, linewidths=0.5,
-        annot_kws={"size": annot_size}, cbar_kws={"shrink": 0.8},
+        auroc_df.astype(float),
+        annot=True,
+        fmt=".2f",
+        center=0.5,
+        cmap="RdYlGn",
+        vmin=0.3,
+        vmax=0.7,
+        ax=ax1,
+        linewidths=0.5,
+        annot_kws={"size": annot_size},
+        cbar_kws={"shrink": 0.8},
     )
     ax1.set_title("AUROC by Layer", fontsize=12, fontweight="bold")
     ax1.set_ylabel("Layer")
     ax1.set_xticklabels(ax1.get_xticklabels(), rotation=45, ha="right", fontsize=9)
 
     sns.heatmap(
-        corr_df.astype(float), annot=True, fmt="+.2f", center=0,
-        cmap="RdBu_r", vmin=-0.5, vmax=0.5, ax=ax2, linewidths=0.5,
-        annot_kws={"size": annot_size}, cbar_kws={"shrink": 0.8},
+        corr_df.astype(float),
+        annot=True,
+        fmt="+.2f",
+        center=0,
+        cmap="RdBu_r",
+        vmin=-0.5,
+        vmax=0.5,
+        ax=ax2,
+        linewidths=0.5,
+        annot_kws={"size": annot_size},
+        cbar_kws={"shrink": 0.8},
     )
     ax2.set_title("Point-Biserial r by Layer", fontsize=12, fontweight="bold")
     ax2.set_ylabel("")
     ax2.set_xticklabels(ax2.get_xticklabels(), rotation=45, ha="right", fontsize=9)
 
     fig.suptitle(
-        "Bird's-Eye Summary — All Signals", fontsize=14, fontweight="bold",
+        "Bird's-Eye Summary — All Signals",
+        fontsize=14,
+        fontweight="bold",
     )
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -745,7 +850,9 @@ def _plot_summary_heatmap(corr_grid, auroc_grid, layer_ids, out_path):
 @click.command()
 @click.argument("results_dir", type=click.Path(exists=True, file_okay=False))
 @click.option("--output-dir", default=None, help="Override plot output directory.")
-@click.option("--detailed", is_flag=True, help="Run per-signal detailed analysis with all plots.")
+@click.option(
+    "--detailed", is_flag=True, help="Run per-signal detailed analysis with all plots."
+)
 def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
     """Analyze spectral features and correlate with hallucination labels."""
     import matplotlib
@@ -865,16 +972,27 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
     layer_ids = sorted(df_stats["layer_idx"].unique())
 
     # ── Per-signal analysis ───────────────────────────────────────────────
-    signals = sorted(df_all["signal"].unique()) if "signal" in df_all.columns else ["scores_matrix"]
+    signals = (
+        sorted(df_all["signal"].unique())
+        if "signal" in df_all.columns
+        else ["scores_matrix"]
+    )
     log(f"Signals found: {signals}")
 
     # ── Bird's-eye summary (always) ───────────────────────────────────────
     summary_rows, corr_grid, auroc_grid = _build_summary(
-        df_all, signals, labels, layer_ids, has_phases,
+        df_all,
+        signals,
+        labels,
+        layer_ids,
+        has_phases,
     )
     _print_summary_table(summary_rows)
     _plot_summary_heatmap(
-        corr_grid, auroc_grid, layer_ids, str(plot_dir / "summary_heatmap.png"),
+        corr_grid,
+        auroc_grid,
+        layer_ids,
+        str(plot_dir / "summary_heatmap.png"),
     )
 
     if not detailed:
@@ -899,23 +1017,36 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
 
         # Determine features for this signal
         features = list(SPECTRAL_FEATURE_NAMES)
-        feat_labels = ["\u03c3\u2081/\u03c3\u2082 Ratio", "\u03c3\u2081 (Leading SV)", "SV Entropy"]
+        feat_labels = [
+            "\u03c3\u2081/\u03c3\u2082 Ratio",
+            "\u03c3\u2081 (Leading SV)",
+            "SV Entropy",
+        ]
 
         # Add hodge features if present (degree_normalized_matrix with hodge=True)
-        hodge_cols = sorted([
-            c for c in df_sig.columns
-            if c.startswith("hodge_") and df_sig[c].notna().any()
-        ])
+        hodge_cols = sorted(
+            [
+                c
+                for c in df_sig.columns
+                if c.startswith("hodge_") and df_sig[c].notna().any()
+            ]
+        )
         if hodge_cols:
             features.extend(hodge_cols)
-            feat_labels.extend([
-                c.replace("hodge_", "").replace("_", " ").title()
-                for c in hodge_cols
-            ])
+            feat_labels.extend(
+                [c.replace("hodge_", "").replace("_", " ").title() for c in hodge_cols]
+            )
 
         _analyze_signal(
-            df_sig, df_sig_all, features, feat_labels,
-            signal_name, layer_ids, labels, plot_dir, has_phases,
+            df_sig,
+            df_sig_all,
+            features,
+            feat_labels,
+            signal_name,
+            layer_ids,
+            labels,
+            plot_dir,
+            has_phases,
         )
 
     # ── Prompt length analysis (signal-independent) ───────────────────────
