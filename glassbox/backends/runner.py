@@ -3,7 +3,7 @@ Entry-point script that launches vLLM with the custom SVD attention backend.
 
 Usage:
     python -m glassbox.backends.runner [OPTIONS]
-    python -m glassbox.backends.runner --interval 16 --rank 2 --heads 0 1 2
+    python -m glassbox.backends.runner --interval 16 --rank 2 --heads 0,1,2
     python -m glassbox.backends.runner --model facebook/opt-350m --method lanczos
     python -m glassbox.backends.runner --config glassbox.yaml
 
@@ -56,9 +56,10 @@ logger = logging.getLogger(__name__)
 )
 @click.option(
     "--heads",
-    type=int,
-    multiple=True,
-    help="Head indices to analyze (repeatable). [default: from config ([0])]",
+    type=str,
+    default=None,
+    callback=lambda ctx, param, value: tuple(int(x.strip()) for x in value.split(",")) if value else (),
+    help="Comma-separated head indices to analyze. [default: from config ([0])]",
 )
 @click.option(
     "--operator",

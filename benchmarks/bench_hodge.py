@@ -23,6 +23,8 @@ import click
 import torch
 
 from glassbox.hodge import (
+    _compute_G_materialized,
+    _estimate_curl_materialized,
     compute_G_matrix_free,
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
@@ -41,6 +43,7 @@ from glassbox.svd import (
 )
 
 DEFAULT_LENGTHS = [32, 64, 128, 256, 512, 1024, 2048]
+MAT_COMPONENTS = ["A+M", "SVD", "||M||", "G", "C", "s2asym", "[comm]", "total"]
 MF_COMPONENTS = ["dk+lse", "SVD", "||M||", "G", "C", "s2asym", "[comm]", "total"]
 
 
@@ -161,6 +164,77 @@ def bench_matrix_free(
 
 
 # ---------------------------------------------------------------------------
+# Per-component benchmarks (materialized)
+# ---------------------------------------------------------------------------
+
+
+def bench_materialized(
+    L: int,
+    d: int,
+    rank: int,
+    warmup: int,
+    repeats: int,
+    device: str = "cpu",
+) -> dict:
+    """Benchmark all materialized Hodge components at sequence length L."""
+    Q, K = _make_qk(L, d, device)
+    scale = 1.0 / math.sqrt(d)
+
+    # Pre-compute M
+    A = torch.softmax(Q @ K.T * scale, dim=-1)
+    M, _, _ = compute_degree_normalized_M(A)
+
+    timings = {}
+
+    timings["A+M"] = _time_fn(
+        lambda: compute_degree_normalized_M(torch.softmax(Q @ K.T * scale, dim=-1)),
+        warmup, repeats, device,
+    )
+
+    timings["SVD"] = _time_fn(
+        lambda: torch.linalg.svdvals(M),
+        warmup, repeats, device,
+    )
+
+    timings["||M||"] = _time_fn(
+        lambda: torch.linalg.norm(M, "fro"),
+        warmup, repeats, device,
+    )
+
+    timings["G"] = _time_fn(
+        lambda: _compute_G_materialized(M),
+        warmup, repeats, device,
+    )
+
+    timings["C"] = _time_fn(
+        lambda: _estimate_curl_materialized(M),
+        warmup, repeats, device,
+    )
+
+    timings["s2asym"] = _time_fn(
+        lambda: torch.linalg.svdvals((M - M.T) / 2.0),
+        warmup, repeats, device,
+    )
+
+    M_sym = (M + M.T) / 2.0
+    M_asym = (M - M.T) / 2.0
+    timings["[comm]"] = _time_fn(
+        lambda: torch.linalg.norm(M_sym @ M_asym - M_asym @ M_sym, "fro"),
+        warmup, repeats, device,
+    )
+
+    timings["total"] = _time_fn(
+        lambda: compute_routing_features_materialized(
+            compute_degree_normalized_M(torch.softmax(Q @ K.T * scale, dim=-1))[0],
+            rank=rank,
+        ),
+        warmup, repeats, device,
+    )
+
+    return timings
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: materialized vs matrix-free
 # ---------------------------------------------------------------------------
 
@@ -237,7 +311,7 @@ def print_comparison_report(
     d: int,
     rank: int,
 ) -> None:
-    print(f"\nMaterialized vs Matrix-Free — d={d}, rank={rank}")
+    print(f"\nMaterialized vs Matrix-Free (all Hodge features) — d={d}, rank={rank}")
     print("=" * 68)
     header = f"{'L':>6} | {'materialized':>14} | {'matrix-free':>14} | {'ratio':>8}"
     print(header)
@@ -263,31 +337,30 @@ def print_comparison_report(
 
 
 def print_component_report(
+    title: str,
+    components: list[str],
     lengths: list[int],
     all_timings: list[dict],
-    d: int,
-    rank: int,
-    block_size: int,
 ) -> None:
-    print(f"\nMatrix-Free Component Breakdown — d={d}, rank={rank}, block_size={block_size}")
+    print(f"\n{title}")
     print("=" * 90)
 
     col_w = 8
     header = f"{'L':>6} |"
-    for comp in MF_COMPONENTS:
+    for comp in components:
         header += f" {comp:>{col_w}} |"
     print(header)
     print("-" * len(header))
 
     for L, timings in zip(lengths, all_timings):
         row = f"{L:>6} |"
-        for comp in MF_COMPONENTS:
+        for comp in components:
             row += f" {_fmt_ms(timings[comp]):>{col_w}} |"
         print(row)
 
     print("-" * len(header))
     exp_row = f"{'slope':>6} |"
-    for comp in MF_COMPONENTS:
+    for comp in components:
         times = [t[comp] for t in all_timings]
         exp = _scaling_exponent(lengths, times)
         if exp is not None:
@@ -300,7 +373,7 @@ def print_component_report(
     total_last = all_timings[-1]["total"]
     print(f"At L={lengths[-1]}: total = {_fmt_ms(total_last)}")
     print("Component breakdown:")
-    for comp in MF_COMPONENTS[:-1]:
+    for comp in components[:-1]:
         t = all_timings[-1][comp]
         pct = t / total_last * 100 if total_last > 0 else 0
         print(f"  {comp:>8}: {_fmt_ms(t):>8}  ({pct:5.1f}%)")
@@ -311,10 +384,18 @@ def print_component_report(
 # ---------------------------------------------------------------------------
 
 
+def _parse_int_list(ctx, param, value):
+    """Parse a comma-separated list of ints."""
+    if not value:
+        return param.default
+    return tuple(int(x.strip()) for x in value.split(","))
+
+
 @click.command()
 @click.option(
-    "--lengths", type=int, multiple=True, default=DEFAULT_LENGTHS,
-    show_default=True, help="Sequence lengths to sweep (repeatable).",
+    "--lengths", type=str, default=",".join(str(x) for x in DEFAULT_LENGTHS),
+    callback=_parse_int_list, show_default=True,
+    help="Comma-separated sequence lengths to sweep.",
 )
 @click.option("--d-model", type=int, default=64, show_default=True, help="Head dimension.")
 @click.option("--rank", type=int, default=4, show_default=True, help="SVD rank.")
@@ -364,18 +445,35 @@ def main(
 
     print_comparison_report(lengths_list, all_comparisons, d_model, rank)
 
-    # 2. Matrix-free component breakdown
-    all_timings = []
+    # 2. Component breakdowns
+    all_mat_timings = []
+    all_mf_timings = []
     if not comparison_only:
-        print("--- Matrix-Free Component Breakdown ---")
+        print("\n--- Materialized Component Breakdown ---")
+        for L in lengths_list:
+            sys.stdout.write(f"  L={L}...")
+            sys.stdout.flush()
+            timings = bench_materialized(L, d_model, rank, warmup, repeats, device)
+            all_mat_timings.append(timings)
+            print(f" {_fmt_ms(timings['total'])}")
+
+        print_component_report(
+            f"Materialized Component Breakdown — d={d_model}, rank={rank}",
+            MAT_COMPONENTS, lengths_list, all_mat_timings,
+        )
+
+        print("\n--- Matrix-Free Component Breakdown ---")
         for L in lengths_list:
             sys.stdout.write(f"  L={L}...")
             sys.stdout.flush()
             timings = bench_matrix_free(L, d_model, rank, block_size, warmup, repeats, device)
-            all_timings.append(timings)
+            all_mf_timings.append(timings)
             print(f" {_fmt_ms(timings['total'])}")
 
-        print_component_report(lengths_list, all_timings, d_model, rank, block_size)
+        print_component_report(
+            f"Matrix-Free Component Breakdown — d={d_model}, rank={rank}, block_size={block_size}",
+            MF_COMPONENTS, lengths_list, all_mf_timings,
+        )
 
     if json_path:
         output = {
@@ -391,10 +489,15 @@ def main(
                 for L, c in zip(lengths_list, all_comparisons)
             ],
         }
-        if all_timings:
+        if all_mat_timings:
+            output["materialized_components"] = [
+                {"L": L, **t}
+                for L, t in zip(lengths_list, all_mat_timings)
+            ]
+        if all_mf_timings:
             output["matrix_free_components"] = [
                 {"L": L, **t}
-                for L, t in zip(lengths_list, all_timings)
+                for L, t in zip(lengths_list, all_mf_timings)
             ]
         Path(json_path).write_text(json.dumps(output, indent=2))
         print(f"JSON written to {json_path}")
