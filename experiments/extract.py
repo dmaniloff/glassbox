@@ -1,17 +1,22 @@
 """Spectral feature extraction on labeled datasets.
 
+Datasets are loaded from pre-split HuggingFace repos that contain the
+exact 30% test split produced by shade-train's HashBasedSplitter
+(hash_fields=["prompt"], 70/0/30 ratio).  This ensures glassbox
+experiments run on the same samples as shade without a shade-train
+dependency.  See ``scripts/upload_test_splits.py`` for how these
+datasets were created.
+
 Usage:
-    python experiments/extract.py                          # default: HaluEval, OPT-125m
-    python experiments/extract.py --mode evaluate          # Mode A: prefill evaluation
-    python experiments/extract.py --model Qwen/Qwen2-7B-Instruct --request-type chat_completions
-    python experiments/extract.py --max-samples 50         # quick test
-    python experiments/extract.py --degree-normalized      # also compute M features
+    python experiments/extract.py --dataset halueval_hallucination --scores-matrix
+    python experiments/extract.py --dataset all --degree-normalized
+    python experiments/extract.py --dataset halueval_hallucination --max-samples 50
+    python experiments/extract.py --mode evaluate
 """
 
 from __future__ import annotations
 
 import json
-import random
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +25,7 @@ import click
 # ── Constants ──────────────────────────────────────────────────────────────
 
 DEFAULT_MODEL = "facebook/opt-125m"
+DEFAULT_HF_ORG = "dmaniloff"
 
 
 def log(msg: str) -> None:
@@ -27,92 +33,79 @@ def log(msg: str) -> None:
 
 
 # ── Dataset loading ───────────────────────────────────────────────────────
+# Each dataset is a pre-split HuggingFace dataset with columns:
+#   prompt, response, label (0=ok, 1=bad), unique_id, failure_mode
 
 
-def load_halueval(max_samples: int) -> list[dict]:
-    from datasets import load_dataset
-
-    log("Loading HaluEval qa...")
-    ds = load_dataset("pminervini/HaluEval", "qa", split="data")
-    indices = list(range(len(ds)))
-    random.Random(42).shuffle(indices)
-    samples = []
-    for i in indices:
-        if len(samples) >= max_samples:
-            break
-        row = ds[i]
-        question = row["question"]
-        # Each row produces 2 samples: right_answer (label=0) + hallucinated_answer (label=1)
-        samples.append(
-            {
-                "idx": len(samples),
-                "question": question,
-                "response": row["right_answer"],
-                "label": 0,
-            }
-        )
-        if len(samples) >= max_samples:
-            break
-        samples.append(
-            {
-                "idx": len(samples),
-                "question": question,
-                "response": row["hallucinated_answer"],
-                "label": 1,
-            }
-        )
-    log(
-        f"Loaded {len(samples)} samples ({sum(s['label'] for s in samples)} hallucinated)"
-    )
-    return samples
-
-
-def load_truthfulqa(max_samples: int) -> list[dict]:
-    from datasets import load_dataset
-
-    log("Loading TruthfulQA...")
-    ds = load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
-    rng = random.Random(42)
-    indices = list(range(len(ds)))
-    rng.shuffle(indices)
-    samples = []
-    for i in indices:
-        if len(samples) >= max_samples:
-            break
-        row = ds[i]
-        question = row["question"]
-        incorrect = row["incorrect_answers"]
-        if not incorrect:
-            continue
-        # Pair best_answer (label=0) with a random incorrect_answer (label=1)
-        samples.append(
-            {
-                "idx": len(samples),
-                "question": question,
-                "response": row["best_answer"],
-                "label": 0,
-            }
-        )
-        if len(samples) >= max_samples:
-            break
-        samples.append(
-            {
-                "idx": len(samples),
-                "question": question,
-                "response": rng.choice(incorrect),
-                "label": 1,
-            }
-        )
-    log(
-        f"Loaded {len(samples)} samples ({sum(s['label'] for s in samples)} hallucinated)"
-    )
-    return samples
-
-
-DATASET_LOADERS = {
-    "halueval": load_halueval,
-    "truthfulqa": load_truthfulqa,
+DATASET_REGISTRY = {
+    "deepset_injection": {
+        "hf_repo": "glassbox_deepset_injection_test",
+        "failure_mode": "injection",
+    },
+    "protectai_injection": {
+        "hf_repo": "glassbox_protectai_injection_test",
+        "failure_mode": "injection",
+    },
+    "halueval_hallucination": {
+        "hf_repo": "glassbox_halueval_hallucination_test",
+        "failure_mode": "hallucination",
+    },
+    "truthfulqa_hallucination": {
+        "hf_repo": "glassbox_truthfulqa_hallucination_test",
+        "failure_mode": "hallucination",
+    },
+    "medhallu_hallucination": {
+        "hf_repo": "glassbox_medhallu_hallucination_test",
+        "failure_mode": "hallucination",
+    },
+    "ragtruth_hallucination": {
+        "hf_repo": "glassbox_ragtruth_hallucination_test",
+        "failure_mode": "hallucination",
+    },
+    "halubench_hallucination": {
+        "hf_repo": "glassbox_halubench_hallucination_test",
+        "failure_mode": "hallucination",
+    },
+    "felm_hallucination": {
+        "hf_repo": "glassbox_felm_hallucination_test",
+        "failure_mode": "hallucination",
+    },
 }
+
+
+def load_dataset_samples(
+    dataset_name: str,
+    max_samples: int | None = None,
+    hf_org: str = DEFAULT_HF_ORG,
+) -> list[dict]:
+    """Load a pre-split test dataset from HuggingFace.
+
+    Returns list of dicts with keys: idx, question, response, label, unique_id.
+    """
+    from datasets import load_dataset
+
+    info = DATASET_REGISTRY[dataset_name]
+    repo_id = f"{hf_org}/{info['hf_repo']}"
+    log(f"Loading {dataset_name} from {repo_id}...")
+
+    ds = load_dataset(repo_id, split="test")
+    samples = []
+    for i, row in enumerate(ds):
+        if max_samples is not None and len(samples) >= max_samples:
+            break
+        samples.append(
+            {
+                "idx": i,
+                "question": row["prompt"],
+                "response": row["response"],
+                "label": int(row["label"]),
+                "unique_id": row.get("unique_id", ""),
+            }
+        )
+
+    n_pos = sum(s["label"] for s in samples)
+    log(f"Loaded {len(samples)} samples ({n_pos} positive / {len(samples) - n_pos} negative)")
+    return samples
 
 from glassbox.results import SPECTRAL_FEATURE_NAMES, SVDSnapshot
 
@@ -245,13 +238,20 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
 @click.option(
     "--dataset",
     "dataset_name",
-    default="halueval",
+    default="halueval_hallucination",
     show_default=True,
-    type=click.Choice(list(DATASET_LOADERS.keys())),
+    type=click.Choice(list(DATASET_REGISTRY.keys()) + ["all"]),
     help="Dataset to use.",
 )
 @click.option(
-    "--max-samples", default=200, show_default=True, help="Max samples to process."
+    "--hf-org",
+    "hf_org",
+    default=DEFAULT_HF_ORG,
+    show_default=True,
+    help="HuggingFace org hosting the pre-split datasets.",
+)
+@click.option(
+    "--max-samples", default=None, type=int, show_default=True, help="Max samples to process (default: all)."
 )
 @click.option(
     "--svd-interval", default=16, show_default=True, help="SVD snapshot interval."
@@ -317,7 +317,8 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
 def main(
     model: str,
     dataset_name: str,
-    max_samples: int,
+    hf_org: str,
+    max_samples: int | None,
     svd_interval: int,
     svd_rank: int,
     method: str | None,
@@ -336,8 +337,16 @@ def main(
     import glassbox.backends.svd_backend as svd_mod
     from glassbox.config import GlassboxConfig
 
-    # Load dataset
-    samples = DATASET_LOADERS[dataset_name](max_samples)
+    # Load dataset(s)
+    if dataset_name == "all":
+        all_samples: list[dict] = []
+        for name in DATASET_REGISTRY:
+            all_samples.extend(
+                load_dataset_samples(name, max_samples, hf_org=hf_org)
+            )
+        samples = all_samples
+    else:
+        samples = load_dataset_samples(dataset_name, max_samples, hf_org=hf_org)
 
     if mode == "evaluate":
         # Mode A: prefill-only, SVD fires every token
