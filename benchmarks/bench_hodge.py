@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Hodge decomposition microbenchmark.
 
-Measures wall-clock time of each matrix-free Hodge component at various
-sequence lengths.  Prints a readable table and optionally writes JSON.
+Compares materialized vs matrix-free routing features at various sequence
+lengths, and breaks down matrix-free cost by component.
 
 Usage:
-    uv run benchmarks/bench_hodge.py
-    uv run benchmarks/bench_hodge.py --lengths 32 64 128 --json results.json
-    uv run benchmarks/bench_hodge.py --d-model 128 --warmup 3 --repeats 5
+    python benchmarks/bench_hodge.py
+    python benchmarks/bench_hodge.py --lengths 32 64 128 --json results.json
+    python benchmarks/bench_hodge.py --d-model 128 --warmup 3 --repeats 5
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import statistics
@@ -20,16 +19,19 @@ import sys
 import time
 from pathlib import Path
 
+import click
 import torch
 
 from glassbox.hodge import (
     compute_G_matrix_free,
-    compute_routing_features,
+    compute_routing_features_materialized,
+    compute_routing_features_matrix_free,
     compute_sigma2_asym_matrix_free,
     estimate_commutator_norm_matrix_free,
     estimate_curl_matrix_free,
 )
 from glassbox.svd import (
+    compute_degree_normalized_M,
     compute_dk_blocked,
     compute_logsumexp_blocked,
     compute_M_fro_norm_blocked,
@@ -39,7 +41,7 @@ from glassbox.svd import (
 )
 
 DEFAULT_LENGTHS = [32, 64, 128, 256, 512, 1024, 2048]
-COMPONENTS = ["dk+lse", "SVD", "||M||", "G", "C", "s2asym", "[comm]", "total"]
+MF_COMPONENTS = ["dk+lse", "SVD", "||M||", "G", "C", "s2asym", "[comm]", "total"]
 
 
 # ---------------------------------------------------------------------------
@@ -47,41 +49,51 @@ COMPONENTS = ["dk+lse", "SVD", "||M||", "G", "C", "s2asym", "[comm]", "total"]
 # ---------------------------------------------------------------------------
 
 
-def _time_fn(fn, warmup: int, repeats: int) -> float:
+def _time_fn(fn, warmup: int, repeats: int, device: str = "cpu") -> float:
     """Return median wall-clock seconds over `repeats` runs after `warmup`."""
     for _ in range(warmup):
         fn()
+        _sync(device)
     times = []
     for _ in range(repeats):
+        _sync(device)
         t0 = time.perf_counter()
         fn()
+        _sync(device)
         t1 = time.perf_counter()
         times.append(t1 - t0)
     return statistics.median(times)
 
 
-def _make_qk(L: int, d: int, seed: int = 42):
+def _make_qk(L: int, d: int, device: str = "cpu", seed: int = 42):
     torch.manual_seed(seed)
-    Q = torch.randn(L, d)
-    K = torch.randn(L, d)
+    Q = torch.randn(L, d, device=device)
+    K = torch.randn(L, d, device=device)
     return Q, K
 
 
+def _sync(device: str):
+    """Synchronize GPU before timing."""
+    if device != "cpu" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
 # ---------------------------------------------------------------------------
-# Per-component benchmarks
+# Per-component benchmarks (matrix-free)
 # ---------------------------------------------------------------------------
 
 
-def bench_one(
+def bench_matrix_free(
     L: int,
     d: int,
     rank: int,
     block_size: int,
     warmup: int,
     repeats: int,
+    device: str = "cpu",
 ) -> dict:
-    """Benchmark all Hodge components at sequence length L."""
-    Q, K = _make_qk(L, d)
+    """Benchmark all matrix-free Hodge components at sequence length L."""
+    Q, K = _make_qk(L, d, device)
     scale = 1.0 / math.sqrt(d)
 
     # Pre-compute shared quantities
@@ -95,65 +107,97 @@ def bench_one(
 
     timings = {}
 
-    # 1. dk + lse
     timings["dk+lse"] = _time_fn(
         lambda: (
             compute_dk_blocked(Q, K, scale, block_size),
             compute_logsumexp_blocked(Q, K, scale, block_size),
         ),
-        warmup, repeats,
+        warmup, repeats, device,
     )
 
-    # 2. SVD (randomized)
     timings["SVD"] = _time_fn(
-        lambda: randomized_svd(matvec, matvec_t, L, k, device="cpu"),
-        warmup, repeats,
+        lambda: randomized_svd(matvec, matvec_t, L, k, device=device),
+        warmup, repeats, device,
     )
 
-    # 3. ||M||_F
     timings["||M||"] = _time_fn(
         lambda: compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size),
-        warmup, repeats,
+        warmup, repeats, device,
     )
 
-    # 4. G (asymmetry)
     timings["G"] = _time_fn(
         lambda: compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size),
-        warmup, repeats,
+        warmup, repeats, device,
     )
 
-    # 5. C (curl)
     timings["C"] = _time_fn(
         lambda: estimate_curl_matrix_free(
             Q, K, lse, d_k_inv_sqrt, scale, M_fro, min_samples=200,
         ),
-        warmup, repeats,
+        warmup, repeats, device,
     )
 
-    # 6. sigma2_asym
     timings["s2asym"] = _time_fn(
         lambda: compute_sigma2_asym_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size),
-        warmup, repeats,
+        warmup, repeats, device,
     )
 
-    # 7. commutator norm
     timings["[comm]"] = _time_fn(
         lambda: estimate_commutator_norm_matrix_free(
             Q, K, d_k_inv_sqrt, scale, M_fro, block_size, n_hutchinson=10,
         ),
-        warmup, repeats,
+        warmup, repeats, device,
     )
 
-    # 8. total (end-to-end)
     timings["total"] = _time_fn(
-        lambda: compute_routing_features(
+        lambda: compute_routing_features_matrix_free(
             Q, K, d_k_inv_sqrt, scale, lse, rank=rank, block_size=block_size,
             min_samples=200,
         ),
-        warmup, repeats,
+        warmup, repeats, device,
     )
 
     return timings
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: materialized vs matrix-free
+# ---------------------------------------------------------------------------
+
+
+def bench_comparison(
+    L: int,
+    d: int,
+    rank: int,
+    block_size: int,
+    warmup: int,
+    repeats: int,
+    device: str = "cpu",
+) -> dict:
+    """Benchmark materialized vs matrix-free end-to-end at sequence length L."""
+    Q, K = _make_qk(L, d, device)
+    scale = 1.0 / math.sqrt(d)
+
+    # Materialized
+    def run_mat():
+        A = torch.softmax(Q @ K.T * scale, dim=-1)
+        M, _, _ = compute_degree_normalized_M(A)
+        return compute_routing_features_materialized(M, rank=rank)
+
+    # Matrix-free
+    _, d_k_inv_sqrt = compute_dk_blocked(Q, K, scale, block_size)
+    lse = compute_logsumexp_blocked(Q, K, scale, block_size)
+
+    def run_mf():
+        return compute_routing_features_matrix_free(
+            Q, K, d_k_inv_sqrt, scale, lse, rank=rank, block_size=block_size,
+            min_samples=200,
+        )
+
+    return {
+        "materialized": _time_fn(run_mat, warmup, repeats, device),
+        "matrix_free": _time_fn(run_mf, warmup, repeats, device),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +220,6 @@ def _scaling_exponent(lengths: list[int], times: list[float]) -> float | None:
     if len(lengths) < 2:
         return None
     xs = [math.log2(L) for L in lengths]
-    ys = [math.log2(t) if t > 0 else -30 for t in lengths]
-    # Actually use the times, not lengths for ys
     ys = [math.log2(t) if t > 0 else -30 for t in times]
     n = len(xs)
     x_mean = sum(xs) / n
@@ -189,35 +231,63 @@ def _scaling_exponent(lengths: list[int], times: list[float]) -> float | None:
     return num / den
 
 
-def print_report(
+def print_comparison_report(
+    lengths: list[int],
+    all_comparisons: list[dict],
+    d: int,
+    rank: int,
+) -> None:
+    print(f"\nMaterialized vs Matrix-Free — d={d}, rank={rank}")
+    print("=" * 68)
+    header = f"{'L':>6} | {'materialized':>14} | {'matrix-free':>14} | {'ratio':>8}"
+    print(header)
+    print("-" * len(header))
+    for L, comp in zip(lengths, all_comparisons):
+        t_mat = comp["materialized"]
+        t_mf = comp["matrix_free"]
+        ratio = t_mf / t_mat if t_mat > 0 else float("inf")
+        print(
+            f"{L:>6} | {_fmt_ms(t_mat):>14} | {_fmt_ms(t_mf):>14} | {ratio:>7.1f}x"
+        )
+
+    # Scaling exponents
+    print("-" * len(header))
+    mat_times = [c["materialized"] for c in all_comparisons]
+    mf_times = [c["matrix_free"] for c in all_comparisons]
+    mat_exp = _scaling_exponent(lengths, mat_times)
+    mf_exp = _scaling_exponent(lengths, mf_times)
+    mat_s = f"~L^{mat_exp:.1f}" if mat_exp is not None else "n/a"
+    mf_s = f"~L^{mf_exp:.1f}" if mf_exp is not None else "n/a"
+    print(f"{'slope':>6} | {mat_s:>14} | {mf_s:>14} |")
+    print()
+
+
+def print_component_report(
     lengths: list[int],
     all_timings: list[dict],
     d: int,
     rank: int,
     block_size: int,
 ) -> None:
-    print(f"\nHodge Microbenchmark — d={d}, rank={rank}, block_size={block_size}")
+    print(f"\nMatrix-Free Component Breakdown — d={d}, rank={rank}, block_size={block_size}")
     print("=" * 90)
 
-    # Header
     col_w = 8
     header = f"{'L':>6} |"
-    for comp in COMPONENTS:
+    for comp in MF_COMPONENTS:
         header += f" {comp:>{col_w}} |"
     print(header)
     print("-" * len(header))
 
-    # Rows
     for L, timings in zip(lengths, all_timings):
         row = f"{L:>6} |"
-        for comp in COMPONENTS:
+        for comp in MF_COMPONENTS:
             row += f" {_fmt_ms(timings[comp]):>{col_w}} |"
         print(row)
 
-    # Scaling exponents
     print("-" * len(header))
     exp_row = f"{'slope':>6} |"
-    for comp in COMPONENTS:
+    for comp in MF_COMPONENTS:
         times = [t[comp] for t in all_timings]
         exp = _scaling_exponent(lengths, times)
         if exp is not None:
@@ -227,12 +297,10 @@ def print_report(
     print(exp_row)
     print()
 
-    # Summary
     total_last = all_timings[-1]["total"]
     print(f"At L={lengths[-1]}: total = {_fmt_ms(total_last)}")
-    # Breakdown as percentages
     print("Component breakdown:")
-    for comp in COMPONENTS[:-1]:  # skip total
+    for comp in MF_COMPONENTS[:-1]:
         t = all_timings[-1][comp]
         pct = t / total_last * 100 if total_last > 0 else 0
         print(f"  {comp:>8}: {_fmt_ms(t):>8}  ({pct:5.1f}%)")
@@ -243,53 +311,93 @@ def print_report(
 # ---------------------------------------------------------------------------
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Hodge decomposition microbenchmark")
-    parser.add_argument(
-        "--lengths", type=int, nargs="+", default=DEFAULT_LENGTHS,
-        help=f"Sequence lengths to sweep (default: {DEFAULT_LENGTHS})",
-    )
-    parser.add_argument("--d-model", type=int, default=64, help="Head dimension (default: 64)")
-    parser.add_argument("--rank", type=int, default=4, help="SVD rank (default: 4)")
-    parser.add_argument("--block-size", type=int, default=256, help="Block size (default: 256)")
-    parser.add_argument("--warmup", type=int, default=2, help="Warmup iterations (default: 2)")
-    parser.add_argument("--repeats", type=int, default=3, help="Timed repeats, report median (default: 3)")
-    parser.add_argument("--json", type=str, default=None, help="Write JSON results to file")
-    args = parser.parse_args()
+@click.command()
+@click.option(
+    "--lengths", type=int, multiple=True, default=DEFAULT_LENGTHS,
+    show_default=True, help="Sequence lengths to sweep (repeatable).",
+)
+@click.option("--d-model", type=int, default=64, show_default=True, help="Head dimension.")
+@click.option("--rank", type=int, default=4, show_default=True, help="SVD rank.")
+@click.option("--block-size", type=int, default=256, show_default=True, help="Block size.")
+@click.option("--warmup", type=int, default=2, show_default=True, help="Warmup iterations.")
+@click.option("--repeats", type=int, default=3, show_default=True, help="Timed repeats, report median.")
+@click.option("--json", "json_path", type=click.Path(), default=None, help="Write JSON results to file.")
+@click.option(
+    "--comparison-only", is_flag=True, default=False,
+    help="Only run materialized vs matrix-free comparison (skip component breakdown).",
+)
+@click.option(
+    "--device", type=str, default="cpu", show_default=True,
+    help="Torch device (cpu, cuda, cuda:0, etc.).",
+)
+def main(
+    lengths: tuple[int, ...],
+    d_model: int,
+    rank: int,
+    block_size: int,
+    warmup: int,
+    repeats: int,
+    json_path: str | None,
+    comparison_only: bool,
+    device: str,
+) -> None:
+    """Hodge decomposition microbenchmark."""
+    lengths_list = list(lengths)
 
-    print(f"Config: d={args.d_model}, rank={args.rank}, block_size={args.block_size}")
-    print(f"Warmup={args.warmup}, repeats={args.repeats}")
-    print(f"Lengths: {args.lengths}")
+    if device != "cpu" and not torch.cuda.is_available():
+        raise click.UsageError(f"Device '{device}' requested but CUDA is not available.")
 
-    all_timings = []
-    for L in args.lengths:
-        sys.stdout.write(f"  Benchmarking L={L}...")
+    print(f"Config: d={d_model}, rank={rank}, block_size={block_size}, device={device}")
+    print(f"Warmup={warmup}, repeats={repeats}")
+    print(f"Lengths: {lengths_list}")
+
+    # 1. Materialized vs matrix-free comparison
+    print("\n--- Materialized vs Matrix-Free ---")
+    all_comparisons = []
+    for L in lengths_list:
+        sys.stdout.write(f"  L={L}...")
         sys.stdout.flush()
-        timings = bench_one(
-            L, args.d_model, args.rank, args.block_size,
-            args.warmup, args.repeats,
-        )
-        all_timings.append(timings)
-        print(f" {_fmt_ms(timings['total'])}")
+        comp = bench_comparison(L, d_model, rank, block_size, warmup, repeats, device)
+        all_comparisons.append(comp)
+        ratio = comp["matrix_free"] / comp["materialized"] if comp["materialized"] > 0 else float("inf")
+        print(f" mat={_fmt_ms(comp['materialized'])}, mf={_fmt_ms(comp['matrix_free'])} ({ratio:.1f}x)")
 
-    print_report(args.lengths, all_timings, args.d_model, args.rank, args.block_size)
+    print_comparison_report(lengths_list, all_comparisons, d_model, rank)
 
-    if args.json:
+    # 2. Matrix-free component breakdown
+    all_timings = []
+    if not comparison_only:
+        print("--- Matrix-Free Component Breakdown ---")
+        for L in lengths_list:
+            sys.stdout.write(f"  L={L}...")
+            sys.stdout.flush()
+            timings = bench_matrix_free(L, d_model, rank, block_size, warmup, repeats, device)
+            all_timings.append(timings)
+            print(f" {_fmt_ms(timings['total'])}")
+
+        print_component_report(lengths_list, all_timings, d_model, rank, block_size)
+
+    if json_path:
         output = {
             "config": {
-                "d_model": args.d_model,
-                "rank": args.rank,
-                "block_size": args.block_size,
-                "warmup": args.warmup,
-                "repeats": args.repeats,
+                "d_model": d_model,
+                "rank": rank,
+                "block_size": block_size,
+                "warmup": warmup,
+                "repeats": repeats,
             },
-            "results": [
-                {"L": L, **{k: v for k, v in t.items()}}
-                for L, t in zip(args.lengths, all_timings)
+            "comparison": [
+                {"L": L, **c}
+                for L, c in zip(lengths_list, all_comparisons)
             ],
         }
-        Path(args.json).write_text(json.dumps(output, indent=2))
-        print(f"JSON written to {args.json}")
+        if all_timings:
+            output["matrix_free_components"] = [
+                {"L": L, **t}
+                for L, t in zip(lengths_list, all_timings)
+            ]
+        Path(json_path).write_text(json.dumps(output, indent=2))
+        print(f"JSON written to {json_path}")
 
 
 if __name__ == "__main__":

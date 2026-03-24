@@ -70,8 +70,7 @@ logger = logging.getLogger(__name__)
     "--threshold",
     type=int,
     default=None,
-    hidden=True,
-    help="Deprecated: all paths are now matrix-free.",
+    help="Materialize M for L <= threshold, matrix-free above. [default: from config (2048)]",
 )
 @click.option(
     "--block-size",
@@ -193,12 +192,7 @@ def main(
 
     # M-specific params
     if threshold is not None:
-        import warnings
-        warnings.warn(
-            "--threshold is deprecated (all paths are now matrix-free)",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        degree_normalized_matrix["threshold"] = threshold
     if block_size is not None:
         degree_normalized_matrix["block_size"] = block_size
     if hodge is not None:

@@ -31,7 +31,6 @@ from glassbox.svd import (
     svd_via_lanczos,
 )
 
-
 # ---------------------------------------------------------------------------
 # Triangle sampling (ported from shade.functional.hodge_ops)
 # ---------------------------------------------------------------------------
@@ -71,7 +70,9 @@ def _sample_triangles(n: int, n_samples: int, seed: int = 42) -> torch.Tensor:
                 remaining -= 1
                 if remaining <= 0:
                     break
-    return torch.stack(collected) if collected else torch.zeros((0, 3), dtype=torch.int64)
+    return (
+        torch.stack(collected) if collected else torch.zeros((0, 3), dtype=torch.int64)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +227,9 @@ def compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size=256):
         col_idx = torch.arange(L, device=Q.device)
         ii_exp = col_idx.unsqueeze(1).expand(L, i1 - i0).reshape(-1)
         jj_exp = row_idx.unsqueeze(0).expand(L, i1 - i0).reshape(-1)
-        M_T_entries = get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, ii_exp, jj_exp)
+        M_T_entries = get_M_entries_batch(
+            Q, K, lse, d_k_inv_sqrt, scale, ii_exp, jj_exp
+        )
         M_T_block = M_T_entries.reshape(L, i1 - i0).T  # [bs, L]
         inner_sq = inner_sq + (M_block * M_T_block).sum()
 
@@ -315,7 +318,7 @@ def estimate_commutator_norm_matrix_free(
 # ---------------------------------------------------------------------------
 
 
-def compute_routing_features(
+def compute_routing_features_matrix_free(
     Q,
     K,
     d_k_inv_sqrt,
@@ -409,17 +412,13 @@ def compute_routing_features(
     }
 
 
-# Backward compatibility alias
-compute_routing_features_matrix_free = compute_routing_features
-
-
 # ---------------------------------------------------------------------------
-# Private materialized helpers (kept for test cross-validation only)
+# Materialized path (used when L <= threshold)
 # ---------------------------------------------------------------------------
 
 
 def _estimate_curl_materialized(M, target_cv=0.05, seed=42):
-    """Triangle-sampling curl on a materialized M tensor (test helper)."""
+    """Triangle-sampling curl on a materialized M tensor."""
     n = M.shape[0]
     if n < 4:
         return 0.0
@@ -439,7 +438,7 @@ def _estimate_curl_materialized(M, target_cv=0.05, seed=42):
 
 
 def _compute_G_materialized(M):
-    """Asymmetry coefficient from materialized M (test helper)."""
+    """Asymmetry coefficient from materialized M."""
     M_fro = torch.linalg.norm(M, "fro")
     M_asym = (M - M.T) / 2.0
     M_asym_fro = torch.linalg.norm(M_asym, "fro")
@@ -447,9 +446,16 @@ def _compute_G_materialized(M):
     return G, M_fro.item()
 
 
-def _compute_routing_features_materialized(M, rank, svd_method="randomized", target_cv=0.05, seed=42):
-    """All routing features from materialized M (test helper)."""
+def compute_routing_features_materialized(
+    M, rank, svd_method="randomized", target_cv=0.05, seed=42
+):
+    """All routing features from materialized M.
+
+    Used when L <= threshold. Dense tensor ops are much faster than
+    iterative matvec approaches at small sequence lengths.
+    """
     sigma = torch.linalg.svdvals(M)
+    k = min(rank, len(sigma))
     sigma2 = sigma[1].item() if len(sigma) > 1 else 0.0
     phi_hat = 1.0 - sigma2
 
@@ -476,4 +482,5 @@ def _compute_routing_features_materialized(M, rank, svd_method="randomized", tar
         "curl_ratio": curl_ratio,
         "sigma2_asym": sigma2_asym,
         "commutator_norm": commutator_norm,
+        "singular_values": sigma[:k].cpu().tolist(),
     }
