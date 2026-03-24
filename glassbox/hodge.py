@@ -1,11 +1,15 @@
 """
-Matrix-free Hodge decomposition features for the degree-normalized cross-operator M.
+Hodge decomposition features for the degree-normalized cross-operator M.
 
-Computes asymmetry coefficient G, curl estimate C, Pythagorean decomposition
-Gamma, sigma2_asym, commutator_norm, and curl_ratio — all without materializing M.
+Two paths controlled by a sequence-length threshold:
+  - Materialized (L <= threshold): dense tensor ops on the L×L matrix M.
+  - Matrix-free  (L >  threshold): blocked-streaming matvecs, O(Ld) memory.
 
-Triangle sampling ported from shade.functional.hodge_ops (Bernstein-bound adaptive
-sizing, LRU-cached vectorized sampling).
+Features: asymmetry coefficient G, curl estimate C, Pythagorean decomposition
+Gamma, sigma2_asym, commutator_norm, and curl_ratio.
+
+Triangle sampling for curl estimation uses Bernstein-bound adaptive sizing
+and LRU-cached vectorized sampling (ported from shade.functional.hodge_ops).
 
 References:
     Lim (2020): Hodge Laplacians on Graphs (SIAM Review)
