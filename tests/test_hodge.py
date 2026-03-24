@@ -292,9 +292,9 @@ class TestPythagorean:
         f = compute_routing_features_matrix_free(
             Q, K, d_k_mf, scale, lse, rank=4, min_samples=200
         )
-        residual = abs(f["G"] ** 2 - f["Gamma"] ** 2 - f["C"] ** 2)
+        residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 0.01, (
-            f"Pythagorean: G={f['G']}, Γ={f['Gamma']}, C={f['C']}, residual={residual}"
+            f"Pythagorean: G={f.G}, Γ={f.Gamma}, C={f.C}, residual={residual}"
         )
 
     def test_multiple_seeds(self):
@@ -306,7 +306,7 @@ class TestPythagorean:
                 f = compute_routing_features_matrix_free(
                     Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
                 )
-                residual = abs(f["G"] ** 2 - f["Gamma"] ** 2 - f["C"] ** 2)
+                residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
                 assert residual < 0.02, f"seed={seed}, L={L}: residual={residual}"
 
     def test_gamma_nonneg(self):
@@ -317,7 +317,7 @@ class TestPythagorean:
             f = compute_routing_features_matrix_free(
                 Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
             )
-            assert f["Gamma"] >= 0.0
+            assert f.Gamma >= 0.0
 
     def test_curl_bounded_by_G(self):
         for seed in range(5):
@@ -327,7 +327,7 @@ class TestPythagorean:
             f = compute_routing_features_matrix_free(
                 Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
             )
-            assert f["C"] <= f["G"] + 0.01, f"C={f['C']} > G={f['G']}"
+            assert f.C <= f.G + 0.01, f"C={f.C} > G={f.G}"
 
     def test_exact_at_exhaustive_n(self):
         # n=5: C(5,3)=10 < floor=200, all triangles enumerated
@@ -337,7 +337,7 @@ class TestPythagorean:
         f = compute_routing_features_matrix_free(
             Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
         )
-        residual = abs(f["G"] ** 2 - f["Gamma"] ** 2 - f["C"] ** 2)
+        residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 1e-4, f"Exact case residual={residual}"
 
 
@@ -356,7 +356,7 @@ class TestSpectral:
         f = compute_routing_features_matrix_free(
             Q, K, d_k_mf, scale, lse, rank=4, min_samples=50
         )
-        assert abs(s2_ref - f["sigma2"]) < 0.05
+        assert abs(s2_ref - f.sigma2) < 0.05
 
     def test_phi_hat_range(self):
         for seed in range(5):
@@ -366,7 +366,7 @@ class TestSpectral:
             f = compute_routing_features_matrix_free(
                 Q, K, d_k_mf, scale, lse, rank=2, min_samples=50
             )
-            assert 0.0 <= f["phi_hat"] <= 1.0
+            assert 0.0 <= f.phi_hat <= 1.0
 
 
 # ===========================================================================
@@ -553,27 +553,28 @@ class TestMatvecHelpers:
 
 
 class TestRoutingFeatures:
-    def test_all_keys_populated(self):
+    def test_returns_typed_features(self):
+        from glassbox.results import DegreeNormalizedFeatures
+
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(
             Q, K, d_k_mf, scale, lse, rank=4, min_samples=50
         )
-        expected = {
-            "phi_hat",
-            "sigma2",
-            "G",
-            "Gamma",
-            "C",
-            "curl_ratio",
-            "sigma2_asym",
-            "commutator_norm",
-            "singular_values",
-        }
-        assert set(f.keys()) == expected
-        for k, v in f.items():
-            assert v is not None, f"{k} should not be None"
+        assert isinstance(f, DegreeNormalizedFeatures)
+        assert len(f.singular_values) > 0
+        # All hodge fields populated
+        assert f.phi_hat is not None
+        assert f.sigma2 is not None
+        assert f.G is not None
+        assert f.C is not None
+        assert f.Gamma is not None
+        assert f.sigma2_asym is not None
+        assert f.commutator_norm is not None
+        # Spectral fields populated
+        assert f.sv1 is not None
+        assert f.sv_ratio is not None
 
     def test_value_ranges(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
@@ -582,15 +583,14 @@ class TestRoutingFeatures:
         f = compute_routing_features_matrix_free(
             Q, K, d_k_mf, scale, lse, rank=4, min_samples=50
         )
-        assert 0.0 <= f["sigma2"] <= 1.0
-        assert 0.0 <= f["phi_hat"] <= 1.0
-        assert f["G"] >= 0.0
-        assert f["C"] >= 0.0
-        assert f["Gamma"] >= 0.0
-        assert f["sigma2_asym"] >= 0.0
-        assert f["commutator_norm"] >= 0.0
-        assert isinstance(f["singular_values"], list)
-        assert len(f["singular_values"]) > 0
+        assert 0.0 <= f.sigma2 <= 1.0
+        assert 0.0 <= f.phi_hat <= 1.0
+        assert f.G >= 0.0
+        assert f.C >= 0.0
+        assert f.Gamma >= 0.0
+        assert f.sigma2_asym >= 0.0
+        assert f.commutator_norm >= 0.0
+        assert len(f.singular_values) > 0
 
     def test_singular_values_descending(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
@@ -599,9 +599,8 @@ class TestRoutingFeatures:
         f = compute_routing_features_matrix_free(
             Q, K, d_k_mf, scale, lse, rank=4, min_samples=50
         )
-        svs = f["singular_values"]
-        for i in range(len(svs) - 1):
-            assert svs[i] >= svs[i + 1] - 1e-6
+        for i in range(len(f.singular_values) - 1):
+            assert f.singular_values[i] >= f.singular_values[i + 1] - 1e-6
 
 
 # ===========================================================================
@@ -644,11 +643,11 @@ class TestExactHodgeCrossValidation:
         )
         G_exact, C_exact, Gamma_exact, _, _ = self._exact_hodge_coefficients(M)
         # G should agree (both exact)
-        assert abs(f["G"] - G_exact) < 0.02, f"G: mf={f['G']}, exact={G_exact}"
+        assert abs(f.G - G_exact) < 0.02, f"G: mf={f.G}, exact={G_exact}"
         # Both C should be nonzero (correlated)
-        assert f["C"] > 0 and C_exact > 0
+        assert f.C > 0 and C_exact > 0
         # Pythagorean holds for the RMS-based estimate
-        residual = abs(f["G"] ** 2 - f["Gamma"] ** 2 - f["C"] ** 2)
+        residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 1e-4
 
     def test_cross_validation_n8(self):
@@ -664,11 +663,11 @@ class TestExactHodgeCrossValidation:
         )
         G_exact, C_exact, Gamma_exact, _, _ = self._exact_hodge_coefficients(M)
         # Both G should agree (exact computation)
-        assert abs(f["G"] - G_exact) < 0.02, f"G: mf={f['G']}, exact={G_exact}"
+        assert abs(f.G - G_exact) < 0.02, f"G: mf={f.G}, exact={G_exact}"
         # Both C should be nonzero (correlated)
-        assert f["C"] > 0 and C_exact > 0
+        assert f.C > 0 and C_exact > 0
         # Pythagorean should hold for the RMS-based estimate
-        residual = abs(f["G"] ** 2 - f["Gamma"] ** 2 - f["C"] ** 2)
+        residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 1e-4
 
     def test_hodge_orthogonality(self):
@@ -710,8 +709,8 @@ class TestEdgeCases:
         f = compute_routing_features_matrix_free(
             Q, K, d_k_mf, scale, lse, rank=2, min_samples=50
         )
-        assert f["G"] >= 0.0
-        assert math.isfinite(f["C"])
+        assert f.G >= 0.0
+        assert math.isfinite(f.C)
 
     def test_numerical_stability_float32(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
@@ -721,10 +720,10 @@ class TestEdgeCases:
         f = compute_routing_features_matrix_free(
             Q, K, d_k_mf, scale, lse, rank=2, min_samples=50
         )
-        for key, val in f.items():
+        for key, val in f.model_dump().items():
             if isinstance(val, float):
                 assert math.isfinite(val), f"{key} is not finite: {val}"
-        residual = abs(f["G"] ** 2 - f["Gamma"] ** 2 - f["C"] ** 2)
+        residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 0.02
 
 
@@ -734,39 +733,32 @@ class TestEdgeCases:
 
 
 class TestMaterializedPath:
-    def test_all_keys_populated(self):
+    def test_returns_typed_features(self):
+        from glassbox.results import DegreeNormalizedFeatures
+
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
         f = compute_routing_features_materialized(M, rank=4)
-        expected = {
-            "phi_hat",
-            "sigma2",
-            "G",
-            "Gamma",
-            "C",
-            "curl_ratio",
-            "sigma2_asym",
-            "commutator_norm",
-            "singular_values",
-        }
-        assert set(f.keys()) == expected
-        for k, v in f.items():
-            assert v is not None, f"{k} should not be None"
+        assert isinstance(f, DegreeNormalizedFeatures)
+        assert len(f.singular_values) > 0
+        assert f.phi_hat is not None
+        assert f.G is not None
+        assert f.C is not None
 
     def test_value_ranges(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
         f = compute_routing_features_materialized(M, rank=4)
-        assert 0.0 <= f["sigma2"] <= 1.0
-        assert 0.0 <= f["phi_hat"] <= 1.0
-        assert f["G"] >= 0.0
-        assert f["C"] >= 0.0
-        assert f["Gamma"] >= 0.0
-        assert f["sigma2_asym"] >= 0.0
-        assert f["commutator_norm"] >= 0.0
+        assert 0.0 <= f.sigma2 <= 1.0
+        assert 0.0 <= f.phi_hat <= 1.0
+        assert f.G >= 0.0
+        assert f.C >= 0.0
+        assert f.Gamma >= 0.0
+        assert f.sigma2_asym >= 0.0
+        assert f.commutator_norm >= 0.0
 
     def test_pythagorean(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(20, 4, seed=99)
         f = compute_routing_features_materialized(M, rank=4)
-        residual = abs(f["G"] ** 2 - f["Gamma"] ** 2 - f["C"] ** 2)
+        residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 0.01
 
     def test_symmetric_near_zero(self):
@@ -776,14 +768,14 @@ class TestMaterializedPath:
         M = M / M.sum(dim=1, keepdim=True)
         M = (M + M.T) / 2.0
         f = compute_routing_features_materialized(M, rank=4)
-        assert f["G"] < 0.01
-        assert f["C"] < 0.01
+        assert f.G < 0.01
+        assert f.C < 0.01
 
     def test_singular_values_match_torch(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
         f = compute_routing_features_materialized(M, rank=4)
         sigma_ref = torch.linalg.svdvals(M)[:4].tolist()
-        for a, b in zip(f["singular_values"], sigma_ref):
+        for a, b in zip(f.singular_values, sigma_ref):
             assert abs(a - b) < 1e-5
 
 
@@ -807,7 +799,7 @@ class TestMaterializedVsMatrixFree:
             rank=4,
             min_samples=200,
         )
-        assert abs(f_mat["G"] - f_mf["G"]) < 0.02
+        assert abs(f_mat.G - f_mf.G) < 0.02
 
     def test_sigma2_agreement(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
@@ -823,7 +815,7 @@ class TestMaterializedVsMatrixFree:
             rank=4,
             min_samples=200,
         )
-        assert abs(f_mat["sigma2"] - f_mf["sigma2"]) < 0.05
+        assert abs(f_mat.sigma2 - f_mf.sigma2) < 0.05
 
     def test_curl_agreement(self):
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
@@ -840,7 +832,7 @@ class TestMaterializedVsMatrixFree:
             min_samples=200,
             seed=42,
         )
-        assert abs(f_mat["C"] - f_mf["C"]) < 0.05
+        assert abs(f_mat.C - f_mf.C) < 0.05
 
     def test_all_features_close(self):
         """All routing features should agree between materialized and matrix-free."""
@@ -860,9 +852,9 @@ class TestMaterializedVsMatrixFree:
                 seed=42,
             )
             for key in ["G", "C", "Gamma", "curl_ratio"]:
-                assert abs(f_mat[key] - f_mf[key]) < 0.05, (
-                    f"seed={seed}, {key}: mat={f_mat[key]}, mf={f_mf[key]}"
+                assert abs(getattr(f_mat, key) - getattr(f_mf, key)) < 0.05, (
+                    f"seed={seed}, {key}: mat={getattr(f_mat, key)}, mf={getattr(f_mf, key)}"
                 )
-            assert abs(f_mat["sigma2"] - f_mf["sigma2"]) < 0.1
-            assert abs(f_mat["sigma2_asym"] - f_mf["sigma2_asym"]) < 0.1
-            assert abs(f_mat["commutator_norm"] - f_mf["commutator_norm"]) < 0.15
+            assert abs(f_mat.sigma2 - f_mf.sigma2) < 0.1
+            assert abs(f_mat.sigma2_asym - f_mf.sigma2_asym) < 0.1
+            assert abs(f_mat.commutator_norm - f_mf.commutator_norm) < 0.15
