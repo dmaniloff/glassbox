@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
     "--threshold",
     type=int,
     default=None,
-    help="Materialize M for L <= threshold, matrix-free above. [default: from config (2048)]",
+    help="Sequence length threshold for materialized vs matrix-free. [default: from config (2048)]",
 )
 @click.option(
     "--block-size",
