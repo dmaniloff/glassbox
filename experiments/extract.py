@@ -1,4 +1,10 @@
-"""Spectral feature extraction on labeled datasets.
+"""Prefill-only spectral feature extraction on labeled datasets.
+
+For each sample, runs two prefill phases through the model:
+  1. "question" phase: prefill with just the prompt
+  2. "full" phase: prefill with prompt + known response
+SVD features are extracted from attention internals during each prefill.
+No text is generated — max_tokens=1 is a vLLM requirement.
 
 Datasets are loaded from pre-split HuggingFace repos that contain the
 exact 30% test split produced by shade-train's HashBasedSplitter
@@ -11,7 +17,6 @@ Usage:
     python experiments/extract.py --dataset halueval_hallucination --scores-matrix
     python experiments/extract.py --dataset all --degree-normalized
     python experiments/extract.py --dataset halueval_hallucination --max-samples 50
-    python experiments/extract.py --mode evaluate
 """
 
 from __future__ import annotations
@@ -107,130 +112,228 @@ def load_dataset_samples(
     log(f"Loaded {len(samples)} samples ({n_pos} positive / {len(samples) - n_pos} negative)")
     return samples
 
-from glassbox.results import SPECTRAL_FEATURE_NAMES, SVDSnapshot
+from glassbox.results import (
+    SPECTRAL_FEATURE_NAMES,
+    AttentionTrackerFeatures,
+    DegreeNormalizedFeatures,
+    SVDSnapshot,
+)
 
 
-def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) -> None:
-    """Pivot JSONL results into wide Parquet.
+_SKIP_FEATURE_FIELDS = {"singular_values"}  # list fields that don't belong in the wide parquet
 
-    Output has one row per request (i.e. per phase in evaluate mode) with columns:
+# Hodge feature names derived from DegreeNormalizedFeatures model
+_HODGE_FEATURE_NAMES = [
+    f"hodge_{f}"
+    for f in DegreeNormalizedFeatures.model_fields
+    if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
+]
+
+# AttentionTracker feature names derived from AttentionTrackerFeatures model
+_AT_FEATURE_NAMES = [
+    f"at_{f}"
+    for f in AttentionTrackerFeatures.model_fields
+    if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
+]
+
+_META_COLUMNS = ["request_id", "label", "length", "sample_id", "phase", "prompt_length", "source"]
+
+
+def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
+    """Extract scalar features from a snapshot, raising on unexpected types."""
+    result: dict[str, float] = {}
+    feat_dict = snap.features.model_dump(exclude_none=True)
+    # Non-spectral prefix depends on signal type
+    if snap.feature_group == "attention_tracker":
+        non_spectral_prefix = "at_"
+    else:
+        non_spectral_prefix = "hodge_"
+    for k, v in feat_dict.items():
+        if k in _SKIP_FEATURE_FIELDS:
+            continue
+        if not isinstance(v, (int, float)):
+            raise TypeError(
+                f"Unexpected non-scalar feature {k!r}: {type(v).__name__} = {v!r}"
+            )
+        if k in SPECTRAL_FEATURE_NAMES:
+            result[k] = v
+        else:
+            result[f"{non_spectral_prefix}{k}"] = v
+    return result
+
+
+def _build_feature_columns(
+    num_layers: int,
+    heads: list[int] | tuple[int, ...],
+    scores_matrix: bool,
+    degree_normalized: bool,
+    attention_tracker: bool = False,
+) -> list[str]:
+    """Pre-compute all feature column names from model architecture.
+
+    Column names follow the pattern: {signal_prefix}{feature}_L{layer}_H{head}
+    where signal_prefix is only added when multiple signals are enabled.
+    """
+    signals: list[tuple[str, list[str]]] = []
+    if scores_matrix:
+        signals.append(("scores_matrix", list(SPECTRAL_FEATURE_NAMES)))
+    if degree_normalized:
+        signals.append(("degree_normalized_matrix", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES))
+    if attention_tracker:
+        signals.append(("attention_tracker", list(SPECTRAL_FEATURE_NAMES) + _AT_FEATURE_NAMES))
+
+    use_signal_prefix = len(signals) > 1
+    columns: list[str] = []
+    for signal_name, feature_names in signals:
+        prefix = f"{signal_name}_" if use_signal_prefix else ""
+        for li in range(num_layers):
+            for hi in heads:
+                for feat in feature_names:
+                    columns.append(f"{prefix}{feat}_L{li}_H{hi}")
+    return columns
+
+
+def _write_parquet(
+    svd_features_path: Path,
+    samples_path: Path,
+    out_path: Path,
+    feature_columns: list[str],
+) -> None:
+    """Pivot JSONL results into wide Parquet using batched writes.
+
+    Schema is pre-computed from model architecture (via feature_columns),
+    so missing values from cuSOLVER failures are null, not schema errors.
+
+    Streams the SVD JSONL by request_id, pivots each request into a wide
+    dict, and writes in batches via ParquetWriter to bound memory usage.
+
+    Output has one row per request (i.e. per phase) with columns:
         {signal}_{feature}_L{layer}_H{head}  (e.g. scores_matrix_sv_ratio_L0_H0)
         label, source, length, phase, sample_id
     """
-    import pandas as pd
     import pyarrow as pa
     import pyarrow.parquet as pq
+    from tqdm import tqdm
 
-    # Load SVD features
-    svd_rows = []
-    with open(svd_features_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            snap = SVDSnapshot.from_jsonl_row(json.loads(line))
-            row = {
-                "signal": snap.feature_group,
-                "request_id": snap.request_id,
-                "layer": snap.layer,
-                "layer_idx": snap.layer_idx,
-                "head": snap.head,
-                "step": snap.step,
-                "L": snap.L,
-            }
-            if snap.tier is not None:
-                row["tier"] = snap.tier
-            feat_dict = snap.features.model_dump(exclude_none=True)
-            for k, v in feat_dict.items():
-                if isinstance(v, list):
-                    continue  # skip list fields (e.g. singular_values)
-                if k in SPECTRAL_FEATURE_NAMES:
-                    row[k] = v
-                else:
-                    row[f"hodge_{k}"] = v
-            svd_rows.append(row)
+    BATCH_SIZE = 500
 
-    df_svd = pd.DataFrame(svd_rows)
+    # Build schema: metadata columns + pre-computed feature columns
+    fields = [
+        pa.field("request_id", pa.int64()),
+        pa.field("label", pa.int64()),
+        pa.field("length", pa.int64()),
+        pa.field("sample_id", pa.int64()),
+        pa.field("phase", pa.string()),
+        pa.field("prompt_length", pa.int64()),
+        pa.field("source", pa.string()),
+    ]
+    for col in feature_columns:
+        fields.append(pa.field(col, pa.float64()))
+    schema = pa.schema(fields)
 
-    # Load sample metadata
-    sample_rows = []
+    # Load sample metadata into a dict keyed by request_id (small)
+    sample_meta: dict[int, dict] = {}
     with open(samples_path) as f:
         for line in f:
             line = line.strip()
             if line:
-                sample_rows.append(json.loads(line))
-    df_samples = pd.DataFrame(sample_rows)
+                row = json.loads(line)
+                sample_meta[row["request_id"]] = row
 
-    # Join label + metadata onto SVD rows
-    join_cols = ["request_id", "label"]
-    for col in ["sample_id", "phase", "dataset", "prompt_length"]:
-        if col in df_samples.columns:
-            join_cols.append(col)
-    df = df_svd.merge(df_samples[join_cols], on="request_id", how="left")
-
-    # Pivot key: request_id (unique per phase) so question and full
-    # phases get separate rows instead of being averaged together.
-    pivot_col = "request_id"
-
-    # Determine features to pivot
-    features = list(SPECTRAL_FEATURE_NAMES)
-    hodge_cols = [
-        c for c in df.columns if c.startswith("hodge_") and df[c].notna().any()
-    ]
-    features.extend(sorted(hodge_cols))
-
-    # Aggregate: mean per (request, signal, layer, head) across steps
-    group_keys = [pivot_col, "layer_idx", "head"]
-    if "signal" in df.columns:
-        group_keys.insert(1, "signal")
-    agg = df.groupby(group_keys)[features].mean().reset_index()
-
-    # Build signal prefix for column names (omit if only one signal)
-    signals = agg["signal"].unique() if "signal" in agg.columns else [""]
-    use_signal_prefix = len(signals) > 1
-
-    # Pivot to wide format: one row per request
-    wide_rows = []
-    for rid, request_group in agg.groupby(pivot_col):
-        wide: dict = {}
-        for _, r in request_group.iterrows():
-            li = int(r["layer_idx"])
-            hi = int(r["head"])
-            prefix = f"{r['signal']}_" if use_signal_prefix else ""
-            for feat in features:
-                val = r[feat]
-                if pd.notna(val):
-                    wide[f"{prefix}{feat}_L{li}_H{hi}"] = val
-        wide[pivot_col] = rid
-        wide_rows.append(wide)
-
-    df_wide = pd.DataFrame(wide_rows)
-
-    # Join back sample-level metadata
-    meta_cols = [pivot_col, "label"]
-    for col in ["sample_id", "phase", "dataset", "prompt_length"]:
-        if col in df.columns:
-            meta_cols.append(col)
-    sample_meta = (
-        df.groupby(pivot_col)
-        .first()[[c for c in meta_cols if c in df.columns and c != pivot_col]]
-        .reset_index()
+    # Signal prefixes are present when multiple signals are enabled
+    use_signal_prefix = any(
+        col.startswith("scores_matrix_") or col.startswith("degree_normalized_matrix_") or col.startswith("attention_tracker_")
+        for col in feature_columns[:1]
     )
-    if "dataset" in sample_meta.columns:
-        sample_meta = sample_meta.rename(columns={"dataset": "source"})
-    # Add sequence length from SVD data
-    len_meta = df.groupby(pivot_col)["L"].first().reset_index()
-    len_meta = len_meta.rename(columns={"L": "length"})
-    sample_meta = sample_meta.merge(len_meta, on=pivot_col, how="left")
 
-    df_wide = df_wide.merge(sample_meta, on=pivot_col, how="left")
+    def _pivot_request(buf: list[tuple[str, int, int, int, dict]], rid: int) -> dict:
+        """Pivot one request_id's SVD rows into a single wide dict."""
+        wide: dict = {"request_id": rid}
+        length = None
+        for sig, li, hi, seq_len, feats in buf:
+            prefix = f"{sig}_" if use_signal_prefix else ""
+            if length is None:
+                length = seq_len
+            for k, v in feats.items():
+                wide[f"{prefix}{k}_L{li}_H{hi}"] = v
 
-    pq.write_table(pa.Table.from_pandas(df_wide), out_path, compression="snappy")
-    n_features = len(
-        [c for c in df_wide.columns if any(c.startswith(f) for f in features)]
-    )
+        if rid not in sample_meta:
+            raise KeyError(f"request_id {rid} not found in samples.jsonl")
+        meta = sample_meta[rid]
+        for required in ("label", "sample_id", "phase"):
+            if required not in meta:
+                raise KeyError(f"request_id {rid} missing required field {required!r} in samples.jsonl")
+        wide["label"] = meta["label"]
+        wide["length"] = length
+        wide["sample_id"] = meta["sample_id"]
+        wide["phase"] = meta["phase"]
+        if "prompt_length" in meta:
+            wide["prompt_length"] = meta["prompt_length"]
+        if "dataset" in meta:
+            wide["source"] = meta["dataset"]
+        return wide
+
+    # Stream JSONL, pivot per request_id, write in batches
+    schema_cols = set(schema.names)
+    checked_first_row = False
+    total_rows = 0
+    wide_rows: list[dict] = []
+    current_rid: int | None = None
+    buf: list[tuple[str, int, int, int, dict]] = []
+    n_expected = len(sample_meta)  # one wide row per request_id
+
+    def _flush_batch(writer, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        table = pa.Table.from_pylist(rows, schema=schema)
+        writer.write_table(table)
+        return len(rows)
+
+    pbar = tqdm(total=n_expected, desc="Pivoting to parquet", unit="rows")
+
+    with pq.ParquetWriter(out_path, schema, compression="snappy") as writer:
+        with open(svd_features_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                snap = SVDSnapshot.from_jsonl_row(json.loads(line))
+                feats = _parse_snap_features(snap)
+
+                if current_rid is not None and snap.request_id != current_rid:
+                    row = _pivot_request(buf, current_rid)
+                    # Check first row for columns that would be silently dropped
+                    if not checked_first_row:
+                        extra = set(row.keys()) - schema_cols
+                        if extra:
+                            raise ValueError(
+                                f"Pivoted row has columns not in schema (would be silently dropped): {extra}"
+                            )
+                        checked_first_row = True
+                    wide_rows.append(row)
+                    pbar.update(1)
+                    buf = []
+                    if len(wide_rows) >= BATCH_SIZE:
+                        total_rows += _flush_batch(writer, wide_rows)
+                        wide_rows = []
+
+                current_rid = snap.request_id
+                buf.append((snap.feature_group, snap.layer_idx, snap.head, snap.L, feats))
+
+        # Flush last request + remaining batch
+        if buf and current_rid is not None:
+            wide_rows.append(_pivot_request(buf, current_rid))
+            pbar.update(1)
+        total_rows += _flush_batch(writer, wide_rows)
+
+    pbar.close()
+
+    if total_rows == 0:
+        log(f"No data written to {out_path}")
+        return
+
     log(
-        f"Parquet saved: {out_path} ({len(df_wide)} rows, {n_features} feature columns)"
+        f"Parquet saved: {out_path} ({total_rows} rows, {len(feature_columns)} feature columns)"
     )
 
 
@@ -258,9 +361,6 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
 )
 @click.option(
     "--max-samples", default=None, type=int, show_default=True, help="Max samples to process (default: all)."
-)
-@click.option(
-    "--svd-interval", default=16, show_default=True, help="SVD snapshot interval."
 )
 @click.option("--svd-rank", default=4, show_default=True, help="SVD rank (k).")
 @click.option(
@@ -292,28 +392,17 @@ def _write_parquet(svd_features_path: Path, samples_path: Path, out_path: Path) 
     help="Compute degree-normalized matrix features.",
 )
 @click.option(
+    "--attention-tracker",
+    "attention_tracker",
+    is_flag=True,
+    default=False,
+    help="Compute attention tracker features (raw A).",
+)
+@click.option(
     "--threshold",
     type=int,
     default=None,
     help="Seq length threshold for materialized vs matrix-free. [default: 2048]",
-)
-@click.option(
-    "--request-type",
-    "request_type",
-    default="text_completions",
-    show_default=True,
-    type=click.Choice(["text_completions", "chat_completions"]),
-    help="Request type (use chat_completions for instruct models).",
-)
-@click.option(
-    "--max-tokens", default=128, show_default=True, help="Max tokens per completion."
-)
-@click.option(
-    "--mode",
-    default="generate",
-    show_default=True,
-    type=click.Choice(["generate", "evaluate"]),
-    help="Mode: generate (Mode B) or evaluate (Mode A, prefill-only).",
 )
 @click.option(
     "--parquet",
@@ -327,19 +416,16 @@ def main(
     dataset_name: str,
     hf_org: str,
     max_samples: int | None,
-    svd_interval: int,
     svd_rank: int,
     method: str | None,
     heads: tuple[int, ...],
     scores_matrix: bool,
     degree_normalized: bool,
+    attention_tracker: bool,
     threshold: int | None,
-    request_type: str,
-    max_tokens: int,
-    mode: str,
     parquet: bool,
 ) -> None:
-    """Run spectral feature extraction on a labeled dataset."""
+    """Run prefill-only spectral feature extraction on a labeled dataset."""
     import vllm
 
     import glassbox.backends.svd_backend as svd_mod
@@ -356,57 +442,54 @@ def main(
     else:
         samples = load_dataset_samples(dataset_name, max_samples, hf_org=hf_org)
 
-    if mode == "evaluate":
-        # Mode A: prefill-only, SVD fires every token
-        svd_interval = 1
-        max_tokens = 1
+    # Prefill-only: SVD fires every token, max_tokens=1 (vLLM minimum)
+    max_tokens = 1
 
     # Set up output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     outdir = Path("experiments/results") / timestamp
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Write config metadata
+    # Write config metadata (num_layers added after LLM creation below)
     config = {
         "model": model,
         "dataset": dataset_name,
         "max_samples": max_samples,
-        "svd_interval": svd_interval,
+        "svd_interval": 1,
         "svd_rank": svd_rank,
         "method": method or "randomized",
         "heads": list(heads) if heads else [0],
         "scores_matrix": scores_matrix,
         "degree_normalized": degree_normalized,
-        "request_type": request_type,
+        "attention_tracker": attention_tracker,
         "max_tokens": max_tokens,
-        "mode": mode,
     }
-    (outdir / "config.json").write_text(json.dumps(config, indent=2))
 
     svd_features_path = outdir / "svd_features.jsonl"
 
     log(f"Results directory: {outdir}")
     log(f"Model: {model}")
-    log(f"Mode: {mode}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
     log(
-        f"SVD: interval={svd_interval}, rank={svd_rank}, method={method or 'randomized'}"
+        f"SVD: rank={svd_rank}, method={method or 'randomized'}"
     )
     if heads:
         log(f"Heads: {list(heads)}")
     if degree_normalized:
         log(f"Degree-normalized: enabled (threshold={threshold or 2048})")
+    if attention_tracker:
+        log(f"Attention tracker: enabled (threshold={threshold or 512})")
 
-    if not scores_matrix and not degree_normalized:
+    if not scores_matrix and not degree_normalized and not attention_tracker:
         raise click.UsageError(
-            "At least one of --scores-matrix or --degree-normalized must be enabled."
+            "At least one of --scores-matrix, --degree-normalized, or --attention-tracker must be enabled."
         )
 
     # Configure glassbox backend
     gb_kwargs: dict = {"output": str(svd_features_path)}
 
     if scores_matrix:
-        scores_cfg: dict = {"interval": svd_interval, "rank": svd_rank}
+        scores_cfg: dict = {"interval": 1, "rank": svd_rank}
         if method is not None:
             scores_cfg["method"] = method
         if heads:
@@ -414,7 +497,7 @@ def main(
         gb_kwargs["scores_matrix"] = scores_cfg
 
     if degree_normalized:
-        dn_cfg: dict = {"enabled": True, "interval": svd_interval, "rank": svd_rank}
+        dn_cfg: dict = {"enabled": True, "interval": 1, "rank": svd_rank}
         if method is not None:
             dn_cfg["method"] = method
         if heads:
@@ -422,6 +505,16 @@ def main(
         if threshold is not None:
             dn_cfg["threshold"] = threshold
         gb_kwargs["degree_normalized_matrix"] = dn_cfg
+
+    if attention_tracker:
+        at_cfg: dict = {"enabled": True, "interval": 1, "rank": svd_rank}
+        if method is not None:
+            at_cfg["method"] = method
+        if heads:
+            at_cfg["heads"] = list(heads)
+        if threshold is not None:
+            at_cfg["threshold"] = threshold
+        gb_kwargs["attention_tracker"] = at_cfg
 
     gb_config = GlassboxConfig(**gb_kwargs)
     svd_mod.SVDTritonAttentionImpl.config = gb_config
@@ -443,64 +536,37 @@ def main(
         enable_prefix_caching=False,
     )
 
+    # Save num_layers from model config so parquet can be regenerated without HF download
+    num_layers = llm.llm_engine.model_config.hf_config.num_hidden_layers
+    config["num_layers"] = num_layers
+    (outdir / "config.json").write_text(json.dumps(config, indent=2))
+
     samples_path = outdir / "samples.jsonl"
     samples_f = open(samples_path, "w")
 
     request_counter = 0
     for i, sample in enumerate(samples):
         try:
-            if mode == "evaluate":
-                # Two-phase prefill: question-only baseline, then full
-                prompt_q = f"Q: {sample['question']}\nA:"
-                prompt_full = f"Q: {sample['question']}\nA: {sample['response']}"
+            # Two-phase prefill: question-only baseline, then full (prompt + response)
+            prompt_q = f"Q: {sample['question']}\nA:"
+            prompt_full = f"Q: {sample['question']}\nA: {sample['response']}"
 
-                for phase, prompt in [
-                    ("question", prompt_q),
-                    ("full", prompt_full),
-                ]:
-                    outputs = llm.generate(
-                        [prompt],
-                        vllm.SamplingParams(max_tokens=1),
-                    )
-                    sample_row = {
-                        "request_id": request_counter,
-                        "sample_id": sample["idx"],
-                        "phase": phase,
-                        "dataset": dataset_name,
-                        **sample,
-                        "prompt_length": len(prompt),
-                        "generated": outputs[0].outputs[0].text,
-                    }
-                    samples_f.write(json.dumps(sample_row) + "\n")
-                    samples_f.flush()
-                    request_counter += 1
-
-            else:
-                sampling_params = vllm.SamplingParams(max_tokens=max_tokens)
-                if request_type == "chat_completions":
-                    outputs = llm.chat(
-                        messages=[{"role": "user", "content": sample["question"]}],
-                        sampling_params=sampling_params,
-                    )
-                    generated = outputs[0].outputs[0].text
-                    prompt = sample["question"]
-                else:
-                    prompt = f"Q: {sample['question']}\nA:"
-                    outputs = llm.generate(
-                        [prompt],
-                        sampling_params,
-                    )
-                    generated = outputs[0].outputs[0].text
-
+            for phase, prompt in [
+                ("question", prompt_q),
+                ("full", prompt_full),
+            ]:
+                outputs = llm.generate(
+                    [prompt],
+                    vllm.SamplingParams(max_tokens=max_tokens),
+                )
                 sample_row = {
                     "request_id": request_counter,
                     "sample_id": sample["idx"],
-                    "phase": "generate",
+                    "phase": phase,
                     "dataset": dataset_name,
                     **sample,
                     "prompt_length": len(prompt),
-                    "generated": generated,
-                    "response_length": len(sample.get("response", "")),
+                    "generated": outputs[0].outputs[0].text,
                 }
                 samples_f.write(json.dumps(sample_row) + "\n")
                 samples_f.flush()
@@ -520,8 +586,9 @@ def main(
     log(f"  svd features: {svd_features_path}")
 
     if parquet:
+        feature_columns = _build_feature_columns(num_layers, heads, scores_matrix, degree_normalized, attention_tracker)
         parquet_path = outdir / "features.parquet"
-        _write_parquet(svd_features_path, samples_path, parquet_path)
+        _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)
 
 
 if __name__ == "__main__":
