@@ -166,21 +166,36 @@ class AttentionTrackerFeatures(BaseModel):
         return cls(**kwargs)
 
 
+class AttentionDiagonalFeatures(BaseModel):
+    """Features from attention matrix diagonal (LLM-Check, NeurIPS 2024).
+
+    Mean log self-attention weight: mean_i(log(A[i,i])).
+    No SVD involved — this is a direct scalar statistic.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    attn_diag_logmean: float = Field(
+        description="Mean of log diagonal of A. Higher = stronger self-attention."
+    )
+
+
+
 class SVDSnapshot(BaseModel):
     """One SVD observation emitted per (request, layer, head, step)."""
 
     model_config = ConfigDict(frozen=True)
 
-    feature_group: str  # "scores_matrix" | "degree_normalized_matrix" | "attention_tracker"
+    feature_group: str  # "scores_matrix" | "degree_normalized_matrix" | "attention_tracker" | "attention_diagonal"
     request_id: int
     layer: str
     layer_idx: int | None
     head: int
     step: int
     L: int
-    singular_values: list[float]
+    singular_values: list[float] = []
     tier: str | None = None  # "materialized" | "matrix_free"
-    features: ScoresMatrixFeatures | DegreeNormalizedFeatures | AttentionTrackerFeatures
+    features: ScoresMatrixFeatures | DegreeNormalizedFeatures | AttentionTrackerFeatures | AttentionDiagonalFeatures
 
     @classmethod
     def from_jsonl_row(cls, raw: dict) -> SVDSnapshot:
@@ -193,6 +208,8 @@ class SVDSnapshot(BaseModel):
                 d["features"] = DegreeNormalizedFeatures(**feat_raw)
             elif fg == "attention_tracker":
                 d["features"] = AttentionTrackerFeatures(**feat_raw)
+            elif fg == "attention_diagonal":
+                d["features"] = AttentionDiagonalFeatures(**feat_raw)
             else:
                 d["features"] = ScoresMatrixFeatures(**feat_raw)
         return cls(**d)

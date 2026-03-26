@@ -114,6 +114,7 @@ def load_dataset_samples(
 
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
+    AttentionDiagonalFeatures,
     DegreeNormalizedFeatures,
     SVDSnapshot,
 )
@@ -128,6 +129,13 @@ _HODGE_FEATURE_NAMES = [
     if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
 ]
 
+# AttentionDiagonal feature names derived from AttentionDiagonalFeatures model
+_AD_FEATURE_NAMES = [
+    f"ad_{f}"
+    for f in AttentionDiagonalFeatures.model_fields
+]
+
+
 _META_COLUMNS = ["request_id", "label", "length", "sample_id", "phase", "prompt_length", "source"]
 
 
@@ -135,6 +143,13 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
     """Extract scalar features from a snapshot, raising on unexpected types."""
     result: dict[str, float] = {}
     feat_dict = snap.features.model_dump(exclude_none=True)
+    # Prefix depends on signal type
+    if snap.feature_group == "attention_diagonal":
+        non_spectral_prefix = "ad_"
+    elif snap.feature_group == "attention_tracker":
+        non_spectral_prefix = "at_"
+    else:
+        non_spectral_prefix = "hodge_"
     for k, v in feat_dict.items():
         if k in _SKIP_FEATURE_FIELDS:
             continue
@@ -145,7 +160,7 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
         if k in SPECTRAL_FEATURE_NAMES:
             result[k] = v
         else:
-            result[f"hodge_{k}"] = v
+            result[f"{non_spectral_prefix}{k}"] = v
     return result
 
 
@@ -154,6 +169,7 @@ def _build_feature_columns(
     heads: list[int] | tuple[int, ...],
     scores_matrix: bool,
     degree_normalized: bool,
+    attention_diagonal: bool = False,
 ) -> list[str]:
     """Pre-compute all feature column names from model architecture.
 
@@ -165,6 +181,9 @@ def _build_feature_columns(
         signals.append(("scores_matrix", list(SPECTRAL_FEATURE_NAMES)))
     if degree_normalized:
         signals.append(("degree_normalized_matrix", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES))
+    if attention_diagonal:
+        signals.append(("attention_diagonal", list(_AD_FEATURE_NAMES)))
+
     use_signal_prefix = len(signals) > 1
     columns: list[str] = []
     for signal_name, feature_names in signals:
@@ -225,7 +244,7 @@ def _write_parquet(
 
     # Signal prefixes are present when multiple signals are enabled
     use_signal_prefix = any(
-        col.startswith("scores_matrix_") or col.startswith("degree_normalized_matrix_")
+        col.startswith("scores_matrix_") or col.startswith("degree_normalized_matrix_") or col.startswith("attention_tracker_") or col.startswith("attention_diagonal_")
         for col in feature_columns[:1]
     )
 
@@ -375,6 +394,13 @@ def _write_parquet(
     help="Compute degree-normalized matrix features.",
 )
 @click.option(
+    "--attention-diagonal",
+    "attention_diagonal",
+    is_flag=True,
+    default=False,
+    help="Compute attention diagonal features (LLM-Check).",
+)
+@click.option(
     "--threshold",
     type=int,
     default=None,
@@ -397,6 +423,7 @@ def main(
     heads: tuple[int, ...],
     scores_matrix: bool,
     degree_normalized: bool,
+    attention_diagonal: bool,
     threshold: int | None,
     parquet: bool,
 ) -> None:
@@ -436,6 +463,7 @@ def main(
         "heads": list(heads) if heads else [0],
         "scores_matrix": scores_matrix,
         "degree_normalized": degree_normalized,
+        "attention_diagonal": attention_diagonal,
         "max_tokens": max_tokens,
     }
 
@@ -451,9 +479,12 @@ def main(
         log(f"Heads: {list(heads)}")
     if degree_normalized:
         log(f"Degree-normalized: enabled (threshold={threshold or 2048})")
-    if not scores_matrix and not degree_normalized:
+    if attention_diagonal:
+        log(f"Attention diagonal: enabled (threshold={threshold or 512})")
+
+    if not scores_matrix and not degree_normalized and not attention_diagonal:
         raise click.UsageError(
-            "At least one of --scores-matrix or --degree-normalized must be enabled."
+            "At least one of --scores-matrix, --degree-normalized, or --attention-diagonal must be enabled."
         )
 
     # Configure glassbox backend
@@ -476,6 +507,15 @@ def main(
         if threshold is not None:
             dn_cfg["threshold"] = threshold
         gb_kwargs["degree_normalized_matrix"] = dn_cfg
+
+    if attention_diagonal:
+        ad_cfg: dict = {"enabled": True, "interval": 1}
+        if heads:
+            ad_cfg["heads"] = list(heads)
+        if threshold is not None:
+            ad_cfg["threshold"] = threshold
+        gb_kwargs["attention_diagonal"] = ad_cfg
+
 
     gb_config = GlassboxConfig(**gb_kwargs)
     svd_mod.SVDTritonAttentionImpl.config = gb_config
@@ -547,7 +587,7 @@ def main(
     log(f"  svd features: {svd_features_path}")
 
     if parquet:
-        feature_columns = _build_feature_columns(num_layers, heads, scores_matrix, degree_normalized)
+        feature_columns = _build_feature_columns(num_layers, heads, scores_matrix, degree_normalized, attention_diagonal)
         parquet_path = outdir / "features.parquet"
         _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)
 

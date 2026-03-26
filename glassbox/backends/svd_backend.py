@@ -32,6 +32,10 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
 )
 
+from glassbox.attention_diagonal import (
+    compute_attention_diagonal_features_materialized,
+    compute_attention_diagonal_features_matrix_free,
+)
 from glassbox.config import GlassboxConfig
 from glassbox.attention_tracker import (
     compute_attention_tracker_features_materialized,
@@ -149,6 +153,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             self.config.scores_matrix.enabled
             or self.config.degree_normalized_matrix.enabled
             or self.config.attention_tracker.enabled
+            or self.config.attention_diagonal.enabled
         ):
             return result
 
@@ -200,7 +205,11 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             self.config.attention_tracker.enabled
             and state.step % self.config.attention_tracker.interval == 0
         )
-        if spectral_due or normalized_due or attention_tracker_due:
+        attn_diag_due = (
+            self.config.attention_diagonal.enabled
+            and state.step % self.config.attention_diagonal.interval == 0
+        )
+        if spectral_due or normalized_due or attention_tracker_due or attn_diag_due:
             try:
                 self._run_svd(
                     layer_name,
@@ -211,6 +220,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                     run_spectral=spectral_due,
                     run_normalized=normalized_due,
                     run_attention_tracker=attention_tracker_due,
+                    run_attn_diag=attn_diag_due,
                 )
             except Exception:
                 logger.exception(
@@ -270,6 +280,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         run_spectral: bool = True,
         run_normalized: bool = False,
         run_attention_tracker: bool = False,
+        run_attn_diag: bool = False,
     ) -> None:
         # Stack accumulated Q: [L_q, num_heads, head_size]
         Q_all = torch.cat(state.q_buffer, dim=0).float()
@@ -296,6 +307,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             heads.update(self.config.degree_normalized_matrix.heads)
         if run_attention_tracker:
             heads.update(self.config.attention_tracker.heads)
+        if run_attn_diag:
+            heads.update(self.config.attention_diagonal.heads)
 
         for head_idx in sorted(heads):
             if head_idx >= Q_all.shape[1]:
@@ -321,6 +334,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 and head_idx in self.config.attention_tracker.heads
             ):
                 self._run_attention_tracker(
+                    layer_name, layer_idx, state, head_idx, Qh, Kh, L
+                )
+            if (
+                run_attn_diag
+                and head_idx in self.config.attention_diagonal.heads
+            ):
+                self._run_attn_diag(
                     layer_name, layer_idx, state, head_idx, Qh, Kh, L
                 )
 
@@ -455,6 +475,43 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         )
         self._emit_result(snapshot)
 
+    def _run_attn_diag(
+        self,
+        layer_name: str,
+        layer_idx: int | None,
+        state: PerLayerSVDState,
+        head_idx: int,
+        Qh: torch.Tensor,
+        Kh: torch.Tensor,
+        L: int,
+    ) -> None:
+        """Mean log self-attention weight from the diagonal of A."""
+        cfg = self.config.attention_diagonal
+        scale = 1.0 / math.sqrt(Qh.shape[1])
+
+        if L <= cfg.threshold:
+            A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
+            tier = "materialized"
+            features = compute_attention_diagonal_features_materialized(A)
+        else:
+            tier = "matrix_free"
+            features = compute_attention_diagonal_features_matrix_free(
+                Qh, Kh, scale, block_size=cfg.block_size,
+            )
+
+        snapshot = SVDSnapshot(
+            feature_group="attention_diagonal",
+            request_id=type(self).req_tracker.request_id,
+            layer=layer_name,
+            layer_idx=layer_idx,
+            head=head_idx,
+            step=state.step,
+            L=L,
+            tier=tier,
+            features=features,
+        )
+        self._emit_result(snapshot)
+
     def _emit_result(self, snapshot: SVDSnapshot) -> None:
         """Write SVD results to JSONL or log."""
         cls = type(self)
@@ -467,13 +524,24 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             )
             cls._output_fh.flush()
         else:
-            k = len(snapshot.singular_values)
-            logger.info(
-                "[SVD] %s head=%d step=%d L=%d top-%d singular values: %s",
-                snapshot.layer,
-                snapshot.head,
-                snapshot.step,
-                snapshot.L,
-                k,
-                snapshot.singular_values,
-            )
+            if snapshot.singular_values:
+                k = len(snapshot.singular_values)
+                logger.info(
+                    "[SVD] %s head=%d step=%d L=%d top-%d singular values: %s",
+                    snapshot.layer,
+                    snapshot.head,
+                    snapshot.step,
+                    snapshot.L,
+                    k,
+                    snapshot.singular_values,
+                )
+            else:
+                logger.info(
+                    "[%s] %s head=%d step=%d L=%d features=%s",
+                    snapshot.feature_group,
+                    snapshot.layer,
+                    snapshot.head,
+                    snapshot.step,
+                    snapshot.L,
+                    snapshot.features.model_dump(exclude_none=True),
+                )

@@ -10,11 +10,12 @@ The primary implementation is a custom vLLM attention backend in `glassbox/backe
 
 ## What It Extracts
 
-At configurable intervals during inference, `glassbox` computes features from three operators:
+At configurable intervals during inference, `glassbox` computes features from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))` through multiple lenses:
 
 1. The pre-softmax scores matrix `S = QK^T`
 2. The degree-normalized post-softmax operator `M = D_Q^{-1/2} A D_K^{-1/2}` (Dahlem et al., upcoming)
-3. The raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))` ([AttentionTracker, arXiv:2411.00348](https://arxiv.org/abs/2411.00348))
+3. The raw post-softmax attention matrix `A` — span-independent features from [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348)
+4. The diagonal of `A` — self-attention features from [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024)
 
 For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
 
@@ -162,6 +163,25 @@ The computation reuses the same two-tier approach as the degree-normalized opera
 
 The feature computation lives in `glassbox/attention_tracker.py`.
 
+### 4. Attention diagonal features (LLM-Check, NeurIPS 2024)
+
+These come from the diagonal of the post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`.
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `attn_diag_logmean` | `mean_i(log(A[i,i]))` | Mean log self-attention weight. Higher values indicate stronger self-attention, which correlates with model confidence and factuality |
+
+The matrix-free path avoids materializing `A` by computing `log(A[i,i]) = s_ii - logsumexp_i` where `s_ii = Q[i]·K[i]/sqrt(d)` (O(Ld)) and `logsumexp` is computed blockwise.
+
+Implementation: `glassbox/attention_diagonal.py`. Reference: [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection).
+
+Two additional LLM-Check extractors require signals the attention backend cannot see:
+
+- **LLMCheckLogitsExtractor** — entropy and perplexity from output logits. Needs the final lm_head output, not Q/K.
+- **HiddenStateCovarianceExtractor** — SVD of centered covariance of hidden states. Needs per-layer hidden states before projection.
+
+These will require either `torch.compile` passes (see `glassbox/passes/`) or vLLM observation hooks.
+
 ### More features coming soon
 
 #### Span-aware AttentionTracker features (raw post-softmax attention)
@@ -184,7 +204,7 @@ These modulate routing features by the effective LayerNorm gain, with the goal o
 
 The backend emits one JSON object per observation. Each row contains:
 
-- `feature_group`: `scores_matrix`, `degree_normalized_matrix`, or `attention_tracker`
+- `feature_group`: `scores_matrix`, `degree_normalized_matrix`, `attention_tracker`, or `attention_diagonal`
 - `request_id`
 - `layer` and `layer_idx`
 - `head`
@@ -268,6 +288,13 @@ attention_tracker:
   threshold: 512
   block_size: 256
 
+attention_diagonal:
+  enabled: true
+  interval: 32
+  heads: [0]
+  threshold: 512
+  block_size: 256
+
 output: experiments/results/svd_features.jsonl
 ```
 
@@ -284,6 +311,10 @@ Important knobs:
 | `degree_normalized_matrix.block_size` | Row-block size for blocked operators |
 | `attention_tracker.enabled` | Turn on raw attention matrix analysis |
 | `attention_tracker.threshold` | Sequence length cutoff for materialized vs matrix-free |
+| `attention_diagonal.enabled` | Turn on attention diagonal analysis |
+| `attention_diagonal.interval` | Snapshot cadence for diagonal features |
+| `attention_diagonal.heads` | Heads to analyze |
+| `attention_diagonal.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `output` | JSONL output path |
 
 ## Running the custom backend
@@ -320,12 +351,12 @@ Registered via the `vllm.general_plugins` entry point -- vLLM loads it automatic
 ```bash
 python experiments/extract.py \
   --model Qwen/Qwen2-7B-Instruct \
-  --request-type chat_completions \
-  --dataset halueval \
+  --dataset halueval_hallucination \
   --max-samples 200 \
   --scores-matrix \
   --degree-normalized \
   --attention-tracker \
+  --attention-diagonal \
   --parquet
 ```
 

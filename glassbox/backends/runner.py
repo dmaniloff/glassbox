@@ -65,9 +65,9 @@ logger = logging.getLogger(__name__)
 )
 @click.option(
     "--operator",
-    type=click.Choice(["S", "M", "A"]),
+    type=click.Choice(["S", "M", "A", "diag"]),
     default=None,
-    help="Operator to SVD: S=scores, M=degree-normalized, A=attention-tracker. [default: from config (S)]",
+    help="Operator: S=scores, M=degree-normalized, A=attention-tracker, diag=attention diagonal. [default: from config (S)]",
 )
 @click.option(
     "--threshold",
@@ -181,6 +181,7 @@ def main(
         overrides["output"] = output
 
     attention_tracker: dict = {}
+    attention_diagonal: dict = {}
 
     # Handle --operator for backward compat
     if operator == "M":
@@ -209,6 +210,13 @@ def main(
             attention_tracker["threshold"] = threshold
         if block_size is not None:
             attention_tracker["block_size"] = block_size
+    elif operator == "diag":
+        scores_matrix["enabled"] = False
+        attention_diagonal["enabled"] = True
+        if interval is not None:
+            attention_diagonal["interval"] = interval
+        if heads:
+            attention_diagonal["heads"] = list(heads)
 
     # M-specific params
     if threshold is not None:
@@ -234,6 +242,8 @@ def main(
         overrides["degree_normalized_matrix"] = degree_normalized_matrix
     if attention_tracker:
         overrides["attention_tracker"] = attention_tracker
+    if attention_diagonal:
+        overrides["attention_diagonal"] = attention_diagonal
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
@@ -256,10 +266,11 @@ def main(
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
     logger.info(
-        "Config: scores_matrix=%s degree_normalized_matrix=%s attention_tracker=%s",
+        "Config: scores_matrix=%s degree_normalized_matrix=%s attention_tracker=%s attention_diagonal=%s",
         "enabled" if config.scores_matrix.enabled else "disabled",
         "enabled" if config.degree_normalized_matrix.enabled else "disabled",
         "enabled" if config.attention_tracker.enabled else "disabled",
+        "enabled" if config.attention_diagonal.enabled else "disabled",
     )
     if config.scores_matrix.enabled:
         logger.info(
@@ -284,6 +295,12 @@ def main(
             config.attention_tracker.rank,
             config.attention_tracker.method,
             config.attention_tracker.heads,
+        )
+    if config.attention_diagonal.enabled:
+        logger.info(
+            "Attention diagonal: interval=%s heads=%s",
+            config.attention_diagonal.interval,
+            config.attention_diagonal.heads,
         )
 
     llm = vllm.LLM(
