@@ -33,6 +33,10 @@ from vllm.v1.attention.backends.triton_attn import (
 )
 
 from glassbox.config import GlassboxConfig
+from glassbox.attention_tracker import (
+    compute_attention_tracker_features_materialized,
+    compute_attention_tracker_features_matrix_free,
+)
 from glassbox.hodge import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
@@ -144,6 +148,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if not (
             self.config.scores_matrix.enabled
             or self.config.degree_normalized_matrix.enabled
+            or self.config.attention_tracker.enabled
         ):
             return result
 
@@ -191,7 +196,11 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             self.config.degree_normalized_matrix.enabled
             and state.step % self.config.degree_normalized_matrix.interval == 0
         )
-        if spectral_due or normalized_due:
+        attention_tracker_due = (
+            self.config.attention_tracker.enabled
+            and state.step % self.config.attention_tracker.interval == 0
+        )
+        if spectral_due or normalized_due or attention_tracker_due:
             try:
                 self._run_svd(
                     layer_name,
@@ -201,6 +210,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                     attn_metadata,
                     run_spectral=spectral_due,
                     run_normalized=normalized_due,
+                    run_attention_tracker=attention_tracker_due,
                 )
             except Exception:
                 logger.exception(
@@ -259,6 +269,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         attn_metadata: TritonAttentionMetadata,
         run_spectral: bool = True,
         run_normalized: bool = False,
+        run_attention_tracker: bool = False,
     ) -> None:
         # Stack accumulated Q: [L_q, num_heads, head_size]
         Q_all = torch.cat(state.q_buffer, dim=0).float()
@@ -273,7 +284,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # from the end.
         L = min(L_q, L_k)
         if L < 2:
-            return
+            return  # SVD on a 1-token score matrix is degenerate (single singular value)
         Q_all = Q_all[:L]
         K_all = K_all[:L]
 
@@ -283,6 +294,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             heads.update(self.config.scores_matrix.heads)
         if run_normalized:
             heads.update(self.config.degree_normalized_matrix.heads)
+        if run_attention_tracker:
+            heads.update(self.config.attention_tracker.heads)
 
         for head_idx in sorted(heads):
             if head_idx >= Q_all.shape[1]:
@@ -301,6 +314,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 and head_idx in self.config.degree_normalized_matrix.heads
             ):
                 self._run_svd_normalized(
+                    layer_name, layer_idx, state, head_idx, Qh, Kh, L
+                )
+            if (
+                run_attention_tracker
+                and head_idx in self.config.attention_tracker.heads
+            ):
+                self._run_attention_tracker(
                     layer_name, layer_idx, state, head_idx, Qh, Kh, L
                 )
 
@@ -384,6 +404,45 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         snapshot = SVDSnapshot(
             feature_group="degree_normalized_matrix",
+            request_id=type(self).req_tracker.request_id,
+            layer=layer_name,
+            layer_idx=layer_idx,
+            head=head_idx,
+            step=state.step,
+            L=L,
+            singular_values=features.singular_values,
+            tier=tier,
+            features=features,
+        )
+        self._emit_result(snapshot)
+
+    def _run_attention_tracker(
+        self,
+        layer_name: str,
+        layer_idx: int | None,
+        state: PerLayerSVDState,
+        head_idx: int,
+        Qh: torch.Tensor,
+        Kh: torch.Tensor,
+        L: int,
+    ) -> None:
+        """Features from raw post-softmax attention matrix A."""
+        cfg = self.config.attention_tracker
+        scale = 1.0 / math.sqrt(Qh.shape[1])
+        k = min(cfg.rank, L - 1)
+
+        if L <= cfg.threshold:
+            A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
+            tier = "materialized"
+            features = compute_attention_tracker_features_materialized(A, rank=k)
+        else:
+            tier = "matrix_free"
+            features = compute_attention_tracker_features_matrix_free(
+                Qh, Kh, scale, rank=k, method=cfg.method, block_size=cfg.block_size,
+            )
+
+        snapshot = SVDSnapshot(
+            feature_group="attention_tracker",
             request_id=type(self).req_tracker.request_id,
             layer=layer_name,
             layer_idx=layer_idx,

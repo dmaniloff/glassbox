@@ -122,12 +122,56 @@ class DegreeNormalizedFeatures(BaseModel):
         return cls(**kwargs)
 
 
+class AttentionTrackerFeatures(BaseModel):
+    """Features from raw post-softmax attention matrix A.
+
+    Based on AttentionTracker (arXiv:2411.00348), span-independent features.
+    Singular values come from A directly (not degree-normalized).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # Raw singular values of A
+    singular_values: list[float] = Field(
+        description="Singular values of A (descending)."
+    )
+
+    # Spectral (derived from singular_values)
+    sv1: float | None = Field(None, description="Leading singular value of A.")
+    sv_ratio: float | None = Field(None, description="sigma1/sigma2 ratio.")
+    sv_entropy: float | None = Field(
+        None, description="Entropy of normalized singular value distribution."
+    )
+
+    # AttentionTracker features
+    sigma2: float | None = Field(None, description="Second singular value of A.")
+    sigma2_asym: float | None = Field(
+        None, description="Second singular value of A_asym = (A - A^T) / 2."
+    )
+    commutator_norm: float | None = Field(
+        None,
+        description="||[A_sym, A_asym]||_F / ||A||_F. Coupling of symmetric and antisymmetric parts.",
+    )
+
+    @classmethod
+    def from_attention_tracker(
+        cls,
+        singular_values: list[float],
+        **tracker_features,
+    ) -> AttentionTrackerFeatures:
+        """Build from singular values and tracker features."""
+        kwargs = _spectral_from_svs(singular_values)
+        kwargs["singular_values"] = singular_values
+        kwargs.update(tracker_features)
+        return cls(**kwargs)
+
+
 class SVDSnapshot(BaseModel):
     """One SVD observation emitted per (request, layer, head, step)."""
 
     model_config = ConfigDict(frozen=True)
 
-    feature_group: str  # "scores_matrix" | "degree_normalized_matrix"
+    feature_group: str  # "scores_matrix" | "degree_normalized_matrix" | "attention_tracker"
     request_id: int
     layer: str
     layer_idx: int | None
@@ -136,7 +180,7 @@ class SVDSnapshot(BaseModel):
     L: int
     singular_values: list[float]
     tier: str | None = None  # "materialized" | "matrix_free"
-    features: ScoresMatrixFeatures | DegreeNormalizedFeatures
+    features: ScoresMatrixFeatures | DegreeNormalizedFeatures | AttentionTrackerFeatures
 
     @classmethod
     def from_jsonl_row(cls, raw: dict) -> SVDSnapshot:
@@ -147,6 +191,8 @@ class SVDSnapshot(BaseModel):
         if isinstance(feat_raw, dict):
             if fg == "degree_normalized_matrix":
                 d["features"] = DegreeNormalizedFeatures(**feat_raw)
+            elif fg == "attention_tracker":
+                d["features"] = AttentionTrackerFeatures(**feat_raw)
             else:
                 d["features"] = ScoresMatrixFeatures(**feat_raw)
         return cls(**d)
