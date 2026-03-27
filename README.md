@@ -10,10 +10,11 @@ The primary implementation is a custom vLLM attention backend in `glassbox/backe
 
 ## What It Extracts
 
-At configurable intervals during inference, `glassbox` can compute features from two operators:
+At configurable intervals during inference, `glassbox` computes features from three operators:
 
 1. The pre-softmax scores matrix `S = QK^T`
-2. The degree-normalized post-softmax operator `M = D_Q^{-1/2} A D_K^{-1/2}`, where `A = softmax(QK^T / sqrt(d))`
+2. The degree-normalized post-softmax operator `M = D_Q^{-1/2} A D_K^{-1/2}` (Dahlem et al., upcoming)
+3. The raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))` ([AttentionTracker, arXiv:2411.00348](https://arxiv.org/abs/2411.00348))
 
 For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
 
@@ -23,6 +24,7 @@ For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
 - top singular values
 - derived spectral features
 - optional routing / Hodge-style features for the normalized operator
+- optional attention tracker features for the raw attention matrix
 
 Those snapshots are represented by `SVDSnapshot` in `glassbox/results.py`.
 
@@ -114,7 +116,7 @@ Some routing metrics need access to selected entries of `M`. Instead of building
 
 ## Features We Compute
 
-### Scores matrix features (pre-softmax scores)
+### 1. Scores matrix features (pre-softmax scores)
 
 These come from the singular values of the pre-softmax scores matrix `S = QK^T`.
 
@@ -124,7 +126,7 @@ These come from the singular values of the pre-softmax scores matrix `S = QK^T`.
 | `sv_ratio` | `σ₁(S) / σ₂(S)` | Spectral sharpness. High values suggest near-rank-1 structure; low values suggest multiple competing modes |
 | `sv_entropy` | `-Σ pᵢ log pᵢ`, with `pᵢ = σᵢ / Σⱼ σⱼ` | Entropy of the normalized singular-value distribution. Measures how concentrated or diffuse the spectrum is |
 
-### Routing features from the Degree-normalized matrix (post-softmax attention)
+### 2. Routing features from the Degree-normalized matrix (post-softmax attention) — Dahlem et al. (upcoming)
 
 These come from the singular values and routing decomposition of the normalized operator `M`.
 
@@ -144,16 +146,35 @@ These come from the singular values and routing decomposition of the normalized 
 
 The routing and Hodge-style metrics live in `glassbox/hodge.py`. The feature schemas are defined in `glassbox/results.py`.
 
+### 3. AttentionTracker features (raw post-softmax attention) — [arXiv:2411.00348](https://arxiv.org/abs/2411.00348)
+
+These come from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`, without degree normalization. Based on the AttentionTracker paper, which uses these features for mechanistic classification of failure modes (prompt injection vs hallucination).
+
+Currently implements the span-independent features only. Span-aware features (`focus_score`, `cut_flow`) require instruction/data span boundaries and are planned for a future release.
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `sigma2` | `σ₂(A)` | Second singular value of the raw attention matrix. Persistence of non-dominant attention structure |
+| `sigma2_asym` | `σ₂(A_asym)` | Second singular value of `A_asym = (A - Aᵀ) / 2`. Whether the irreversible (asymmetric) component has multiple significant modes |
+| `commutator_norm` | `‖[A_sym, A_asym]‖_F / ‖A‖_F` | Coupling between symmetric and antisymmetric parts of attention, where `[X, Y] = XY - YX` |
+
+The computation reuses the same two-tier approach as the degree-normalized operator: materialized for `L <= threshold`, matrix-free (blocked-streaming matvecs) above. The matrix-free path reuses existing matvec infrastructure by treating `A` as the special case of `M` where `D_K^{-1/2} = I`.
+
+The feature computation lives in `glassbox/attention_tracker.py`.
 
 ### More features coming soon
 
+#### Span-aware AttentionTracker features (raw post-softmax attention)
+
+The AttentionTracker paper also defines `focus_score` (attention mass from data tokens to instruction span) and `cut_flow` (net directed attention flow between instruction and data regions). These require instruction/data span boundaries, which need a mechanism to pass into the backend (config, per-request metadata, or marker-token detection).
+
 #### Transport features from the Degree-normalized matrix (post-softmax attention, value-weighted routing)
 
-These move beyond pure attention geometry and start incorporating what is actually being transported through the head. 
+These move beyond pure attention geometry and start incorporating what is actually being transported through the head.
 
 #### Curl spectrum features from the Degree-normalized matrix (post-softmax attention, per-dimension value analysis)
 
-These summarize how curl-like behavior is distributed across important value dimensions. 
+These summarize how curl-like behavior is distributed across important value dimensions.
 
 #### LayerNorm-weighted features
 
@@ -163,7 +184,7 @@ These modulate routing features by the effective LayerNorm gain, with the goal o
 
 The backend emits one JSON object per observation. Each row contains:
 
-- `feature_group`: `scores_matrix` or `degree_normalized_matrix`
+- `feature_group`: `scores_matrix`, `degree_normalized_matrix`, or `attention_tracker`
 - `request_id`
 - `layer` and `layer_idx`
 - `head`
@@ -238,6 +259,15 @@ degree_normalized_matrix:
   hodge_target_cv: 0.05
   hodge_curl_seed: 42
 
+attention_tracker:
+  enabled: true
+  interval: 32
+  rank: 4
+  method: randomized
+  heads: [0]
+  threshold: 512
+  block_size: 256
+
 output: experiments/results/svd_features.jsonl
 ```
 
@@ -252,6 +282,8 @@ Important knobs:
 | `degree_normalized_matrix.enabled` | Turn on normalized-operator analysis |
 | `degree_normalized_matrix.threshold` | Sequence length cutoff for materialized vs matrix-free execution |
 | `degree_normalized_matrix.block_size` | Row-block size for blocked operators |
+| `attention_tracker.enabled` | Turn on raw attention matrix analysis |
+| `attention_tracker.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `output` | JSONL output path |
 
 ## Running the custom backend
@@ -293,6 +325,7 @@ python experiments/extract.py \
   --max-samples 200 \
   --scores-matrix \
   --degree-normalized \
+  --attention-tracker \
   --parquet
 ```
 

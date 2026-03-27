@@ -2,6 +2,7 @@ import pytest
 
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
+    AttentionTrackerFeatures,
     DegreeNormalizedFeatures,
     ScoresMatrixFeatures,
     SVDSnapshot,
@@ -77,6 +78,31 @@ class TestDegreeNormalizedFeatures:
         assert f.sigma2 is None  # not passed
 
 
+# ── AttentionTrackerFeatures ──────────────────────────────────────────────
+
+
+class TestAttentionTrackerFeatures:
+    def test_from_attention_tracker(self):
+        f = AttentionTrackerFeatures.from_attention_tracker(
+            singular_values=[1.0, 0.5, 0.1],
+            sigma2=0.5,
+            sigma2_asym=0.02,
+            commutator_norm=0.03,
+        )
+        assert f.sv1 == 1.0
+        assert f.sv_ratio == pytest.approx(2.0)
+        assert f.sigma2 == 0.5
+        assert f.sigma2_asym == 0.02
+        assert f.commutator_norm == 0.03
+
+    def test_frozen(self):
+        f = AttentionTrackerFeatures.from_attention_tracker(
+            singular_values=[1.0], sigma2=0.5
+        )
+        with pytest.raises(Exception):
+            f.sigma2 = 0.9
+
+
 # ── SVDSnapshot ───────────────────────────────────────────────────────────
 
 
@@ -114,6 +140,26 @@ class TestSVDSnapshot:
         restored = SVDSnapshot.from_jsonl_row(d)
         assert restored.features.sv1 == snap.features.sv1
         assert restored.features.sv_ratio == snap.features.sv_ratio
+
+    def test_attention_tracker_round_trip(self):
+        features = AttentionTrackerFeatures.from_attention_tracker(
+            singular_values=[1.0, 0.5],
+            sigma2=0.5,
+            sigma2_asym=0.02,
+            commutator_norm=0.03,
+        )
+        snap = self._make_snapshot(
+            feature_group="attention_tracker",
+            tier="materialized",
+            features=features,
+        )
+        d = snap.model_dump(exclude_none=True)
+        assert d["tier"] == "materialized"
+        assert d["features"]["sigma2"] == 0.5
+        restored = SVDSnapshot.from_jsonl_row(d)
+        assert restored.features.sigma2 == 0.5
+        assert restored.features.sigma2_asym == 0.02
+        assert restored.features.sv_ratio == pytest.approx(2.0)
 
     def test_degree_normalized_round_trip(self):
         features = DegreeNormalizedFeatures.from_hodge(

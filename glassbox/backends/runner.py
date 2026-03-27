@@ -65,9 +65,9 @@ logger = logging.getLogger(__name__)
 )
 @click.option(
     "--operator",
-    type=click.Choice(["S", "M"]),
+    type=click.Choice(["S", "M", "A"]),
     default=None,
-    help="Operator to SVD: S=scores, M=degree-normalized. [default: from config (S)]",
+    help="Operator to SVD: S=scores, M=degree-normalized, A=attention-tracker. [default: from config (S)]",
 )
 @click.option(
     "--threshold",
@@ -180,6 +180,8 @@ def main(
     if output is not None:
         overrides["output"] = output
 
+    attention_tracker: dict = {}
+
     # Handle --operator for backward compat
     if operator == "M":
         scores_matrix["enabled"] = False
@@ -192,6 +194,21 @@ def main(
             degree_normalized_matrix["method"] = method
         if heads:
             degree_normalized_matrix["heads"] = list(heads)
+    elif operator == "A":
+        scores_matrix["enabled"] = False
+        attention_tracker["enabled"] = True
+        if interval is not None:
+            attention_tracker["interval"] = interval
+        if rank is not None:
+            attention_tracker["rank"] = rank
+        if method is not None:
+            attention_tracker["method"] = method
+        if heads:
+            attention_tracker["heads"] = list(heads)
+        if threshold is not None:
+            attention_tracker["threshold"] = threshold
+        if block_size is not None:
+            attention_tracker["block_size"] = block_size
 
     # M-specific params
     if threshold is not None:
@@ -215,6 +232,8 @@ def main(
         overrides["scores_matrix"] = scores_matrix
     if degree_normalized_matrix:
         overrides["degree_normalized_matrix"] = degree_normalized_matrix
+    if attention_tracker:
+        overrides["attention_tracker"] = attention_tracker
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
@@ -237,9 +256,10 @@ def main(
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
     logger.info(
-        "Config: scores_matrix=%s degree_normalized_matrix=%s",
+        "Config: scores_matrix=%s degree_normalized_matrix=%s attention_tracker=%s",
         "enabled" if config.scores_matrix.enabled else "disabled",
         "enabled" if config.degree_normalized_matrix.enabled else "disabled",
+        "enabled" if config.attention_tracker.enabled else "disabled",
     )
     if config.scores_matrix.enabled:
         logger.info(
@@ -256,6 +276,14 @@ def main(
             config.degree_normalized_matrix.rank,
             config.degree_normalized_matrix.method,
             config.degree_normalized_matrix.heads,
+        )
+    if config.attention_tracker.enabled:
+        logger.info(
+            "Attention tracker: interval=%s rank=%s method=%s heads=%s",
+            config.attention_tracker.interval,
+            config.attention_tracker.rank,
+            config.attention_tracker.method,
+            config.attention_tracker.heads,
         )
 
     llm = vllm.LLM(

@@ -41,6 +41,20 @@ class DegreeNormalizedMatrixConfig(BaseModel):
     hodge_min_samples: int = 200
 
 
+class AttentionTrackerConfig(BaseModel):
+    """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    interval: int = 32
+    rank: int = 4
+    method: Literal["randomized", "lanczos"] = "randomized"
+    heads: list[int] = [0]
+    threshold: int = 512
+    block_size: int = 256
+
+
 class GlassboxConfig(BaseSettings):
     """Root configuration for the Glassbox observability framework.
 
@@ -60,6 +74,7 @@ class GlassboxConfig(BaseSettings):
     degree_normalized_matrix: DegreeNormalizedMatrixConfig = (
         DegreeNormalizedMatrixConfig()
     )
+    attention_tracker: AttentionTrackerConfig = AttentionTrackerConfig()
     output: str | None = None
 
     @classmethod
