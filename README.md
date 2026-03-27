@@ -146,8 +146,6 @@ These come from the singular values and routing decomposition of the normalized 
 
 The routing and Hodge-style metrics live in `glassbox/hodge.py`. The feature schemas are defined in `glassbox/results.py`.
 
-NOTE: `sigma2_asym` and `commutator_norm` are not yet implemented for the matrix-free normalized-operator path.
-
 ### 3. AttentionTracker features (raw post-softmax attention) — [arXiv:2411.00348](https://arxiv.org/abs/2411.00348)
 
 These come from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`, without degree normalization. Based on the AttentionTracker paper, which uses these features for mechanistic classification of failure modes (prompt injection vs hallucination).

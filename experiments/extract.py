@@ -114,7 +114,6 @@ def load_dataset_samples(
 
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
-    AttentionTrackerFeatures,
     DegreeNormalizedFeatures,
     SVDSnapshot,
 )
@@ -129,13 +128,6 @@ _HODGE_FEATURE_NAMES = [
     if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
 ]
 
-# AttentionTracker feature names derived from AttentionTrackerFeatures model
-_AT_FEATURE_NAMES = [
-    f"at_{f}"
-    for f in AttentionTrackerFeatures.model_fields
-    if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
-]
-
 _META_COLUMNS = ["request_id", "label", "length", "sample_id", "phase", "prompt_length", "source"]
 
 
@@ -143,11 +135,6 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
     """Extract scalar features from a snapshot, raising on unexpected types."""
     result: dict[str, float] = {}
     feat_dict = snap.features.model_dump(exclude_none=True)
-    # Non-spectral prefix depends on signal type
-    if snap.feature_group == "attention_tracker":
-        non_spectral_prefix = "at_"
-    else:
-        non_spectral_prefix = "hodge_"
     for k, v in feat_dict.items():
         if k in _SKIP_FEATURE_FIELDS:
             continue
@@ -158,7 +145,7 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
         if k in SPECTRAL_FEATURE_NAMES:
             result[k] = v
         else:
-            result[f"{non_spectral_prefix}{k}"] = v
+            result[f"hodge_{k}"] = v
     return result
 
 
@@ -167,7 +154,6 @@ def _build_feature_columns(
     heads: list[int] | tuple[int, ...],
     scores_matrix: bool,
     degree_normalized: bool,
-    attention_tracker: bool = False,
 ) -> list[str]:
     """Pre-compute all feature column names from model architecture.
 
@@ -179,9 +165,6 @@ def _build_feature_columns(
         signals.append(("scores_matrix", list(SPECTRAL_FEATURE_NAMES)))
     if degree_normalized:
         signals.append(("degree_normalized_matrix", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES))
-    if attention_tracker:
-        signals.append(("attention_tracker", list(SPECTRAL_FEATURE_NAMES) + _AT_FEATURE_NAMES))
-
     use_signal_prefix = len(signals) > 1
     columns: list[str] = []
     for signal_name, feature_names in signals:
@@ -242,7 +225,7 @@ def _write_parquet(
 
     # Signal prefixes are present when multiple signals are enabled
     use_signal_prefix = any(
-        col.startswith("scores_matrix_") or col.startswith("degree_normalized_matrix_") or col.startswith("attention_tracker_")
+        col.startswith("scores_matrix_") or col.startswith("degree_normalized_matrix_")
         for col in feature_columns[:1]
     )
 
@@ -392,13 +375,6 @@ def _write_parquet(
     help="Compute degree-normalized matrix features.",
 )
 @click.option(
-    "--attention-tracker",
-    "attention_tracker",
-    is_flag=True,
-    default=False,
-    help="Compute attention tracker features (raw A).",
-)
-@click.option(
     "--threshold",
     type=int,
     default=None,
@@ -421,7 +397,6 @@ def main(
     heads: tuple[int, ...],
     scores_matrix: bool,
     degree_normalized: bool,
-    attention_tracker: bool,
     threshold: int | None,
     parquet: bool,
 ) -> None:
@@ -461,7 +436,6 @@ def main(
         "heads": list(heads) if heads else [0],
         "scores_matrix": scores_matrix,
         "degree_normalized": degree_normalized,
-        "attention_tracker": attention_tracker,
         "max_tokens": max_tokens,
     }
 
@@ -477,12 +451,9 @@ def main(
         log(f"Heads: {list(heads)}")
     if degree_normalized:
         log(f"Degree-normalized: enabled (threshold={threshold or 2048})")
-    if attention_tracker:
-        log(f"Attention tracker: enabled (threshold={threshold or 512})")
-
-    if not scores_matrix and not degree_normalized and not attention_tracker:
+    if not scores_matrix and not degree_normalized:
         raise click.UsageError(
-            "At least one of --scores-matrix, --degree-normalized, or --attention-tracker must be enabled."
+            "At least one of --scores-matrix or --degree-normalized must be enabled."
         )
 
     # Configure glassbox backend
@@ -505,16 +476,6 @@ def main(
         if threshold is not None:
             dn_cfg["threshold"] = threshold
         gb_kwargs["degree_normalized_matrix"] = dn_cfg
-
-    if attention_tracker:
-        at_cfg: dict = {"enabled": True, "interval": 1, "rank": svd_rank}
-        if method is not None:
-            at_cfg["method"] = method
-        if heads:
-            at_cfg["heads"] = list(heads)
-        if threshold is not None:
-            at_cfg["threshold"] = threshold
-        gb_kwargs["attention_tracker"] = at_cfg
 
     gb_config = GlassboxConfig(**gb_kwargs)
     svd_mod.SVDTritonAttentionImpl.config = gb_config
@@ -586,7 +547,7 @@ def main(
     log(f"  svd features: {svd_features_path}")
 
     if parquet:
-        feature_columns = _build_feature_columns(num_layers, heads, scores_matrix, degree_normalized, attention_tracker)
+        feature_columns = _build_feature_columns(num_layers, heads, scores_matrix, degree_normalized)
         parquet_path = outdir / "features.parquet"
         _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)
 
