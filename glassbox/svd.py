@@ -51,6 +51,49 @@ def apply_AT_blocked(Q, K, u, scale, block_size=256):
     return result
 
 
+def apply_A_blocked_batched(Q, K, Omega, scale, block_size=256):
+    """A @ Omega via blocked row-streaming, batched over columns of Omega.
+
+    Computes softmax once per block and multiplies by ALL n_vecs columns
+    before discarding the strip. Still matrix-free: peak memory O(block_size × L_k).
+
+    Args:
+        Omega: [L_k, n_vecs] matrix of test vectors.
+
+    Returns:
+        [L_q, n_vecs] result matrix.
+    """
+    L_q = Q.shape[0]
+    n_vecs = Omega.shape[1]
+    result = torch.zeros(L_q, n_vecs, device=Q.device, dtype=Q.dtype)
+    for i0 in range(0, L_q, block_size):
+        i1 = min(i0 + block_size, L_q)
+        scores = Q[i0:i1] @ K.T * scale  # [bs, L_k]
+        attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
+        result[i0:i1] = attn @ Omega  # [bs, n_vecs]
+    return result
+
+
+def apply_AT_blocked_batched(Q, K, U, scale, block_size=256):
+    """A^T @ U via blocked row-streaming, batched over columns of U.
+
+    Args:
+        U: [L_q, n_vecs] matrix.
+
+    Returns:
+        [L_k, n_vecs] result matrix.
+    """
+    L_k = K.shape[0]
+    n_vecs = U.shape[1]
+    result = torch.zeros(L_k, n_vecs, device=K.device, dtype=K.dtype)
+    for i0 in range(0, Q.shape[0], block_size):
+        i1 = min(i0 + block_size, Q.shape[0])
+        scores = Q[i0:i1] @ K.T * scale  # [bs, L_k]
+        attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
+        result += attn.T @ U[i0:i1]  # [L_k, n_vecs]
+    return result
+
+
 def compute_dk_blocked(Q, K, scale, block_size=256, epsilon=1e-10):
     """Compute D_K (column sums of A) via apply_AT_blocked.
 
@@ -176,7 +219,10 @@ def matvec_commutator_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
     return term1 - term2
 
 
-def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
+def randomized_svd(
+    matvec, matvec_t, dim, k, p=5, q=2, device="cuda",
+    matvec_batch=None, matvec_t_batch=None,
+):
     """
     Matrix-free Randomized SVD for a (dim x dim) linear operator given matvecs.
 
@@ -202,12 +248,21 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
         p:   Oversampling parameter (default 5).
         q:   Number of power iterations (default 2).
         device: Torch device.
+        matvec_batch: Optional Omega -> M @ Omega, callable on [dim, n_vecs] matrices.
+            When provided, replaces the per-column matvec loop.
+        matvec_t_batch: Optional U -> M^T @ U, callable on [dim, n_vecs] matrices.
+            When provided, replaces the per-column matvec_t loop.
 
     Returns:
         U: (dim, k) left singular vectors.
         S: (k,)    singular values (descending).
         V: (dim, k) right singular vectors.
     """
+    def _apply(fn, fn_batch, X):
+        if fn_batch is not None:
+            return fn_batch(X)
+        return torch.stack([fn(X[:, i]) for i in range(X.shape[1])], dim=1)
+
     # Clamp oversampling so k + p doesn't exceed dim
     p = min(p, max(dim - k, 0))
 
@@ -215,19 +270,19 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
     Omega = torch.randn(dim, k + p, device=device)
 
     # Step 2: sample Y = M Ω
-    Y = torch.stack([matvec(Omega[:, i]) for i in range(k + p)], dim=1)  # (dim, k+p)
+    Y = _apply(matvec, matvec_batch, Omega)  # (dim, k+p)
 
     # Optional: power iterations to improve spectral separation.
     for _ in range(q):
-        Z = torch.stack([matvec_t(Y[:, i]) for i in range(k + p)], dim=1)  # M^T Y
-        Y = torch.stack([matvec(Z[:, i]) for i in range(k + p)], dim=1)  # M (M^T Y)
+        Z = _apply(matvec_t, matvec_t_batch, Y)  # M^T Y
+        Y = _apply(matvec, matvec_batch, Z)  # M (M^T Y)
 
     # Step 3: orthonormal basis Q for range(Y)
     Q, _ = torch.linalg.qr(Y, mode="reduced")  # (dim, k+p)
 
     # Step 4: form small matrix B = Q^T M  (shape (k+p, dim))
     # We can compute B via B^T = M^T Q, using matvec_t.
-    Bt = torch.stack([matvec_t(Q[:, i]) for i in range(k + p)], dim=1)  # (dim, k+p)
+    Bt = _apply(matvec_t, matvec_t_batch, Q)  # (dim, k+p)
     B = Bt.T  # (k+p, dim)
 
     # Step 5: SVD of small B
