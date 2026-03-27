@@ -75,7 +75,25 @@ class GlassboxConfig(BaseSettings):
         DegreeNormalizedMatrixConfig()
     )
     attention_tracker: AttentionTrackerConfig = AttentionTrackerConfig()
+    matvec_strategy: Literal["loop", "batched", "triton", "auto"] = "auto"
     output: str | None = None
+
+    @classmethod
+    def resolve_matvec_strategy(
+        cls, strategy: str,
+    ) -> Literal["loop", "batched", "triton"]:
+        """Resolve "auto" to a concrete strategy based on runtime capabilities."""
+        if strategy != "auto":
+            return strategy  # type: ignore[return-value]
+        try:
+            import triton  # noqa: F401
+            import torch
+
+            if torch.cuda.is_available():
+                return "triton"
+        except ImportError:
+            pass
+        return "batched"
 
     @classmethod
     def settings_customise_sources(

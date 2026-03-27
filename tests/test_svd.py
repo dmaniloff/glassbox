@@ -319,6 +319,21 @@ def test_randomized_svd_with_batched_callables():
     assert rel_err.max().item() < 0.01, f"Batched SVD error too high: {rel_err}"
 
 
+def test_compute_scores_matrix_features_batched_strategy():
+    """Batched matvec strategy should produce same features as loop."""
+    torch.manual_seed(42)
+    L_test = 32
+    D_test = 8
+    Q = torch.randn(L_test, D_test)
+    K = torch.randn(L_test, D_test)
+
+    f_loop = compute_scores_matrix_features(Q, K, rank=4, matvec_strategy="loop")
+    f_batched = compute_scores_matrix_features(Q, K, rank=4, matvec_strategy="batched")
+
+    for sv_l, sv_b in zip(f_loop.singular_values, f_batched.singular_values):
+        assert abs(sv_l - sv_b) < 0.05, f"strategy mismatch: {sv_l} vs {sv_b}"
+
+
 def test_compute_scores_matrix_features_lanczos_vs_randomized():
     """Both SVD methods should agree on scores-matrix features."""
     torch.manual_seed(99)

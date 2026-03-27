@@ -27,6 +27,8 @@ EPSILON = 1e-10
 
 from glassbox.results import DegreeNormalizedFeatures
 from glassbox.svd import (
+    apply_A_blocked_batched,
+    apply_AT_blocked_batched,
     compute_logsumexp_blocked,
     compute_M_fro_norm_blocked,
     get_M_entries_batch,
@@ -252,8 +254,45 @@ def compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size=256):
 # ---------------------------------------------------------------------------
 
 
+def _build_M_batch_callables(Q, K, d_k_inv_sqrt, scale, block_size, strategy):
+    """Build batched matvec callables for M = A @ diag(d_k_inv_sqrt).
+
+    Returns (mv_batch, mv_t_batch) or (None, None) for "loop".
+    """
+    if strategy == "loop":
+        return None, None
+
+    if strategy == "triton":
+        try:
+            from glassbox.triton_kernels import fused_attn_multi_matvec
+
+            def mv_batch(Omega):
+                return fused_attn_multi_matvec(
+                    Q, K, d_k_inv_sqrt.unsqueeze(1) * Omega, scale
+                )
+        except ImportError:
+            # Fall back to PyTorch batched if triton unavailable
+            def mv_batch(Omega):
+                return apply_A_blocked_batched(
+                    Q, K, d_k_inv_sqrt.unsqueeze(1) * Omega, scale, block_size
+                )
+    else:
+        def mv_batch(Omega):
+            return apply_A_blocked_batched(
+                Q, K, d_k_inv_sqrt.unsqueeze(1) * Omega, scale, block_size
+            )
+
+    def mv_t_batch(U):
+        return d_k_inv_sqrt.unsqueeze(1) * apply_AT_blocked_batched(
+            Q, K, U, scale, block_size
+        )
+
+    return mv_batch, mv_t_batch
+
+
 def compute_sigma2_asym_matrix_free(
-    Q, K, d_k_inv_sqrt, scale, block_size=256, svd_method="randomized"
+    Q, K, d_k_inv_sqrt, scale, block_size=256, svd_method="randomized",
+    matvec_strategy="loop",
 ):
     """Second singular value of M_asym = (M - M^T) / 2, computed matrix-free.
 
@@ -274,12 +313,26 @@ def compute_sigma2_asym_matrix_free(
     if k < 2:
         return 0.0
 
+    # Build batched callables for M_asym: (M@Omega - M^T@Omega) / 2
+    mv_batch = None
+    mv_t_batch = None
+    if matvec_strategy != "loop":
+        m_batch, mt_batch = _build_M_batch_callables(
+            Q, K, d_k_inv_sqrt, scale, block_size, matvec_strategy
+        )
+        if m_batch is not None:
+            mv_batch = lambda Omega: (m_batch(Omega) - mt_batch(Omega)) / 2
+            mv_t_batch = lambda U: -(m_batch(U) - mt_batch(U)) / 2
+
     if svd_method == "lanczos":
         _, S, _ = svd_via_lanczos(
             matvec_asym, matvec_asym_t, L, k, max(2 * k + 2, 20), str(device)
         )
     else:
-        _, S, _ = randomized_svd(matvec_asym, matvec_asym_t, L, k, device=str(device))
+        _, S, _ = randomized_svd(
+            matvec_asym, matvec_asym_t, L, k, device=str(device),
+            matvec_batch=mv_batch, matvec_t_batch=mv_t_batch,
+        )
 
     S_sorted, _ = torch.sort(S, descending=True)
     return S_sorted[1].item() if len(S_sorted) > 1 else 0.0
@@ -340,6 +393,7 @@ def compute_routing_features_matrix_free(
     min_samples=200,
     seed=42,
     n_hutchinson=10,
+    matvec_strategy="loop",
 ):
     """Compute all Hodge routing features matrix-free.
 
@@ -359,12 +413,19 @@ def compute_routing_features_matrix_free(
     matvec = lambda v: matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
     matvec_t = lambda u: matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size)
 
+    mv_batch, mv_t_batch = _build_M_batch_callables(
+        Q, K, d_k_inv_sqrt, scale, block_size, matvec_strategy
+    )
+
     if svd_method == "lanczos":
         _, S, _ = svd_via_lanczos(
             matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device)
         )
     else:
-        _, S, _ = randomized_svd(matvec, matvec_t, L, k, device=str(device))
+        _, S, _ = randomized_svd(
+            matvec, matvec_t, L, k, device=str(device),
+            matvec_batch=mv_batch, matvec_t_batch=mv_t_batch,
+        )
 
     S_sorted, _ = torch.sort(S, descending=True)
     sigma2 = S_sorted[1].item() if len(S_sorted) > 1 else 0.0
@@ -398,7 +459,8 @@ def compute_routing_features_matrix_free(
 
     # --- sigma2_asym (matrix-free) ---
     sigma2_asym = compute_sigma2_asym_matrix_free(
-        Q, K, d_k_inv_sqrt, scale, block_size, svd_method
+        Q, K, d_k_inv_sqrt, scale, block_size, svd_method,
+        matvec_strategy=matvec_strategy,
     )
 
     # --- commutator_norm (Hutchinson, matrix-free) ---

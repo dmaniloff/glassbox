@@ -490,6 +490,7 @@ def compute_scores_matrix_features(
     K: torch.Tensor,
     rank: int,
     method: str = "randomized",
+    matvec_strategy: str = "loop",
 ) -> ScoresMatrixFeatures:
     """Compute spectral features of the scores matrix S = QK^T.
 
@@ -503,9 +504,21 @@ def compute_scores_matrix_features(
     mv = lambda v: matvec_S(Q, K, v)
     mv_t = lambda u: matvec_ST(Q, K, u)
 
+    # matvec_S / matvec_ST are shape-agnostic (work on matrices too),
+    # so batched and triton both just use them directly as batch callables.
+    # (No softmax to fuse, so triton falls back to batched here.)
+    mv_batch = None
+    mv_t_batch = None
+    if matvec_strategy != "loop":
+        mv_batch = lambda Omega: matvec_S(Q, K, Omega)
+        mv_t_batch = lambda U: matvec_ST(Q, K, U)
+
     if method == "lanczos":
         _, S, _ = svd_via_lanczos(mv, mv_t, L, k, max(2 * k + 2, 20), str(device))
     else:
-        _, S, _ = randomized_svd(mv, mv_t, L, k, device=str(device))
+        _, S, _ = randomized_svd(
+            mv, mv_t, L, k, device=str(device),
+            matvec_batch=mv_batch, matvec_t_batch=mv_t_batch,
+        )
 
     return ScoresMatrixFeatures.from_singular_values(S.cpu().tolist())

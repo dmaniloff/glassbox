@@ -29,7 +29,9 @@ from glassbox.hodge import (
 from glassbox.results import AttentionTrackerFeatures
 from glassbox.svd import (
     apply_A_blocked,
+    apply_A_blocked_batched,
     apply_AT_blocked,
+    apply_AT_blocked_batched,
     compute_M_fro_norm_blocked,
     randomized_svd,
     svd_via_lanczos,
@@ -71,6 +73,33 @@ def compute_attention_tracker_features_materialized(
     )
 
 
+def _build_A_batch_callables(Q, K, scale, block_size, strategy):
+    """Build batched matvec callables for A = softmax(QK^T * scale).
+
+    Returns (mv_batch, mv_t_batch) or (None, None) for "loop".
+    """
+    if strategy == "loop":
+        return None, None
+
+    if strategy == "triton":
+        try:
+            from glassbox.triton_kernels import fused_attn_multi_matvec
+
+            mv_batch = lambda Omega: fused_attn_multi_matvec(Q, K, Omega, scale)
+        except ImportError:
+            mv_batch = lambda Omega: apply_A_blocked_batched(
+                Q, K, Omega, scale, block_size
+            )
+    else:
+        mv_batch = lambda Omega: apply_A_blocked_batched(
+            Q, K, Omega, scale, block_size
+        )
+
+    mv_t_batch = lambda U: apply_AT_blocked_batched(Q, K, U, scale, block_size)
+
+    return mv_batch, mv_t_batch
+
+
 def compute_attention_tracker_features_matrix_free(
     Q: torch.Tensor,
     K: torch.Tensor,
@@ -78,6 +107,7 @@ def compute_attention_tracker_features_matrix_free(
     rank: int,
     method: str = "randomized",
     block_size: int = 256,
+    matvec_strategy: str = "loop",
 ) -> AttentionTrackerFeatures:
     """All AttentionTracker features via matrix-free blocked operations.
 
@@ -91,6 +121,7 @@ def compute_attention_tracker_features_matrix_free(
         rank: Number of singular values to compute.
         method: SVD algorithm ("randomized" or "lanczos").
         block_size: Block size for blocked-streaming matvecs.
+        matvec_strategy: "loop", "batched", or "triton".
 
     Returns:
         AttentionTrackerFeatures with sigma2, sigma2_asym, commutator_norm.
@@ -105,19 +136,27 @@ def compute_attention_tracker_features_matrix_free(
     matvec = lambda v: apply_A_blocked(Q, K, v, scale, block_size)
     matvec_t = lambda u: apply_AT_blocked(Q, K, u, scale, block_size)
 
+    mv_batch, mv_t_batch = _build_A_batch_callables(
+        Q, K, scale, block_size, matvec_strategy
+    )
+
     if method == "lanczos":
         _, S, _ = svd_via_lanczos(
             matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device)
         )
     else:
-        _, S, _ = randomized_svd(matvec, matvec_t, L, k, device=str(device))
+        _, S, _ = randomized_svd(
+            matvec, matvec_t, L, k, device=str(device),
+            matvec_batch=mv_batch, matvec_t_batch=mv_t_batch,
+        )
 
     S_sorted, _ = torch.sort(S, descending=True)
     sigma2 = S_sorted[1].item() if len(S_sorted) > 1 else 0.0
 
     # --- sigma2_asym via existing hodge.py (d_k_inv_sqrt=ones -> M=A) ---
     sigma2_asym = compute_sigma2_asym_matrix_free(
-        Q, K, ones, scale, block_size, method
+        Q, K, ones, scale, block_size, method,
+        matvec_strategy=matvec_strategy,
     )
 
     # --- ||A||_F via existing svd.py (d_k_inv_sqrt=ones -> ||M||_F = ||A||_F) ---

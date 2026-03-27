@@ -113,3 +113,39 @@ def test_frozen_root():
     config = GlassboxConfig()
     with pytest.raises(ValidationError):
         config.output = "foo.jsonl"
+
+
+# --- matvec_strategy ---
+
+
+def test_matvec_strategy_default():
+    config = GlassboxConfig()
+    assert config.matvec_strategy == "auto"
+
+
+def test_matvec_strategy_explicit():
+    for val in ("loop", "batched", "triton"):
+        config = GlassboxConfig(matvec_strategy=val)
+        assert config.matvec_strategy == val
+
+
+def test_matvec_strategy_invalid():
+    with pytest.raises(ValidationError):
+        GlassboxConfig(matvec_strategy="invalid")
+
+
+def test_matvec_strategy_yaml(tmp_path, monkeypatch):
+    (tmp_path / "glassbox.yaml").write_text("matvec_strategy: batched\n")
+    monkeypatch.chdir(tmp_path)
+    config = GlassboxConfig()
+    assert config.matvec_strategy == "batched"
+
+
+def test_resolve_matvec_strategy_passthrough():
+    for val in ("loop", "batched", "triton"):
+        assert GlassboxConfig.resolve_matvec_strategy(val) == val
+
+
+def test_resolve_matvec_strategy_auto():
+    result = GlassboxConfig.resolve_matvec_strategy("auto")
+    assert result in ("batched", "triton")

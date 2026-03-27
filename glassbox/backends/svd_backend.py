@@ -260,6 +260,15 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # Cast to float if FP8
         return k_flat.float()
 
+    def _resolve_strategy(self) -> str:
+        """Resolve matvec_strategy once (cached on class)."""
+        cls = type(self)
+        if not hasattr(cls, "_resolved_strategy"):
+            cls._resolved_strategy = GlassboxConfig.resolve_matvec_strategy(
+                self.config.matvec_strategy
+            )
+        return cls._resolved_strategy
+
     def _run_svd(
         self,
         layer_name: str,
@@ -341,6 +350,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             Kh,
             rank=cfg.rank,
             method=cfg.method,
+            matvec_strategy=self._resolve_strategy(),
         )
         snapshot = SVDSnapshot(
             feature_group="scores_matrix",
@@ -400,6 +410,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 pilot_size=cfg.hodge_pilot_size,
                 min_samples=cfg.hodge_min_samples,
                 seed=cfg.hodge_curl_seed,
+                matvec_strategy=self._resolve_strategy(),
             )
 
         snapshot = SVDSnapshot(
@@ -439,6 +450,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             tier = "matrix_free"
             features = compute_attention_tracker_features_matrix_free(
                 Qh, Kh, scale, rank=k, method=cfg.method, block_size=cfg.block_size,
+                matvec_strategy=self._resolve_strategy(),
             )
 
         snapshot = SVDSnapshot(
