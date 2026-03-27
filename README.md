@@ -144,8 +144,6 @@ These come from the singular values and routing decomposition of the normalized 
 
 The routing and Hodge-style metrics live in `glassbox/hodge.py`. The feature schemas are defined in `glassbox/results.py`.
 
-NOTE: `sigma2_asym` and `commutator_norm` are not yet implemented for the matrix-free normalized-operator path.
-
 
 ### More features coming soon
 
