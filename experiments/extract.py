@@ -27,6 +27,13 @@ from pathlib import Path
 
 import click
 
+from glassbox.results import (
+    SPECTRAL_FEATURE_NAMES,
+    AttentionDiagonalFeatures,
+    DegreeNormalizedFeatures,
+    SVDSnapshot,
+)
+
 # ── Constants ──────────────────────────────────────────────────────────────
 
 DEFAULT_MODEL = "facebook/opt-125m"
@@ -112,13 +119,6 @@ def load_dataset_samples(
     log(f"Loaded {len(samples)} samples ({n_pos} positive / {len(samples) - n_pos} negative)")
     return samples
 
-from glassbox.results import (
-    SPECTRAL_FEATURE_NAMES,
-    AttentionDiagonalFeatures,
-    DegreeNormalizedFeatures,
-    SVDSnapshot,
-)
-
 
 _SKIP_FEATURE_FIELDS = {"singular_values"}  # list fields that don't belong in the wide parquet
 
@@ -130,10 +130,7 @@ _HODGE_FEATURE_NAMES = [
 ]
 
 # AttentionDiagonal feature names derived from AttentionDiagonalFeatures model
-_AD_FEATURE_NAMES = [
-    f"ad_{f}"
-    for f in AttentionDiagonalFeatures.model_fields
-]
+_AD_FEATURE_NAMES = [f"ad_{f}" for f in AttentionDiagonalFeatures.model_fields]
 
 
 _META_COLUMNS = ["request_id", "label", "length", "sample_id", "phase", "prompt_length", "source"]
@@ -154,9 +151,7 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
         if k in _SKIP_FEATURE_FIELDS:
             continue
         if not isinstance(v, (int, float)):
-            raise TypeError(
-                f"Unexpected non-scalar feature {k!r}: {type(v).__name__} = {v!r}"
-            )
+            raise TypeError(f"Unexpected non-scalar feature {k!r}: {type(v).__name__} = {v!r}")
         if k in SPECTRAL_FEATURE_NAMES:
             result[k] = v
         else:
@@ -180,7 +175,9 @@ def _build_feature_columns(
     if scores_matrix:
         signals.append(("scores_matrix", list(SPECTRAL_FEATURE_NAMES)))
     if degree_normalized:
-        signals.append(("degree_normalized_matrix", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES))
+        signals.append(
+            ("degree_normalized_matrix", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES)
+        )
     if attention_diagonal:
         signals.append(("attention_diagonal", list(_AD_FEATURE_NAMES)))
 
@@ -244,7 +241,10 @@ def _write_parquet(
 
     # Signal prefixes are present when multiple signals are enabled
     use_signal_prefix = any(
-        col.startswith("scores_matrix_") or col.startswith("degree_normalized_matrix_") or col.startswith("attention_tracker_") or col.startswith("attention_diagonal_")
+        col.startswith("scores_matrix_")
+        or col.startswith("degree_normalized_matrix_")
+        or col.startswith("attention_tracker_")
+        or col.startswith("attention_diagonal_")
         for col in feature_columns[:1]
     )
 
@@ -264,7 +264,9 @@ def _write_parquet(
         meta = sample_meta[rid]
         for required in ("label", "sample_id", "phase"):
             if required not in meta:
-                raise KeyError(f"request_id {rid} missing required field {required!r} in samples.jsonl")
+                raise KeyError(
+                    f"request_id {rid} missing required field {required!r} in samples.jsonl"
+                )
         wide["label"] = meta["label"]
         wide["length"] = length
         wide["sample_id"] = meta["sample_id"]
@@ -309,7 +311,8 @@ def _write_parquet(
                         extra = set(row.keys()) - schema_cols
                         if extra:
                             raise ValueError(
-                                f"Pivoted row has columns not in schema (would be silently dropped): {extra}"
+                                f"Pivoted row has columns not in schema"
+                                f" (would be silently dropped): {extra}"
                             )
                         checked_first_row = True
                     wide_rows.append(row)
@@ -334,18 +337,14 @@ def _write_parquet(
         log(f"No data written to {out_path}")
         return
 
-    log(
-        f"Parquet saved: {out_path} ({total_rows} rows, {len(feature_columns)} feature columns)"
-    )
+    log(f"Parquet saved: {out_path} ({total_rows} rows, {len(feature_columns)} feature columns)")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 
 @click.command()
-@click.option(
-    "--model", default=DEFAULT_MODEL, show_default=True, help="HuggingFace model name."
-)
+@click.option("--model", default=DEFAULT_MODEL, show_default=True, help="HuggingFace model name.")
 @click.option(
     "--dataset",
     "dataset_name",
@@ -362,7 +361,11 @@ def _write_parquet(
     help="HuggingFace org hosting the pre-split datasets.",
 )
 @click.option(
-    "--max-samples", default=None, type=int, show_default=True, help="Max samples to process (default: all)."
+    "--max-samples",
+    default=None,
+    type=int,
+    show_default=True,
+    help="Max samples to process (default: all).",
 )
 @click.option("--svd-rank", default=4, show_default=True, help="SVD rank (k).")
 @click.option(
@@ -437,9 +440,7 @@ def main(
     if dataset_name == "all":
         all_samples: list[dict] = []
         for name in DATASET_REGISTRY:
-            all_samples.extend(
-                load_dataset_samples(name, max_samples, hf_org=hf_org)
-            )
+            all_samples.extend(load_dataset_samples(name, max_samples, hf_org=hf_org))
         samples = all_samples
     else:
         samples = load_dataset_samples(dataset_name, max_samples, hf_org=hf_org)
@@ -472,9 +473,7 @@ def main(
     log(f"Results directory: {outdir}")
     log(f"Model: {model}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
-    log(
-        f"SVD: rank={svd_rank}, method={method or 'randomized'}"
-    )
+    log(f"SVD: rank={svd_rank}, method={method or 'randomized'}")
     if heads:
         log(f"Heads: {list(heads)}")
     if degree_normalized:
@@ -484,7 +483,8 @@ def main(
 
     if not scores_matrix and not degree_normalized and not attention_diagonal:
         raise click.UsageError(
-            "At least one of --scores-matrix, --degree-normalized, or --attention-diagonal must be enabled."
+            "At least one of --scores-matrix, --degree-normalized,"
+            " or --attention-diagonal must be enabled."
         )
 
     # Configure glassbox backend
@@ -515,7 +515,6 @@ def main(
         if threshold is not None:
             ad_cfg["threshold"] = threshold
         gb_kwargs["attention_diagonal"] = ad_cfg
-
 
     gb_config = GlassboxConfig(**gb_kwargs)
     svd_mod.SVDTritonAttentionImpl.config = gb_config
@@ -587,7 +586,9 @@ def main(
     log(f"  svd features: {svd_features_path}")
 
     if parquet:
-        feature_columns = _build_feature_columns(num_layers, heads, scores_matrix, degree_normalized, attention_diagonal)
+        feature_columns = _build_feature_columns(
+            num_layers, heads, scores_matrix, degree_normalized, attention_diagonal
+        )
         parquet_path = outdir / "features.parquet"
         _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)
 

@@ -368,5 +368,5 @@ This produces:
 
 ## Benchmarks
 
-Comming soon.
+Coming soon.
 
