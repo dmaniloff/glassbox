@@ -31,9 +31,7 @@ def test_programmatic_kwargs():
 
 
 def test_programmatic_kwargs_degree_normalized():
-    config = GlassboxConfig(
-        degree_normalized_matrix={"enabled": True, "threshold": 1024}
-    )
+    config = GlassboxConfig(degree_normalized_matrix={"enabled": True, "threshold": 1024})
     assert config.degree_normalized_matrix.enabled is True
     assert config.degree_normalized_matrix.threshold == 1024
     assert config.degree_normalized_matrix.rank == 4  # default preserved
@@ -51,9 +49,7 @@ def test_attention_tracker_defaults():
 
 
 def test_programmatic_kwargs_attention_tracker():
-    config = GlassboxConfig(
-        attention_tracker={"enabled": True, "interval": 16, "threshold": 256}
-    )
+    config = GlassboxConfig(attention_tracker={"enabled": True, "interval": 16, "threshold": 256})
     assert config.attention_tracker.enabled is True
     assert config.attention_tracker.interval == 16
     assert config.attention_tracker.threshold == 256
@@ -70,12 +66,7 @@ def test_yaml_loading(tmp_path, monkeypatch):
 
 
 def test_yaml_attention_tracker(tmp_path, monkeypatch):
-    yaml_content = (
-        "attention_tracker:\n"
-        "  enabled: true\n"
-        "  interval: 64\n"
-        "  threshold: 1024\n"
-    )
+    yaml_content = "attention_tracker:\n  enabled: true\n  interval: 64\n  threshold: 1024\n"
     (tmp_path / "glassbox.yaml").write_text(yaml_content)
     monkeypatch.chdir(tmp_path)
     config = GlassboxConfig()
@@ -114,9 +105,7 @@ def test_frozen_nested():
 
 
 def test_programmatic_kwargs_attention_diagonal():
-    config = GlassboxConfig(
-        attention_diagonal={"enabled": True, "interval": 16, "heads": [0, 1]}
-    )
+    config = GlassboxConfig(attention_diagonal={"enabled": True, "interval": 16, "heads": [0, 1]})
     assert config.attention_diagonal.enabled is True
     assert config.attention_diagonal.interval == 16
     assert config.attention_diagonal.heads == [0, 1]
@@ -124,12 +113,7 @@ def test_programmatic_kwargs_attention_diagonal():
 
 
 def test_yaml_attention_diagonal(tmp_path, monkeypatch):
-    yaml_content = (
-        "attention_diagonal:\n"
-        "  enabled: true\n"
-        "  interval: 64\n"
-        "  heads: [0, 2, 4]\n"
-    )
+    yaml_content = "attention_diagonal:\n  enabled: true\n  interval: 64\n  heads: [0, 2, 4]\n"
     (tmp_path / "glassbox.yaml").write_text(yaml_content)
     monkeypatch.chdir(tmp_path)
     config = GlassboxConfig()

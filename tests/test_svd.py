@@ -1,11 +1,12 @@
 import math
 
-import torch
 import pytest
+import torch
 
 from glassbox.svd import (
     apply_A_blocked,
     apply_AT_blocked,
+    compare_svd_results,
     compute_degree_normalized_M,
     compute_dk_blocked,
     compute_logsumexp_blocked,
@@ -18,7 +19,6 @@ from glassbox.svd import (
     matvec_ST,
     randomized_svd,
     svd_via_lanczos,
-    compare_svd_results,
 )
 
 L = 8
@@ -30,8 +30,13 @@ def qk():
     torch.manual_seed(42)
     Q = torch.randn(L, D)
     K = torch.randn(L, D)
-    matvec = lambda x: matvec_S(Q, K, x)
-    matvec_t = lambda x: matvec_ST(Q, K, x)
+
+    def matvec(x):
+        return matvec_S(Q, K, x)
+
+    def matvec_t(x):
+        return matvec_ST(Q, K, x)
+
     return Q, K, matvec, matvec_t
 
 
@@ -184,8 +189,12 @@ def test_svd_M_randomized_vs_direct():
     M, _, d_k_inv_sqrt = compute_degree_normalized_M(A)
     sigma_ref = torch.linalg.svdvals(M)[:4]
 
-    matvec = lambda v: matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale)
-    matvec_t = lambda u: matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale)
+    def matvec(v):
+        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale)
+
+    def matvec_t(u):
+        return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale)
+
     _, S_rand, _ = randomized_svd(matvec, matvec_t, L_test, 4, device="cpu")
 
     S_sorted, _ = torch.sort(S_rand, descending=True)
@@ -209,8 +218,13 @@ def test_two_tier_agreement():
 
     # Matrix-free
     _, d_k_inv_sqrt_mf = compute_dk_blocked(Q, K, scale)
-    matvec = lambda v: matvec_M_blocked(Q, K, v, d_k_inv_sqrt_mf, scale)
-    matvec_t = lambda u: matvec_MT_blocked(Q, K, u, d_k_inv_sqrt_mf, scale)
+
+    def matvec(v):
+        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt_mf, scale)
+
+    def matvec_t(u):
+        return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt_mf, scale)
+
     _, S_mf, _ = randomized_svd(matvec, matvec_t, L_test, 4, device="cpu")
     S_mf_sorted, _ = torch.sort(S_mf, descending=True)
 

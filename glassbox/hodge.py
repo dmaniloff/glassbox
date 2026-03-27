@@ -23,8 +23,6 @@ from functools import lru_cache
 
 import torch
 
-EPSILON = 1e-10
-
 from glassbox.results import DegreeNormalizedFeatures
 from glassbox.svd import (
     compute_logsumexp_blocked,
@@ -37,6 +35,8 @@ from glassbox.svd import (
     randomized_svd,
     svd_via_lanczos,
 )
+
+EPSILON = 1e-10
 
 # ---------------------------------------------------------------------------
 # Triangle sampling (ported from shade.functional.hodge_ops)
@@ -66,9 +66,7 @@ def sample_triangles(n: int, n_samples: int, seed: int = 42) -> torch.Tensor:
         batch_size = remaining * 3  # oversample 3x
         raw = torch.randint(0, n, (batch_size, 3), generator=gen)
         raw_sorted, _ = raw.sort(dim=1)
-        valid = (raw_sorted[:, 0] < raw_sorted[:, 1]) & (
-            raw_sorted[:, 1] < raw_sorted[:, 2]
-        )
+        valid = (raw_sorted[:, 0] < raw_sorted[:, 1]) & (raw_sorted[:, 1] < raw_sorted[:, 2])
         for row in raw_sorted[valid]:
             key = (row[0].item(), row[1].item(), row[2].item())
             if key not in seen:
@@ -77,9 +75,7 @@ def sample_triangles(n: int, n_samples: int, seed: int = 42) -> torch.Tensor:
                 remaining -= 1
                 if remaining <= 0:
                     break
-    return (
-        torch.stack(collected) if collected else torch.zeros((0, 3), dtype=torch.int64)
-    )
+    return torch.stack(collected) if collected else torch.zeros((0, 3), dtype=torch.int64)
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +230,7 @@ def compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size=256):
         col_idx = torch.arange(L, device=Q.device)
         ii_exp = col_idx.unsqueeze(1).expand(L, i1 - i0).reshape(-1)
         jj_exp = row_idx.unsqueeze(0).expand(L, i1 - i0).reshape(-1)
-        M_T_entries = get_M_entries_batch(
-            Q, K, lse, d_k_inv_sqrt, scale, ii_exp, jj_exp
-        )
+        M_T_entries = get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, ii_exp, jj_exp)
         M_T_block = M_T_entries.reshape(L, i1 - i0).T  # [bs, L]
         inner_sq = inner_sq + (M_block * M_T_block).sum()
 
@@ -263,21 +257,18 @@ def compute_sigma2_asym_matrix_free(
     L = Q.shape[0]
     device = Q.device
 
-    matvec_asym = lambda v: matvec_Masym_blocked(
-        Q, K, v, d_k_inv_sqrt, scale, block_size
-    )
-    matvec_asym_t = lambda v: -matvec_Masym_blocked(
-        Q, K, v, d_k_inv_sqrt, scale, block_size
-    )
+    def matvec_asym(v):
+        return matvec_Masym_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
+
+    def matvec_asym_t(v):
+        return -matvec_Masym_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
 
     k = min(2, L - 1)
     if k < 2:
         return 0.0
 
     if svd_method == "lanczos":
-        _, S, _ = svd_via_lanczos(
-            matvec_asym, matvec_asym_t, L, k, max(2 * k + 2, 20), str(device)
-        )
+        _, S, _ = svd_via_lanczos(matvec_asym, matvec_asym_t, L, k, max(2 * k + 2, 20), str(device))
     else:
         _, S, _ = randomized_svd(matvec_asym, matvec_asym_t, L, k, device=str(device))
 
@@ -356,13 +347,14 @@ def compute_routing_features_matrix_free(
     # --- SVD of M for sigma2, phi_hat ---
     k = min(max(rank, 2), L - 1)
 
-    matvec = lambda v: matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
-    matvec_t = lambda u: matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size)
+    def matvec(v):
+        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
+
+    def matvec_t(u):
+        return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size)
 
     if svd_method == "lanczos":
-        _, S, _ = svd_via_lanczos(
-            matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device)
-        )
+        _, S, _ = svd_via_lanczos(matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device))
     else:
         _, S, _ = randomized_svd(matvec, matvec_t, L, k, device=str(device))
 
@@ -397,9 +389,7 @@ def compute_routing_features_matrix_free(
     curl_ratio = C / (G + EPSILON)
 
     # --- sigma2_asym (matrix-free) ---
-    sigma2_asym = compute_sigma2_asym_matrix_free(
-        Q, K, d_k_inv_sqrt, scale, block_size, svd_method
-    )
+    sigma2_asym = compute_sigma2_asym_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, svd_method)
 
     # --- commutator_norm (Hutchinson, matrix-free) ---
     commutator_norm = estimate_commutator_norm_matrix_free(

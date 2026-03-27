@@ -38,9 +38,7 @@ class ScoresMatrixFeatures(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     # Raw singular values
-    singular_values: list[float] = Field(
-        description="Singular values of S (descending)."
-    )
+    singular_values: list[float] = Field(description="Singular values of S (descending).")
 
     # Spectral (derived from singular_values)
     sv1: float | None = Field(None, description="Leading singular value of S.")
@@ -67,9 +65,7 @@ class DegreeNormalizedFeatures(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     # Raw singular values
-    singular_values: list[float] = Field(
-        description="Singular values of M (descending)."
-    )
+    singular_values: list[float] = Field(description="Singular values of M (descending).")
 
     # Spectral (derived from singular_values)
     sv1: float | None = Field(None, description="Leading singular value of M.")
@@ -84,9 +80,7 @@ class DegreeNormalizedFeatures(BaseModel):
         description="Conductance (1 - sigma2). High = bottlenecked through one mode.",
     )
     sigma2: float | None = Field(None, description="Second singular value of M.")
-    G: float | None = Field(
-        None, description="Total asymmetry: ||M_asym||_F / ||M||_F."
-    )
+    G: float | None = Field(None, description="Total asymmetry: ||M_asym||_F / ||M||_F.")
     Gamma: float | None = Field(
         None, description="Gradient coefficient: potential-driven portion of asymmetry."
     )
@@ -97,12 +91,12 @@ class DegreeNormalizedFeatures(BaseModel):
     curl_ratio: float | None = Field(
         None, description="C / (G + eps). Share of asymmetry that is circulatory."
     )
-    sigma2_asym: float | None = Field(
-        None, description="Second singular value of M_asym."
-    )
+    sigma2_asym: float | None = Field(None, description="Second singular value of M_asym.")
     commutator_norm: float | None = Field(
         None,
-        description="||[M_sym, M_asym]||_F / ||M||_F. Entanglement of symmetric and antisymmetric parts.",
+        description=(
+            "||[M_sym, M_asym]||_F / ||M||_F. Entanglement of symmetric and antisymmetric parts."
+        ),
     )
 
     @classmethod
@@ -132,9 +126,7 @@ class AttentionTrackerFeatures(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     # Raw singular values of A
-    singular_values: list[float] = Field(
-        description="Singular values of A (descending)."
-    )
+    singular_values: list[float] = Field(description="Singular values of A (descending).")
 
     # Spectral (derived from singular_values)
     sv1: float | None = Field(None, description="Leading singular value of A.")
@@ -150,7 +142,9 @@ class AttentionTrackerFeatures(BaseModel):
     )
     commutator_norm: float | None = Field(
         None,
-        description="||[A_sym, A_asym]||_F / ||A||_F. Coupling of symmetric and antisymmetric parts.",
+        description=(
+            "||[A_sym, A_asym]||_F / ||A||_F. Coupling of symmetric and antisymmetric parts."
+        ),
     )
 
     @classmethod
@@ -180,13 +174,13 @@ class AttentionDiagonalFeatures(BaseModel):
     )
 
 
-
 class SVDSnapshot(BaseModel):
     """One SVD observation emitted per (request, layer, head, step)."""
 
     model_config = ConfigDict(frozen=True)
 
-    feature_group: str  # "scores_matrix" | "degree_normalized_matrix" | "attention_tracker" | "attention_diagonal"
+    # "scores_matrix" | "degree_normalized_matrix" | "attention_tracker" | "attention_diagonal"
+    feature_group: str
     request_id: int
     layer: str
     layer_idx: int | None
@@ -195,7 +189,12 @@ class SVDSnapshot(BaseModel):
     L: int
     singular_values: list[float] = []
     tier: str | None = None  # "materialized" | "matrix_free"
-    features: ScoresMatrixFeatures | DegreeNormalizedFeatures | AttentionTrackerFeatures | AttentionDiagonalFeatures
+    features: (
+        ScoresMatrixFeatures
+        | DegreeNormalizedFeatures
+        | AttentionTrackerFeatures
+        | AttentionDiagonalFeatures
+    )
 
     @classmethod
     def from_jsonl_row(cls, raw: dict) -> SVDSnapshot:

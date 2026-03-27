@@ -3,7 +3,8 @@ Matrix-free SVD algorithms and spectral feature computation.
 
 A = softmax(QK^T / sqrt(d))
 M = Dq_inv_sqrt * A * Dk_inv_sqrt
-M is NOT symmetric in general. We compute SVD, not eigen-decomposition, using matrix–vector products with M and M^T
+M is NOT symmetric in general. We compute SVD, not eigen-decomposition,
+using matrix-vector products with M and M^T.
 """
 
 from __future__ import annotations
@@ -59,9 +60,7 @@ def compute_dk_blocked(Q, K, scale, block_size=256, epsilon=1e-10):
     """
     ones = torch.ones(Q.shape[0], device=Q.device, dtype=Q.dtype)
     d_k = apply_AT_blocked(Q, K, ones, scale, block_size)
-    d_k_inv_sqrt = torch.where(
-        d_k > epsilon, 1.0 / torch.sqrt(d_k), torch.zeros_like(d_k)
-    )
+    d_k_inv_sqrt = torch.where(d_k > epsilon, 1.0 / torch.sqrt(d_k), torch.zeros_like(d_k))
     return d_k, d_k_inv_sqrt
 
 
@@ -108,11 +107,11 @@ def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256):
 
 def compute_degree_normalized_M(A, epsilon=1e-10):
     """
-    Compute the degree-normalized cross-operator M from attention matrix A (materialized version).
+    Compute degree-normalized cross-operator M from attention matrix A (materialized).
 
     SHADE paper (Section 3.2.2, Equation 1): M = D_Q^{-1/2} @ A @ D_K^{-1/2}.
-    M is a matrix whose structure reflects the pattern of information routing independent of degree heterogeneity,
-    making spectral properties (singular values, asymmetry) comparable across heads and layers.
+    M reflects information routing independent of degree heterogeneity,
+    making spectral properties comparable across heads and layers.
 
     Args:
         A: Attention matrix of shape (n_q, n_k)
@@ -132,12 +131,8 @@ def compute_degree_normalized_M(A, epsilon=1e-10):
     d_k = A.sum(dim=0)
 
     # Moore-Penrose pseudoinverse: zero out near-zero degrees
-    d_q_inv_sqrt = torch.where(
-        d_q > epsilon, 1.0 / torch.sqrt(d_q), torch.zeros_like(d_q)
-    )
-    d_k_inv_sqrt = torch.where(
-        d_k > epsilon, 1.0 / torch.sqrt(d_k), torch.zeros_like(d_k)
-    )
+    d_q_inv_sqrt = torch.where(d_q > epsilon, 1.0 / torch.sqrt(d_q), torch.zeros_like(d_q))
+    d_k_inv_sqrt = torch.where(d_k > epsilon, 1.0 / torch.sqrt(d_k), torch.zeros_like(d_k))
 
     M = (d_q_inv_sqrt[:, None] * A) * d_k_inv_sqrt[None, :]
 
@@ -295,7 +290,9 @@ def lanczos(operator, dim, k, iters, device):
 
 def _principal_angles(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     """
-    Principal angles between column spaces of A and B (both (dim, k), assumed orthonormal-ish).
+    Principal angles between column spaces of A and B.
+
+    Both inputs are (dim, k), assumed approximately orthonormal.
     Returns angles in radians, length k, sorted ascending.
     """
     # Orthonormalize for stability.
@@ -390,9 +387,7 @@ def compare_svd_results(matvec, matvec_t, U1, S1, V1, U2, S2, V2, trials: int = 
     for i in range(k):
         s = torch.max(S1s[i], S2s[i]).clamp(min=1e-12)
         mv_res_list.append(torch.linalg.norm(matvec(V2[:, i]) - S2s[i] * U2[:, i]) / s)
-        mtu_res_list.append(
-            torch.linalg.norm(matvec_t(U2[:, i]) - S2s[i] * V2[:, i]) / s
-        )
+        mtu_res_list.append(torch.linalg.norm(matvec_t(U2[:, i]) - S2s[i] * V2[:, i]) / s)
     mv_res: torch.Tensor = torch.stack(mv_res_list)
     mtu_res: torch.Tensor = torch.stack(mtu_res_list)
 
@@ -445,8 +440,11 @@ def compute_scores_matrix_features(
     device = Q.device
     k = min(rank, L - 1)
 
-    mv = lambda v: matvec_S(Q, K, v)
-    mv_t = lambda u: matvec_ST(Q, K, u)
+    def mv(v):
+        return matvec_S(Q, K, v)
+
+    def mv_t(u):
+        return matvec_ST(Q, K, u)
 
     if method == "lanczos":
         _, S, _ = svd_via_lanczos(mv, mv_t, L, k, max(2 * k + 2, 20), str(device))

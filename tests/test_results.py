@@ -97,9 +97,7 @@ class TestAttentionTrackerFeatures:
         assert f.commutator_norm == 0.03
 
     def test_frozen(self):
-        f = AttentionTrackerFeatures.from_attention_tracker(
-            singular_values=[1.0], sigma2=0.5
-        )
+        f = AttentionTrackerFeatures.from_attention_tracker(singular_values=[1.0], sigma2=0.5)
         with pytest.raises(Exception):
             f.sigma2 = 0.9
 

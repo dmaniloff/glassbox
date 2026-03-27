@@ -36,11 +36,11 @@ from glassbox.attention_diagonal import (
     compute_attention_diagonal_features_materialized,
     compute_attention_diagonal_features_matrix_free,
 )
-from glassbox.config import GlassboxConfig
 from glassbox.attention_tracker import (
     compute_attention_tracker_features_materialized,
     compute_attention_tracker_features_matrix_free,
 )
+from glassbox.config import GlassboxConfig
 from glassbox.hodge import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
@@ -116,7 +116,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     # Class-level output file handle; mutable.
     # Same rationale as other class-level state: vLLM may create one attention
     # impl per layer (many instances of SVDTritonAttentionImpl).
-    # By keeping one handle on the class (_output_fh), every layer uses the same open file.
+    # Keeping one handle on the class so every layer writes to the same file.
     _output_fh: IO | None = None
 
     def forward(
@@ -223,9 +223,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                     run_attn_diag=attn_diag_due,
                 )
             except Exception:
-                logger.exception(
-                    "[SVD] error in layer %s at step %d", layer_name, state.step
-                )
+                logger.exception("[SVD] error in layer %s at step %d", layer_name, state.step)
 
         return result
 
@@ -295,7 +293,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # from the end.
         L = min(L_q, L_k)
         if L < 2:
-            return  # SVD on a 1-token score matrix is degenerate (single singular value)
+            return  # degenerate: single singular value
         Q_all = Q_all[:L]
         K_all = K_all[:L]
 
@@ -322,27 +320,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
             if run_spectral and head_idx in self.config.scores_matrix.heads:
                 self._run_svd_scores(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if (
-                run_normalized
-                and head_idx in self.config.degree_normalized_matrix.heads
-            ):
-                self._run_svd_normalized(
-                    layer_name, layer_idx, state, head_idx, Qh, Kh, L
-                )
-            if (
-                run_attention_tracker
-                and head_idx in self.config.attention_tracker.heads
-            ):
-                self._run_attention_tracker(
-                    layer_name, layer_idx, state, head_idx, Qh, Kh, L
-                )
-            if (
-                run_attn_diag
-                and head_idx in self.config.attention_diagonal.heads
-            ):
-                self._run_attn_diag(
-                    layer_name, layer_idx, state, head_idx, Qh, Kh, L
-                )
+            if run_normalized and head_idx in self.config.degree_normalized_matrix.heads:
+                self._run_svd_normalized(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+            if run_attention_tracker and head_idx in self.config.attention_tracker.heads:
+                self._run_attention_tracker(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+            if run_attn_diag and head_idx in self.config.attention_diagonal.heads:
+                self._run_attn_diag(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
 
     def _run_svd_scores(
         self,
@@ -458,7 +441,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         else:
             tier = "matrix_free"
             features = compute_attention_tracker_features_matrix_free(
-                Qh, Kh, scale, rank=k, method=cfg.method, block_size=cfg.block_size,
+                Qh,
+                Kh,
+                scale,
+                rank=k,
+                method=cfg.method,
+                block_size=cfg.block_size,
             )
 
         snapshot = SVDSnapshot(
@@ -496,7 +484,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         else:
             tier = "matrix_free"
             features = compute_attention_diagonal_features_matrix_free(
-                Qh, Kh, scale, block_size=cfg.block_size,
+                Qh,
+                Kh,
+                scale,
+                block_size=cfg.block_size,
             )
 
         snapshot = SVDSnapshot(
@@ -519,9 +510,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if self.config.output:
             if cls._output_fh is None:
                 cls._output_fh = open(self.config.output, "a")
-            cls._output_fh.write(
-                json.dumps(snapshot.model_dump(exclude_none=True)) + "\n"
-            )
+            cls._output_fh.write(json.dumps(snapshot.model_dump(exclude_none=True)) + "\n")
             cls._output_fh.flush()
         else:
             if snapshot.singular_values:
