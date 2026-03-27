@@ -8,6 +8,7 @@ def test_defaults():
     config = GlassboxConfig()
     assert config.scores_matrix.enabled is True
     assert config.degree_normalized_matrix.enabled is False
+    assert config.attention_diagonal.enabled is False
     assert config.scores_matrix.interval == 32
     assert config.scores_matrix.rank == 4
     assert config.scores_matrix.method == "randomized"
@@ -17,6 +18,9 @@ def test_defaults():
     assert config.degree_normalized_matrix.hodge_confidence == 0.95
     assert config.degree_normalized_matrix.hodge_pilot_size == 100
     assert config.degree_normalized_matrix.hodge_min_samples == 200
+    assert config.attention_diagonal.interval == 32
+    assert config.attention_diagonal.threshold == 512
+    assert config.attention_diagonal.heads == [0]
     assert config.output is None
 
 
@@ -107,6 +111,31 @@ def test_frozen_nested():
     config = GlassboxConfig()
     with pytest.raises(ValidationError):
         config.scores_matrix.interval = 99
+
+
+def test_programmatic_kwargs_attention_diagonal():
+    config = GlassboxConfig(
+        attention_diagonal={"enabled": True, "interval": 16, "heads": [0, 1]}
+    )
+    assert config.attention_diagonal.enabled is True
+    assert config.attention_diagonal.interval == 16
+    assert config.attention_diagonal.heads == [0, 1]
+    assert config.attention_diagonal.threshold == 512  # default preserved
+
+
+def test_yaml_attention_diagonal(tmp_path, monkeypatch):
+    yaml_content = (
+        "attention_diagonal:\n"
+        "  enabled: true\n"
+        "  interval: 64\n"
+        "  heads: [0, 2, 4]\n"
+    )
+    (tmp_path / "glassbox.yaml").write_text(yaml_content)
+    monkeypatch.chdir(tmp_path)
+    config = GlassboxConfig()
+    assert config.attention_diagonal.enabled is True
+    assert config.attention_diagonal.interval == 64
+    assert config.attention_diagonal.heads == [0, 2, 4]
 
 
 def test_frozen_root():

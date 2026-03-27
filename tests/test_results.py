@@ -2,6 +2,7 @@ import pytest
 
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
+    AttentionDiagonalFeatures,
     AttentionTrackerFeatures,
     DegreeNormalizedFeatures,
     ScoresMatrixFeatures,
@@ -178,6 +179,42 @@ class TestSVDSnapshot:
         restored = SVDSnapshot.from_jsonl_row(d)
         assert restored.features.phi_hat == 0.3
         assert restored.features.sv_ratio == pytest.approx(2.0)
+
+
+# ── AttentionDiagonalFeatures ─────────────────────────────────────────────
+
+
+class TestAttentionDiagonalFeatures:
+    def test_construction(self):
+        f = AttentionDiagonalFeatures(attn_diag_logmean=-2.5)
+        assert f.attn_diag_logmean == -2.5
+
+    def test_frozen(self):
+        f = AttentionDiagonalFeatures(attn_diag_logmean=-1.0)
+        with pytest.raises(Exception):
+            f.attn_diag_logmean = 0.0
+
+
+class TestAttentionDiagonalSnapshot:
+    def test_round_trip(self):
+        features = AttentionDiagonalFeatures(attn_diag_logmean=-3.2)
+        snap = SVDSnapshot(
+            feature_group="attention_diagonal",
+            request_id=0,
+            layer="model.layers.0.self_attn",
+            layer_idx=0,
+            head=0,
+            step=32,
+            L=128,
+            tier="materialized",
+            features=features,
+        )
+        d = snap.model_dump(exclude_none=True)
+        assert d["singular_values"] == []
+        assert d["features"]["attn_diag_logmean"] == -3.2
+        restored = SVDSnapshot.from_jsonl_row(d)
+        assert isinstance(restored.features, AttentionDiagonalFeatures)
+        assert restored.features.attn_diag_logmean == -3.2
 
 
 # ── SPECTRAL_FEATURE_NAMES ────────────────────────────────────────────────

@@ -55,6 +55,18 @@ class AttentionTrackerConfig(BaseModel):
     block_size: int = 256
 
 
+class AttentionDiagonalConfig(BaseModel):
+    """Mean log self-attention weight from LLM-Check (NeurIPS 2024)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    interval: int = 32
+    heads: list[int] = [0]
+    threshold: int = 512
+    block_size: int = 256
+
+
 class GlassboxConfig(BaseSettings):
     """Root configuration for the Glassbox observability framework.
 
@@ -75,6 +87,7 @@ class GlassboxConfig(BaseSettings):
         DegreeNormalizedMatrixConfig()
     )
     attention_tracker: AttentionTrackerConfig = AttentionTrackerConfig()
+    attention_diagonal: AttentionDiagonalConfig = AttentionDiagonalConfig()
     output: str | None = None
 
     @classmethod
