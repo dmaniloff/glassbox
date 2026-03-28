@@ -83,9 +83,7 @@ class GlassboxConfig(BaseSettings):
     )
 
     scores_matrix: ScoresMatrixConfig = ScoresMatrixConfig()
-    degree_normalized_matrix: DegreeNormalizedMatrixConfig = (
-        DegreeNormalizedMatrixConfig()
-    )
+    degree_normalized_matrix: DegreeNormalizedMatrixConfig = DegreeNormalizedMatrixConfig()
     attention_tracker: AttentionTrackerConfig = AttentionTrackerConfig()
     attention_diagonal: AttentionDiagonalConfig = AttentionDiagonalConfig()
     output: str | None = None

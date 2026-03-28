@@ -1,0 +1,13 @@
+default_install_hook_types:
+  - pre-commit
+default_stages:
+  - pre-commit
+  - manual
+exclude: '^(benchmarks/results|experiments/results)/'
+repos:
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.14.7
+  hooks:
+  - id: ruff-check
+    args: [--output-format, github, --fix]
+  - id: ruff-format

@@ -133,9 +133,7 @@ def plot_violin_pointrange(
                     alpha=0.7,
                     zorder=6,
                 )
-                ax.plot(
-                    x, med, "o", color="white", ms=4.5, mec=color, mew=1.2, zorder=7
-                )
+                ax.plot(x, med, "o", color="white", ms=4.5, mec=color, mew=1.2, zorder=7)
 
             # ── Strip dots (size = seq length) ────────────────────────
             jitter_base = -0.28 if side == "left" else 0.22
@@ -156,9 +154,7 @@ def plot_violin_pointrange(
 
             # Legend entry (first panel only)
             if ax_i == 0:
-                ax.plot(
-                    [], [], color=color, lw=6, alpha=0.5, label=LABEL_NAMES[label_val]
-                )
+                ax.plot([], [], color=color, lw=6, alpha=0.5, label=LABEL_NAMES[label_val])
 
         if show_zero_line:
             ax.axhline(y=0, color="gray", lw=0.8, ls="--", alpha=0.5)
@@ -254,9 +250,7 @@ def _analyze_signal(
 
     n_samples = df["sample_idx"].nunique()
     n_layers = df["layer_idx"].nunique()
-    log(
-        f"[{signal_label}] {len(df)} snapshots from {n_samples} samples across {n_layers} layers"
-    )
+    log(f"[{signal_label}] {len(df)} snapshots from {n_samples} samples across {n_layers} layers")
 
     # ── Per-layer correlation table ───────────────────────────────────────
     agg = df.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
@@ -348,9 +342,7 @@ def _analyze_signal(
     for agg_name, agg_fn in [("mean", np.nanmean), ("max", np.nanmax)]:
         row_str = f"{agg_name:>6s}"
         for feat in features:
-            feat_cols = [
-                (feat, li) for li in layer_ids if (feat, li) in sample_layer_agg.columns
-            ]
+            feat_cols = [(feat, li) for li in layer_ids if (feat, li) in sample_layer_agg.columns]
             if not feat_cols:
                 row_str += f" | {'n/a':>20s}"
                 continue
@@ -378,9 +370,7 @@ def _analyze_signal(
     for (li, feat), (r, _) in corr_matrix.items():
         corr_data.loc[li, feat] = r
 
-    fig, ax = plt.subplots(
-        figsize=(max(6, len(features) * 1.5), max(4, len(layer_ids) * 0.5))
-    )
+    fig, ax = plt.subplots(figsize=(max(6, len(features) * 1.5), max(4, len(layer_ids) * 0.5)))
     sns.heatmap(
         corr_data.astype(float),
         annot=True,
@@ -396,9 +386,7 @@ def _analyze_signal(
     ax.set_xlabel("Feature")
     ax.set_title(f"Point-Biserial Correlation — {signal_label}")
     plt.tight_layout()
-    plt.savefig(
-        str(plot_dir / f"{signal_name}_heatmap.png"), dpi=150, bbox_inches="tight"
-    )
+    plt.savefig(str(plot_dir / f"{signal_name}_heatmap.png"), dpi=150, bbox_inches="tight")
     plt.close()
     log(f"Heatmap saved to {signal_name}_heatmap.png")
 
@@ -408,9 +396,7 @@ def _analyze_signal(
         for (li, feat), (auc, _, _) in auroc_matrix.items():
             auroc_data.loc[li, feat] = auc
 
-        fig, ax = plt.subplots(
-            figsize=(max(6, len(features) * 1.5), max(4, len(layer_ids) * 0.5))
-        )
+        fig, ax = plt.subplots(figsize=(max(6, len(features) * 1.5), max(4, len(layer_ids) * 0.5)))
         sns.heatmap(
             auroc_data.astype(float),
             annot=True,
@@ -482,7 +468,8 @@ def _analyze_signal(
         )
         plt.close()
         log(
-            f"Feature vs length scatter saved to {signal_name}_feature_vs_length_layer{best_layer}.png"
+            f"Feature vs length scatter saved to"
+            f" {signal_name}_feature_vs_length_layer{best_layer}.png"
         )
 
     # ── Two-phase analysis (evaluate mode) ────────────────────────────────
@@ -497,14 +484,10 @@ def _analyze_signal(
         agg_q = df_q.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
         agg_f = df_f.groupby(["sample_idx", "layer_idx"])[features].mean().reset_index()
 
-        merged_phases = agg_q.merge(
-            agg_f, on=["sample_idx", "layer_idx"], suffixes=("_q", "_f")
-        )
+        merged_phases = agg_q.merge(agg_f, on=["sample_idx", "layer_idx"], suffixes=("_q", "_f"))
         delta_features = [f"{f}_delta" for f in features]
         for feat in features:
-            merged_phases[f"{feat}_delta"] = (
-                merged_phases[f"{feat}_f"] - merged_phases[f"{feat}_q"]
-            )
+            merged_phases[f"{feat}_delta"] = merged_phases[f"{feat}_f"] - merged_phases[f"{feat}_q"]
 
         merged_phases = merged_phases.merge(labels.reset_index(), on="sample_idx")
 
@@ -533,9 +516,7 @@ def _analyze_signal(
 
         # Global delta row
         click.echo("")
-        global_delta = (
-            merged_phases.groupby("sample_idx")[delta_features].mean().reset_index()
-        )
+        global_delta = merged_phases.groupby("sample_idx")[delta_features].mean().reset_index()
         global_delta = global_delta.merge(labels.reset_index(), on="sample_idx")
         row_str = f"{'ALL':>6s}"
         for feat in delta_features:
@@ -577,9 +558,7 @@ def _analyze_signal(
 
         # Plot: Delta correlation heatmap
         if delta_corr:
-            delta_corr_data = pd.DataFrame(
-                index=layer_ids, columns=delta_features, dtype=float
-            )
+            delta_corr_data = pd.DataFrame(index=layer_ids, columns=delta_features, dtype=float)
             for (li, feat), (r, _) in delta_corr.items():
                 delta_corr_data.loc[li, feat] = r
 
@@ -613,13 +592,11 @@ def _analyze_signal(
         L_by_sample = (
             df_f.groupby("sample_idx")["L"].max().reset_index()
             if "L" in df_f.columns
-            else pd.DataFrame(
-                {"sample_idx": merged_phases["sample_idx"].unique(), "L": 0}
-            )
+            else pd.DataFrame({"sample_idx": merged_phases["sample_idx"].unique(), "L": 0})
         )
-        delta_dist_df = merged_phases[
-            ["sample_idx", "layer_idx", "label"] + delta_features
-        ].merge(L_by_sample, on="sample_idx", how="left")
+        delta_dist_df = merged_phases[["sample_idx", "layer_idx", "label"] + delta_features].merge(
+            L_by_sample, on="sample_idx", how="left"
+        )
 
         delta_feat_labels = [f"\u0394 {fl}" for fl in feat_plot_labels]
         plot_violin_pointrange(
@@ -680,11 +657,7 @@ def _build_summary(df_all, signals, labels, layer_ids, has_phases):
 
         features = list(SPECTRAL_FEATURE_NAMES)
         hodge_cols = sorted(
-            [
-                c
-                for c in df_sig.columns
-                if c.startswith("hodge_") and df_sig[c].notna().any()
-            ]
+            [c for c in df_sig.columns if c.startswith("hodge_") and df_sig[c].notna().any()]
         )
         features.extend(hodge_cols)
 
@@ -722,9 +695,7 @@ def _build_summary(df_all, signals, labels, layer_ids, has_phases):
                 {
                     "signal": prefix,
                     "feature": feat_clean,
-                    "best_layer": best_layer
-                    if best_layer is not None
-                    else best_auc_layer,
+                    "best_layer": best_layer if best_layer is not None else best_auc_layer,
                     "r": best_r,
                     "p": best_p,
                     "auc": best_auc,
@@ -750,9 +721,7 @@ def _print_summary_table(summary_rows):
     click.echo("-" * 95)
 
     for row in summary_rows:
-        layer_str = (
-            f"L{row['best_layer']}" if row["best_layer"] is not None else "  n/a"
-        )
+        layer_str = f"L{row['best_layer']}" if row["best_layer"] is not None else "  n/a"
         sig = "**" if row["p"] < 0.01 else ("*" if row["p"] < 0.05 else " ")
 
         if row["auc_lo"] is not None:
@@ -850,18 +819,14 @@ def _plot_summary_heatmap(corr_grid, auroc_grid, layer_ids, out_path):
 @click.command()
 @click.argument("results_dir", type=click.Path(exists=True, file_okay=False))
 @click.option("--output-dir", default=None, help="Override plot output directory.")
-@click.option(
-    "--detailed", is_flag=True, help="Run per-signal detailed analysis with all plots."
-)
+@click.option("--detailed", is_flag=True, help="Run per-signal detailed analysis with all plots.")
 def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
     """Analyze spectral features and correlate with hallucination labels."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import numpy as np
     import pandas as pd
-    import seaborn as sns
 
     base = Path(results_dir)
     plot_dir = Path(output_dir) if output_dir else base
@@ -924,9 +889,7 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
 
     df_all = df_all.merge(df_samples[join_cols], on="request_id", how="left")
 
-    has_phases = "phase" in df_all.columns and {"question", "full"} <= set(
-        df_all["phase"].unique()
-    )
+    has_phases = "phase" in df_all.columns and {"question", "full"} <= set(df_all["phase"].unique())
 
     # Normalize sample_idx column
     if "sample_id" in df_all.columns:
@@ -972,11 +935,7 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
     layer_ids = sorted(df_stats["layer_idx"].unique())
 
     # ── Per-signal analysis ───────────────────────────────────────────────
-    signals = (
-        sorted(df_all["signal"].unique())
-        if "signal" in df_all.columns
-        else ["scores_matrix"]
-    )
+    signals = sorted(df_all["signal"].unique()) if "signal" in df_all.columns else ["scores_matrix"]
     log(f"Signals found: {signals}")
 
     # ── Bird's-eye summary (always) ───────────────────────────────────────
@@ -1025,11 +984,7 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
 
         # Add hodge features if present (degree_normalized_matrix with hodge=True)
         hodge_cols = sorted(
-            [
-                c
-                for c in df_sig.columns
-                if c.startswith("hodge_") and df_sig[c].notna().any()
-            ]
+            [c for c in df_sig.columns if c.startswith("hodge_") and df_sig[c].notna().any()]
         )
         if hodge_cols:
             features.extend(hodge_cols)
@@ -1058,9 +1013,7 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
     if "L" in df_len.columns:
         sample_length = df_len.groupby("sample_idx")["L"].max().reset_index()
         sample_length = sample_length.merge(labels.reset_index(), on="sample_idx")
-        sample_length["label_str"] = sample_length["label"].map(
-            {0: "Correct", 1: "Hallucinated"}
-        )
+        sample_length["label_str"] = sample_length["label"].map({0: "Correct", 1: "Hallucinated"})
 
         fig, ax = plt.subplots(figsize=(8, 5))
         for lv, ls, c in [(0, "Correct", "steelblue"), (1, "Hallucinated", "tomato")]:

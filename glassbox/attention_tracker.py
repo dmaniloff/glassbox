@@ -102,13 +102,14 @@ def compute_attention_tracker_features_matrix_free(
     # --- SVD of A for sigma2 ---
     k = min(max(rank, 2), L - 1)
 
-    matvec = lambda v: apply_A_blocked(Q, K, v, scale, block_size)
-    matvec_t = lambda u: apply_AT_blocked(Q, K, u, scale, block_size)
+    def matvec(v):
+        return apply_A_blocked(Q, K, v, scale, block_size)
+
+    def matvec_t(u):
+        return apply_AT_blocked(Q, K, u, scale, block_size)
 
     if method == "lanczos":
-        _, S, _ = svd_via_lanczos(
-            matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device)
-        )
+        _, S, _ = svd_via_lanczos(matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device))
     else:
         _, S, _ = randomized_svd(matvec, matvec_t, L, k, device=str(device))
 
@@ -116,17 +117,13 @@ def compute_attention_tracker_features_matrix_free(
     sigma2 = S_sorted[1].item() if len(S_sorted) > 1 else 0.0
 
     # --- sigma2_asym via existing hodge.py (d_k_inv_sqrt=ones -> M=A) ---
-    sigma2_asym = compute_sigma2_asym_matrix_free(
-        Q, K, ones, scale, block_size, method
-    )
+    sigma2_asym = compute_sigma2_asym_matrix_free(Q, K, ones, scale, block_size, method)
 
     # --- ||A||_F via existing svd.py (d_k_inv_sqrt=ones -> ||M||_F = ||A||_F) ---
     A_fro = compute_M_fro_norm_blocked(Q, K, ones, scale, block_size).item()
 
     # --- commutator_norm via existing hodge.py (d_k_inv_sqrt=ones -> M=A) ---
-    commutator_norm = estimate_commutator_norm_matrix_free(
-        Q, K, ones, scale, A_fro, block_size
-    )
+    commutator_norm = estimate_commutator_norm_matrix_free(Q, K, ones, scale, A_fro, block_size)
 
     return AttentionTrackerFeatures.from_attention_tracker(
         singular_values=S_sorted[:k].cpu().tolist(),

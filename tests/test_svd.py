@@ -1,11 +1,12 @@
 import math
 
-import torch
 import pytest
+import torch
 
 from glassbox.svd import (
     apply_A_blocked,
     apply_AT_blocked,
+    compare_svd_results,
     compute_degree_normalized_M,
     compute_dk_blocked,
     compute_logsumexp_blocked,
@@ -18,7 +19,6 @@ from glassbox.svd import (
     matvec_ST,
     randomized_svd,
     svd_via_lanczos,
-    compare_svd_results,
 )
 
 L = 8
@@ -30,8 +30,13 @@ def qk():
     torch.manual_seed(42)
     Q = torch.randn(L, D)
     K = torch.randn(L, D)
-    matvec = lambda x: matvec_S(Q, K, x)
-    matvec_t = lambda x: matvec_ST(Q, K, x)
+
+    def matvec(x):
+        return matvec_S(Q, K, x)
+
+    def matvec_t(x):
+        return matvec_ST(Q, K, x)
+
     return Q, K, matvec, matvec_t
 
 
@@ -184,8 +189,12 @@ def test_svd_M_randomized_vs_direct():
     M, _, d_k_inv_sqrt = compute_degree_normalized_M(A)
     sigma_ref = torch.linalg.svdvals(M)[:4]
 
-    matvec = lambda v: matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale)
-    matvec_t = lambda u: matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale)
+    def matvec(v):
+        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale)
+
+    def matvec_t(u):
+        return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale)
+
     _, S_rand, _ = randomized_svd(matvec, matvec_t, L_test, 4, device="cpu")
 
     S_sorted, _ = torch.sort(S_rand, descending=True)
@@ -209,8 +218,13 @@ def test_two_tier_agreement():
 
     # Matrix-free
     _, d_k_inv_sqrt_mf = compute_dk_blocked(Q, K, scale)
-    matvec = lambda v: matvec_M_blocked(Q, K, v, d_k_inv_sqrt_mf, scale)
-    matvec_t = lambda u: matvec_MT_blocked(Q, K, u, d_k_inv_sqrt_mf, scale)
+
+    def matvec(v):
+        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt_mf, scale)
+
+    def matvec_t(u):
+        return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt_mf, scale)
+
     _, S_mf, _ = randomized_svd(matvec, matvec_t, L_test, 4, device="cpu")
     S_mf_sorted, _ = torch.sort(S_mf, descending=True)
 
@@ -246,17 +260,25 @@ def test_compute_scores_matrix_features_vs_torch():
 
 
 def test_compute_scores_matrix_features_lanczos_vs_randomized():
-    """Both SVD methods should agree on scores-matrix features."""
+    """Both SVD methods should approximate the true singular values well."""
     torch.manual_seed(99)
     L_test = 32
     D_test = 8
     Q = torch.randn(L_test, D_test)
     K = torch.randn(L_test, D_test)
 
+    # Ground truth via exact SVD
+    S = Q @ K.T
+    sigma_exact = torch.linalg.svdvals(S)[:4].tolist()
+
     f_rand = compute_scores_matrix_features(Q, K, rank=4, method="randomized")
     f_lanc = compute_scores_matrix_features(Q, K, rank=4, method="lanczos")
 
-    for sv_r, sv_l in zip(f_rand.singular_values, f_lanc.singular_values):
-        assert abs(sv_r - sv_l) < 0.05, f"method mismatch: {sv_r} vs {sv_l}"
-
-    assert abs(f_rand.sv_ratio - f_lanc.sv_ratio) < 0.1
+    # Each method should be within 1% relative error of the exact values
+    for method_name, f in [("randomized", f_rand), ("lanczos", f_lanc)]:
+        for sv_approx, sv_true in zip(f.singular_values, sigma_exact):
+            rel_err = abs(sv_approx - sv_true) / max(abs(sv_true), 1e-6)
+            assert rel_err < 0.01, (
+                f"{method_name} sv mismatch: got {sv_approx}, expected {sv_true} "
+                f"(rel_err={rel_err:.3f})"
+            )

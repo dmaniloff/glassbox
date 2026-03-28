@@ -67,7 +67,10 @@ logger = logging.getLogger(__name__)
     "--operator",
     type=click.Choice(["S", "M", "A", "diag"]),
     default=None,
-    help="Operator: S=scores, M=degree-normalized, A=attention-tracker, diag=attention diagonal. [default: from config (S)]",
+    help=(
+        "Operator: S=scores, M=degree-normalized, A=attention-tracker,"
+        " diag=attention diagonal. [default: from config (S)]"
+    ),
 )
 @click.option(
     "--threshold",
@@ -266,7 +269,8 @@ def main(
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
     logger.info(
-        "Config: scores_matrix=%s degree_normalized_matrix=%s attention_tracker=%s attention_diagonal=%s",
+        "Config: scores_matrix=%s degree_normalized_matrix=%s"
+        " attention_tracker=%s attention_diagonal=%s",
         "enabled" if config.scores_matrix.enabled else "disabled",
         "enabled" if config.degree_normalized_matrix.enabled else "disabled",
         "enabled" if config.attention_tracker.enabled else "disabled",

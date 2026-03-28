@@ -1,28 +1,29 @@
 """
-Glassbox - A library for instrumenting and inspecting torch graph compilation.
+Glassbox - Observability for transformer attention internals on vLLM.
+
+Extracts spectral, topological, and statistical signals from attention
+matrices during inference via a custom vLLM attention backend plugin.
+No vLLM source modifications required.
+
+The plugin is registered automatically via the ``vllm.general_plugins``
+entry point when the package is installed.  Launch vLLM with
+``--attention-backend CUSTOM --enforce-eager`` to activate it.
 """
 
+from glassbox.config import GlassboxConfig
+from glassbox.results import (
+    AttentionDiagonalFeatures,
+    AttentionTrackerFeatures,
+    DegreeNormalizedFeatures,
+    ScoresMatrixFeatures,
+    SVDSnapshot,
+)
 
-def __getattr__(name):
-    if name in (
-        "PostAttentionInjector",
-        "create_post_attention_injector",
-        "custom_ops",
-    ):
-        from .passes import (
-            PostAttentionInjector,
-            create_post_attention_injector,
-            custom_ops,
-        )
-
-        _exports = {
-            "PostAttentionInjector": PostAttentionInjector,
-            "create_post_attention_injector": create_post_attention_injector,
-            "custom_ops": custom_ops,
-        }
-        globals().update(_exports)
-        return _exports[name]
-    raise AttributeError(f"module 'glassbox' has no attribute {name!r}")
-
-
-__all__ = ["PostAttentionInjector", "create_post_attention_injector"]
+__all__ = [
+    "GlassboxConfig",
+    "SVDSnapshot",
+    "ScoresMatrixFeatures",
+    "DegreeNormalizedFeatures",
+    "AttentionTrackerFeatures",
+    "AttentionDiagonalFeatures",
+]

@@ -78,13 +78,9 @@ class TestMaterializedVsMatrixFree:
         A = torch.softmax(Q @ K.T * scale, dim=-1)
 
         mat = compute_attention_diagonal_features_materialized(A)
-        mf = compute_attention_diagonal_features_matrix_free(
-            Q, K, scale, block_size=32
-        )
+        mf = compute_attention_diagonal_features_matrix_free(Q, K, scale, block_size=32)
         # Should be numerically identical (same computation, different order)
-        assert mat.attn_diag_logmean == pytest.approx(
-            mf.attn_diag_logmean, abs=1e-4
-        )
+        assert mat.attn_diag_logmean == pytest.approx(mf.attn_diag_logmean, abs=1e-4)
 
     def test_agreement_small_blocks(self):
         """Tiny block_size to exercise the loop edge cases."""
@@ -95,12 +91,8 @@ class TestMaterializedVsMatrixFree:
         A = torch.softmax(Q @ K.T * scale, dim=-1)
 
         mat = compute_attention_diagonal_features_materialized(A)
-        mf = compute_attention_diagonal_features_matrix_free(
-            Q, K, scale, block_size=7
-        )
-        assert mat.attn_diag_logmean == pytest.approx(
-            mf.attn_diag_logmean, abs=1e-4
-        )
+        mf = compute_attention_diagonal_features_matrix_free(Q, K, scale, block_size=7)
+        assert mat.attn_diag_logmean == pytest.approx(mf.attn_diag_logmean, abs=1e-4)
 
 
 class TestFrozen:

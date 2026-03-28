@@ -44,9 +44,7 @@ class BaseAttentionInjector(InductorPass):
             try:
                 from tabulate import tabulate
 
-                node_specs = [
-                    [n.op, n.name, n.target, n.args, n.kwargs] for n in graph.nodes
-                ]
+                node_specs = [[n.op, n.name, n.target, n.args, n.kwargs] for n in graph.nodes]
                 f.write(
                     tabulate(
                         node_specs,
@@ -78,9 +76,7 @@ class BaseAttentionInjector(InductorPass):
         return nodes
 
     @abstractmethod
-    def _inject_instrumentation(
-        self, graph: torch.fx.Graph, attention_node: fx.Node
-    ) -> None:
+    def _inject_instrumentation(self, graph: torch.fx.Graph, attention_node: fx.Node) -> None:
         """Inject instrumentation for a single attention node."""
         pass
 
@@ -111,9 +107,7 @@ class PostAttentionInjector(BaseAttentionInjector):
 
         self._write_graph_to_file(graph, self.demo_dir / "graph_after.txt")
 
-    def _inject_instrumentation(
-        self, graph: torch.fx.Graph, attention_node: fx.Node
-    ) -> None:
+    def _inject_instrumentation(self, graph: torch.fx.Graph, attention_node: fx.Node) -> None:
         """
         Inject instrumentation after an attention node.
 
@@ -153,9 +147,7 @@ class PostAttentionInjector(BaseAttentionInjector):
                     delete_user_cb=lambda n: n is not instrumentation_node,
                 )
 
-                print(
-                    f"Injected instrumentation after attention output at {att_output_node.name}"
-                )
+                print(f"Injected instrumentation after attention output at {att_output_node.name}")
 
 
 def create_post_attention_injector(custom_op: Callable):
@@ -199,9 +191,7 @@ class BeforeAttentionInjector(BaseAttentionInjector):
 
         self._write_graph_to_file(graph, self.demo_dir / "graph_after_qkv.txt")
 
-    def _inject_instrumentation(
-        self, graph: torch.fx.Graph, attention_node: fx.Node
-    ) -> None:
+    def _inject_instrumentation(self, graph: torch.fx.Graph, attention_node: fx.Node) -> None:
         """
         Inject instrumentation before an attention node, intercepting Q, K, V.
 
@@ -217,9 +207,7 @@ class BeforeAttentionInjector(BaseAttentionInjector):
         v_node = attention_node.kwargs.get("value")
 
         if q_node is None or k_node is None or v_node is None:
-            print(
-                f"Warning: Could not find Q, K, V for attention node at {attention_node.name}"
-            )
+            print(f"Warning: Could not find Q, K, V for attention node at {attention_node.name}")
             return
 
         # Insert the custom op before the attention node
@@ -232,15 +220,9 @@ class BeforeAttentionInjector(BaseAttentionInjector):
             )
 
             # Extract the individual q, k, v outputs from the tuple
-            new_q = graph.call_function(
-                operator.getitem, args=(instrumentation_node, 0)
-            )
-            new_k = graph.call_function(
-                operator.getitem, args=(instrumentation_node, 1)
-            )
-            new_v = graph.call_function(
-                operator.getitem, args=(instrumentation_node, 2)
-            )
+            new_q = graph.call_function(operator.getitem, args=(instrumentation_node, 0))
+            new_k = graph.call_function(operator.getitem, args=(instrumentation_node, 1))
+            new_v = graph.call_function(operator.getitem, args=(instrumentation_node, 2))
 
         # Update the attention node to use the new q, k, v
         new_kwargs = dict(attention_node.kwargs)

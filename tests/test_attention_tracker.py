@@ -19,7 +19,6 @@ from glassbox.svd import (
     matvec_M_blocked,
 )
 
-
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
@@ -83,25 +82,19 @@ class TestMaterialized:
 class TestMatrixFree:
     def test_returns_correct_type(self):
         Q, K, scale, _ = _make_A(32, 16)
-        feats = compute_attention_tracker_features_matrix_free(
-            Q, K, scale, rank=4, block_size=16
-        )
+        feats = compute_attention_tracker_features_matrix_free(Q, K, scale, rank=4, block_size=16)
         assert isinstance(feats, AttentionTrackerFeatures)
 
     def test_fields_populated(self):
         Q, K, scale, _ = _make_A(32, 16)
-        feats = compute_attention_tracker_features_matrix_free(
-            Q, K, scale, rank=4, block_size=16
-        )
+        feats = compute_attention_tracker_features_matrix_free(Q, K, scale, rank=4, block_size=16)
         assert feats.sigma2 is not None
         assert feats.sigma2_asym is not None
         assert feats.commutator_norm is not None
 
     def test_value_ranges(self):
         Q, K, scale, _ = _make_A(32, 16)
-        feats = compute_attention_tracker_features_matrix_free(
-            Q, K, scale, rank=4, block_size=16
-        )
+        feats = compute_attention_tracker_features_matrix_free(Q, K, scale, rank=4, block_size=16)
         assert feats.sigma2 >= 0
         assert feats.sigma2_asym >= 0
         assert feats.commutator_norm >= 0
@@ -116,9 +109,7 @@ class TestAgreement:
     def _compare(self, L, D, seed):
         Q, K, scale, A = _make_A(L, D, seed=seed)
         mat = compute_attention_tracker_features_materialized(A, rank=4)
-        mf = compute_attention_tracker_features_matrix_free(
-            Q, K, scale, rank=4, block_size=16
-        )
+        mf = compute_attention_tracker_features_matrix_free(Q, K, scale, rank=4, block_size=16)
         return mat, mf
 
     def test_sigma2_agreement(self):
@@ -139,7 +130,8 @@ class TestAgreement:
         for seed in [42, 123, 456]:
             mat, mf = self._compare(32, 16, seed)
             assert abs(mat.commutator_norm - mf.commutator_norm) < 0.15, (
-                f"commutator_norm mismatch seed={seed}: mat={mat.commutator_norm}, mf={mf.commutator_norm}"
+                f"commutator_norm mismatch seed={seed}:"
+                f" mat={mat.commutator_norm}, mf={mf.commutator_norm}"
             )
 
 
@@ -162,7 +154,9 @@ class TestMathProperties:
         A = (A + A.T) / 2  # force exact symmetry after softmax
         feats = compute_attention_tracker_features_materialized(A, rank=4)
         assert feats.sigma2_asym < 1e-6, f"sigma2_asym should be ~0, got {feats.sigma2_asym}"
-        assert feats.commutator_norm < 1e-6, f"commutator_norm should be ~0, got {feats.commutator_norm}"
+        assert feats.commutator_norm < 1e-6, (
+            f"commutator_norm should be ~0, got {feats.commutator_norm}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +182,4 @@ class TestOnesTrick:
         ones = torch.ones(Q.shape[0])
         fro_mf = compute_M_fro_norm_blocked(Q, K, ones, scale, block_size=16).item()
         fro_mat = torch.linalg.norm(A, "fro").item()
-        assert abs(fro_mf - fro_mat) < 1e-4, (
-            f"||A||_F mismatch: mf={fro_mf}, mat={fro_mat}"
-        )
+        assert abs(fro_mf - fro_mat) < 1e-4, f"||A||_F mismatch: mf={fro_mf}, mat={fro_mat}"

@@ -24,12 +24,12 @@ import torch
 
 from glassbox.hodge import (
     compute_G_materialized,
-    estimate_curl_materialized,
     compute_G_matrix_free,
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
     compute_sigma2_asym_matrix_free,
     estimate_commutator_norm_matrix_free,
+    estimate_curl_materialized,
     estimate_curl_matrix_free,
 )
 from glassbox.svd import (
@@ -105,8 +105,12 @@ def bench_matrix_free(
     M_fro = compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size).item()
 
     k = min(max(rank, 2), L - 1)
-    matvec = lambda v: matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
-    matvec_t = lambda u: matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size)
+
+    def matvec(v):
+        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
+
+    def matvec_t(u):
+        return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size)
 
     timings = {}
 
@@ -454,16 +458,10 @@ def _parse_int_list(ctx, param, value):
     show_default=True,
     help="Comma-separated sequence lengths to sweep.",
 )
-@click.option(
-    "--d-model", type=int, default=64, show_default=True, help="Head dimension."
-)
+@click.option("--d-model", type=int, default=64, show_default=True, help="Head dimension.")
 @click.option("--rank", type=int, default=4, show_default=True, help="SVD rank.")
-@click.option(
-    "--block-size", type=int, default=256, show_default=True, help="Block size."
-)
-@click.option(
-    "--warmup", type=int, default=2, show_default=True, help="Warmup iterations."
-)
+@click.option("--block-size", type=int, default=256, show_default=True, help="Block size.")
+@click.option("--warmup", type=int, default=2, show_default=True, help="Warmup iterations.")
 @click.option(
     "--repeats",
     type=int,
@@ -506,9 +504,7 @@ def main(
     lengths_list = list(lengths)
 
     if device != "cpu" and not torch.cuda.is_available():
-        raise click.UsageError(
-            f"Device '{device}' requested but CUDA is not available."
-        )
+        raise click.UsageError(f"Device '{device}' requested but CUDA is not available.")
 
     print(f"Config: d={d_model}, rank={rank}, block_size={block_size}, device={device}")
     print(f"Warmup={warmup}, repeats={repeats}")
@@ -523,12 +519,11 @@ def main(
         comp = bench_comparison(L, d_model, rank, block_size, warmup, repeats, device)
         all_comparisons.append(comp)
         ratio = (
-            comp["matrix_free"] / comp["materialized"]
-            if comp["materialized"] > 0
-            else float("inf")
+            comp["matrix_free"] / comp["materialized"] if comp["materialized"] > 0 else float("inf")
         )
         print(
-            f" mat={_fmt_ms(comp['materialized'])}, mf={_fmt_ms(comp['matrix_free'])} ({ratio:.1f}x)"
+            f" mat={_fmt_ms(comp['materialized'])},"
+            f" mf={_fmt_ms(comp['matrix_free'])} ({ratio:.1f}x)"
         )
 
     print_comparison_report(lengths_list, all_comparisons, d_model, rank)
@@ -556,9 +551,7 @@ def main(
         for L in lengths_list:
             sys.stdout.write(f"  L={L}...")
             sys.stdout.flush()
-            timings = bench_matrix_free(
-                L, d_model, rank, block_size, warmup, repeats, device
-            )
+            timings = bench_matrix_free(L, d_model, rank, block_size, warmup, repeats, device)
             all_mf_timings.append(timings)
             print(f" {_fmt_ms(timings['total'])}")
 
@@ -578,9 +571,7 @@ def main(
                 "warmup": warmup,
                 "repeats": repeats,
             },
-            "comparison": [
-                {"L": L, **c} for L, c in zip(lengths_list, all_comparisons)
-            ],
+            "comparison": [{"L": L, **c} for L, c in zip(lengths_list, all_comparisons)],
         }
         if all_mat_timings:
             output["materialized_components"] = [
