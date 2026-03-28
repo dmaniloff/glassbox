@@ -60,12 +60,8 @@ CONFIGS: dict[str, BenchConfig] = {
     for c in [
         BenchConfig("vanilla", "TRITON_ATTN", enforce_eager=False),
         BenchConfig("vanilla_eager", "TRITON_ATTN", enforce_eager=True),
-        BenchConfig(
-            "svd_interval16", "CUSTOM", enforce_eager=True, svd_interval=16, svd_rank=4
-        ),
-        BenchConfig(
-            "svd_interval64", "CUSTOM", enforce_eager=True, svd_interval=64, svd_rank=4
-        ),
+        BenchConfig("svd_interval16", "CUSTOM", enforce_eager=True, svd_interval=16, svd_rank=4),
+        BenchConfig("svd_interval64", "CUSTOM", enforce_eager=True, svd_interval=64, svd_rank=4),
         BenchConfig(
             "svd_interval256",
             "CUSTOM",
@@ -447,19 +443,11 @@ def cli():
     type=click.Choice(CONFIG_ORDER, case_sensitive=False),
     help="Config(s) to run. Omit for all.",
 )
-@click.option(
-    "--list", "list_configs", is_flag=True, help="List available configs and exit."
-)
-@click.option(
-    "--max-seconds", default=60, show_default=True, help="Max seconds per rate level."
-)
-@click.option(
-    "--sweep-size", default=5, show_default=True, help="Number of rate levels in sweep."
-)
+@click.option("--list", "list_configs", is_flag=True, help="List available configs and exit.")
+@click.option("--max-seconds", default=60, show_default=True, help="Max seconds per rate level.")
+@click.option("--sweep-size", default=5, show_default=True, help="Number of rate levels in sweep.")
 @click.option("--port", default=DEFAULT_PORT, show_default=True, help="Server port.")
-@click.option(
-    "--model", default=DEFAULT_MODEL, show_default=True, help="HuggingFace model name."
-)
+@click.option("--model", default=DEFAULT_MODEL, show_default=True, help="HuggingFace model name.")
 @click.option(
     "--request-type",
     "request_type",
@@ -491,9 +479,7 @@ def run(
         return
 
     selected = (
-        [CONFIGS[n] for n in config_names]
-        if config_names
-        else [CONFIGS[n] for n in CONFIG_ORDER]
+        [CONFIGS[n] for n in config_names] if config_names else [CONFIGS[n] for n in CONFIG_ORDER]
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -559,9 +545,7 @@ def compare(results_dir: str) -> None:
         return
 
     # Baseline header + table
-    click.echo(
-        f"Baseline: {format_config_header(baseline.get('_meta'), baseline['name'])}"
-    )
+    click.echo(f"Baseline: {format_config_header(baseline.get('_meta'), baseline['name'])}")
     print_table([{"label": baseline["name"], **baseline}])
 
     # Per-config comparison

@@ -260,17 +260,25 @@ def test_compute_scores_matrix_features_vs_torch():
 
 
 def test_compute_scores_matrix_features_lanczos_vs_randomized():
-    """Both SVD methods should agree on scores-matrix features."""
+    """Both SVD methods should approximate the true singular values well."""
     torch.manual_seed(99)
     L_test = 32
     D_test = 8
     Q = torch.randn(L_test, D_test)
     K = torch.randn(L_test, D_test)
 
+    # Ground truth via exact SVD
+    S = Q @ K.T
+    sigma_exact = torch.linalg.svdvals(S)[:4].tolist()
+
     f_rand = compute_scores_matrix_features(Q, K, rank=4, method="randomized")
     f_lanc = compute_scores_matrix_features(Q, K, rank=4, method="lanczos")
 
-    for sv_r, sv_l in zip(f_rand.singular_values, f_lanc.singular_values):
-        assert abs(sv_r - sv_l) < 0.05, f"method mismatch: {sv_r} vs {sv_l}"
-
-    assert abs(f_rand.sv_ratio - f_lanc.sv_ratio) < 0.1
+    # Each method should be within 1% relative error of the exact values
+    for method_name, f in [("randomized", f_rand), ("lanczos", f_lanc)]:
+        for sv_approx, sv_true in zip(f.singular_values, sigma_exact):
+            rel_err = abs(sv_approx - sv_true) / max(abs(sv_true), 1e-6)
+            assert rel_err < 0.01, (
+                f"{method_name} sv mismatch: got {sv_approx}, expected {sv_true} "
+                f"(rel_err={rel_err:.3f})"
+            )

@@ -164,9 +164,7 @@ def _load_halueval() -> tuple[list[dict], str, bool]:
 def _load_truthfulqa() -> tuple[list[dict], str, bool]:
     """TruthfulQA generation: 30% test split. Expands all answers."""
     logger.info("Loading TruthfulQA (generation)...")
-    ds = hf_datasets.load_dataset(
-        "truthfulqa/truthful_qa", "generation", split="validation"
-    )
+    ds = hf_datasets.load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
     samples = []
     for row in ds:
         question = row.get("question", "")
@@ -209,9 +207,7 @@ def _load_truthfulqa() -> tuple[list[dict], str, bool]:
 def _load_medhallu() -> tuple[list[dict], str, bool]:
     """MedHallu pqa_labeled: 30% test split. Expands each row → 2 samples."""
     logger.info("Loading MedHallu (pqa_labeled)...")
-    ds = hf_datasets.load_dataset(
-        "UTAustin-AIHealth/MedHallu", "pqa_labeled", split="train"
-    )
+    ds = hf_datasets.load_dataset("UTAustin-AIHealth/MedHallu", "pqa_labeled", split="train")
     samples = []
     for row in ds:
         question = row.get("Question", "")
