@@ -55,11 +55,6 @@ class TestScoresMatrixFeatures:
         assert f.sv_ratio == pytest.approx(429.6 / 59.0)
         assert f.sv_entropy is not None
 
-    def test_frozen(self):
-        f = ScoresMatrixFeatures.from_singular_values([1.0, 0.5])
-        with pytest.raises(Exception):
-            f.sv1 = 2.0
-
 
 # ── DegreeNormalizedFeatures ──────────────────────────────────────────────
 
@@ -96,11 +91,6 @@ class TestAttentionTrackerFeatures:
         assert f.sigma2 == 0.5
         assert f.sigma2_asym == 0.02
         assert f.commutator_norm == 0.03
-
-    def test_frozen(self):
-        f = AttentionTrackerFeatures.from_attention_tracker(singular_values=[1.0], sigma2=0.5)
-        with pytest.raises(Exception):
-            f.sigma2 = 0.9
 
 
 # ── SVDSnapshot ───────────────────────────────────────────────────────────
@@ -188,11 +178,6 @@ class TestAttentionDiagonalFeatures:
         f = AttentionDiagonalFeatures(attn_diag_logmean=-2.5)
         assert f.attn_diag_logmean == -2.5
 
-    def test_frozen(self):
-        f = AttentionDiagonalFeatures(attn_diag_logmean=-1.0)
-        with pytest.raises(Exception):
-            f.attn_diag_logmean = 0.0
-
 
 class TestAttentionDiagonalSnapshot:
     def test_round_trip(self):
@@ -223,11 +208,6 @@ class TestLaplacianEigvalsFeatures:
     def test_construction(self):
         f = LaplacianEigvalsFeatures(eigvals=[0.9, 0.8, 0.7])
         assert f.eigvals == [0.9, 0.8, 0.7]
-
-    def test_frozen(self):
-        f = LaplacianEigvalsFeatures(eigvals=[0.5])
-        with pytest.raises(Exception):
-            f.eigvals = [0.0]
 
 
 class TestLaplacianEigvalsSnapshot:

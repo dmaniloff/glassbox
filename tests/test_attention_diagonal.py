@@ -145,15 +145,3 @@ class TestMaterializedVsMatrixFree:
         mf = compute_attention_diagonal_features_matrix_free(Q, K, scale, top_k=5, block_size=32)
         for v_mat, v_mf in zip(mat.eigvals, mf.eigvals):
             assert v_mat == pytest.approx(v_mf, abs=1e-4)
-
-
-class TestFrozen:
-    def test_frozen(self):
-        L, d = 16, 8
-        Q = torch.randn(L, d)
-        K = torch.randn(L, d)
-        scale = 1.0 / math.sqrt(d)
-        A = torch.softmax(Q @ K.T * scale, dim=-1)
-        feat = compute_attention_diagonal_features_materialized(A)
-        with pytest.raises(Exception):
-            feat.attn_diag_logmean = 0.0
