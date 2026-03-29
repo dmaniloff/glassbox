@@ -2,10 +2,10 @@
 Entry-point script that launches vLLM with the custom SVD attention backend.
 
 Usage:
-    python -m glassbox.backends.runner [OPTIONS]
-    python -m glassbox.backends.runner --interval 16 --rank 2 --heads 0,1,2
-    python -m glassbox.backends.runner --model facebook/opt-350m --method lanczos
-    python -m glassbox.backends.runner --config glassbox.yaml
+    glassbox-run [OPTIONS]
+    glassbox-run --interval 16 --rank 2 --heads 0,1,2
+    glassbox-run --model facebook/opt-350m --method lanczos
+    glassbox-run --config glassbox.yaml
 
 Options can also be set via glassbox.yaml or legacy GLASSBOX_SVD_* env vars.
 CLI args take highest precedence.

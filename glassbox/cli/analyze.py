@@ -1,8 +1,8 @@
 """Hallucination correlation analysis for spectral features.
 
 Usage:
-    python experiments/analyze.py experiments/results/<timestamp>
-    python experiments/analyze.py experiments/results/<timestamp> --output-dir plots/
+    glassbox-analyze experiments/results/<timestamp>
+    glassbox-analyze experiments/results/<timestamp> --output-dir plots/
 """
 
 from __future__ import annotations

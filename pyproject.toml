@@ -19,6 +19,11 @@ dev = ["pytest"]
 [tool.setuptools.packages.find]
 include = ["glassbox*"]
 
+[project.scripts]
+glassbox-run = "glassbox.cli.runner:main"
+glassbox-extract = "glassbox.cli.extract:main"
+glassbox-analyze = "glassbox.cli.analyze:main"
+
 [project.entry-points."vllm.general_plugins"]
 glassbox_svd = "glassbox.vllm_plugin:register_svd_backend"
 
