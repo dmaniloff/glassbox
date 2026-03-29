@@ -164,17 +164,25 @@ The computation reuses the same two-tier approach as the degree-normalized opera
 
 The feature computation lives in `glassbox/attention_tracker.py`.
 
-### 4. Attention diagonal features (LLM-Check, NeurIPS 2024)
+### 4. Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)
 
 These come from the diagonal of the post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`.
 
 | Feature | Formula | Meaning |
 |---|---|---|
 | `attn_diag_logmean` | `mean_i(log(A[i,i]))` | Mean log self-attention weight. Higher values indicate stronger self-attention, which correlates with model confidence and factuality |
+| `eigvals` | `topk(diag(A))` | Top-k diagonal values of A (descending). For causal attention these are A's eigenvalues; used as a baseline in LapEigvals |
 
 The matrix-free path avoids materializing `A` by computing `log(A[i,i]) = s_ii - logsumexp_i` where `s_ii = Q[i]·K[i]/sqrt(d)` (O(Ld)) and `logsumexp` is computed blockwise.
 
-Implementation: `glassbox/attention_diagonal.py`. Reference: [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection).
+Implementation: `glassbox/attention_diagonal.py`. References: [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection), [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals).
+
+Two additional LLM-Check extractors require signals the attention backend cannot see:
+
+- **LLMCheckLogitsExtractor** — entropy and perplexity from output logits. Needs the final lm_head output, not Q/K.
+- **HiddenStateCovarianceExtractor** — SVD of centered covariance of hidden states. Needs per-layer hidden states before projection.
+
+These will require either `torch.compile` passes (see `glassbox/passes/`) or vLLM observation hooks.
 
 ### 5. Laplacian eigenvalue features (LapEigvals, EMNLP 2025) — [arXiv:2502.17598](https://arxiv.org/abs/2502.17598)
 
@@ -188,14 +196,9 @@ For causal (lower-triangular) attention matrices, `L` is also triangular, so its
 
 The two-tier approach reuses existing blocked-streaming infrastructure: `apply_AT_blocked` for column sums and `compute_logsumexp_blocked` for the attention diagonal. No SVD or eigendecomposition is performed.
 
+The paper also constructs a **multi-layer graph** where layers are connected by vertical edges weighted by the next layer's self-attention diagonal. This gives richer features but requires cross-layer aggregation; the current implementation covers the single-layer case. The multi-layer variant is planned as a post-processing step over emitted per-layer features.
+
 Implementation: `glassbox/laplacian_eigvals.py`. Reference: [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals).
-
-Two additional LLM-Check extractors require signals the attention backend cannot see:
-
-- **LLMCheckLogitsExtractor** — entropy and perplexity from output logits. Needs the final lm_head output, not Q/K.
-- **HiddenStateCovarianceExtractor** — SVD of centered covariance of hidden states. Needs per-layer hidden states before projection.
-
-These will require either `torch.compile` passes (see `glassbox/passes/`) or vLLM observation hooks.
 
 ### More features coming soon
 
@@ -307,6 +310,7 @@ attention_diagonal:
   enabled: true
   interval: 32
   heads: [0]
+  top_k: 10
   threshold: 512
   block_size: 256
 
@@ -337,6 +341,7 @@ Important knobs:
 | `attention_diagonal.enabled` | Turn on attention diagonal analysis |
 | `attention_diagonal.interval` | Snapshot cadence for diagonal features |
 | `attention_diagonal.heads` | Heads to analyze |
+| `attention_diagonal.top_k` | Number of top diagonal values to keep (0 = omit eigvals) |
 | `attention_diagonal.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `laplacian_eigvals.enabled` | Turn on Laplacian eigenvalue analysis |
 | `laplacian_eigvals.interval` | Snapshot cadence for Laplacian features |

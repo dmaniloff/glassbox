@@ -56,13 +56,14 @@ class AttentionTrackerConfig(BaseModel):
 
 
 class AttentionDiagonalConfig(BaseModel):
-    """Mean log self-attention weight from LLM-Check (NeurIPS 2024)."""
+    """Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)."""
 
     model_config = ConfigDict(frozen=True)
 
     enabled: bool = False
     interval: int = 32
     heads: list[int] = [0]
+    top_k: int = 10
     threshold: int = 512
     block_size: int = 256
 

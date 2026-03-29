@@ -499,13 +499,14 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if L <= cfg.threshold:
             A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
             tier = "materialized"
-            features = compute_attention_diagonal_features_materialized(A)
+            features = compute_attention_diagonal_features_materialized(A, top_k=cfg.top_k)
         else:
             tier = "matrix_free"
             features = compute_attention_diagonal_features_matrix_free(
                 Qh,
                 Kh,
                 scale,
+                top_k=cfg.top_k,
                 block_size=cfg.block_size,
             )
 

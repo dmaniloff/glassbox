@@ -161,16 +161,28 @@ class AttentionTrackerFeatures(BaseModel):
 
 
 class AttentionDiagonalFeatures(BaseModel):
-    """Features from attention matrix diagonal (LLM-Check, NeurIPS 2024).
+    """Features from the attention matrix diagonal.
 
-    Mean log self-attention weight: mean_i(log(A[i,i])).
-    No SVD involved — this is a direct scalar statistic.
+    - ``attn_diag_logmean``: mean log self-attention weight mean_i(log(A[i,i]))
+      from LLM-Check (NeurIPS 2024).
+    - ``eigvals``: top-k diagonal values of A, sorted descending.  For causal
+      (lower-triangular) attention these are the eigenvalues of A, used as a
+      baseline in LapEigvals (EMNLP 2025, arXiv:2502.17598).
+
+    No SVD involved — direct scalar/vector statistics from diag(A).
     """
 
     model_config = ConfigDict(frozen=True)
 
     attn_diag_logmean: float = Field(
         description="Mean of log diagonal of A. Higher = stronger self-attention."
+    )
+    eigvals: list[float] = Field(
+        default=[],
+        description=(
+            "Top-k diagonal values of A, sorted descending"
+            " (attention eigenvalues for causal A)."
+        ),
     )
 
 
