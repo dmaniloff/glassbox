@@ -16,6 +16,7 @@ At configurable intervals during inference, `glassbox` computes features from th
 2. The degree-normalized post-softmax operator `M = D_Q^{-1/2} A D_K^{-1/2}` (Dahlem et al., upcoming)
 3. The raw post-softmax attention matrix `A` — span-independent features from [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348)
 4. The diagonal of `A` — self-attention features from [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024)
+5. The in-degree graph Laplacian `L = D_in - A` — spectral features from [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals) (EMNLP 2025, [arXiv:2502.17598](https://arxiv.org/abs/2502.17598))
 
 For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
 
@@ -163,17 +164,18 @@ The computation reuses the same two-tier approach as the degree-normalized opera
 
 The feature computation lives in `glassbox/attention_tracker.py`.
 
-### 4. Attention diagonal features (LLM-Check, NeurIPS 2024)
+### 4. Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)
 
 These come from the diagonal of the post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`.
 
 | Feature | Formula | Meaning |
 |---|---|---|
 | `attn_diag_logmean` | `mean_i(log(A[i,i]))` | Mean log self-attention weight. Higher values indicate stronger self-attention, which correlates with model confidence and factuality |
+| `eigvals` | `topk(diag(A))` | Top-k diagonal values of A (descending). For causal attention these are A's eigenvalues; used as a baseline in LapEigvals |
 
 The matrix-free path avoids materializing `A` by computing `log(A[i,i]) = s_ii - logsumexp_i` where `s_ii = Q[i]·K[i]/sqrt(d)` (O(Ld)) and `logsumexp` is computed blockwise.
 
-Implementation: `glassbox/attention_diagonal.py`. Reference: [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection).
+Implementation: `glassbox/attention_diagonal.py`. References: [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection), [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals).
 
 Two additional LLM-Check extractors require signals the attention backend cannot see:
 
@@ -181,6 +183,22 @@ Two additional LLM-Check extractors require signals the attention backend cannot
 - **HiddenStateCovarianceExtractor** — SVD of centered covariance of hidden states. Needs per-layer hidden states before projection.
 
 These will require either `torch.compile` passes (see `glassbox/passes/`) or vLLM observation hooks.
+
+### 5. Laplacian eigenvalue features (LapEigvals, EMNLP 2025) — [arXiv:2502.17598](https://arxiv.org/abs/2502.17598)
+
+These come from the in-degree graph Laplacian of the attention matrix: `L = D_in - A`, where `D_in[i,i] = Σ_j A[j,i]` (column sums of `A`). Treating attention as a weighted directed graph, the Laplacian diagonal captures how much attention each token receives from other tokens (in-degree minus self-attention).
+
+For causal (lower-triangular) attention matrices, `L` is also triangular, so its eigenvalues are its diagonal entries — no eigendecomposition needed. The features are the top-k largest diagonal values.
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `eigvals` | `topk(diag(D_in - A))` | Top-k Laplacian diagonal values (descending). Profile of how attention in-degree is distributed across tokens |
+
+The two-tier approach reuses existing blocked-streaming infrastructure: `apply_AT_blocked` for column sums and `compute_logsumexp_blocked` for the attention diagonal. No SVD or eigendecomposition is performed.
+
+The paper also constructs a **multi-layer graph** where layers are connected by vertical edges weighted by the next layer's self-attention diagonal. This gives richer features but requires cross-layer aggregation; the current implementation covers the single-layer case. The multi-layer variant is planned as a post-processing step over emitted per-layer features.
+
+Implementation: `glassbox/laplacian_eigvals.py`. Reference: [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals).
 
 ### More features coming soon
 
@@ -204,7 +222,7 @@ These modulate routing features by the effective LayerNorm gain, with the goal o
 
 The backend emits one JSON object per observation. Each row contains:
 
-- `feature_group`: `scores_matrix`, `degree_normalized_matrix`, `attention_tracker`, or `attention_diagonal`
+- `feature_group`: `scores_matrix`, `degree_normalized_matrix`, `attention_tracker`, `attention_diagonal`, or `laplacian_eigvals`
 - `request_id`
 - `layer` and `layer_idx`
 - `head`
@@ -292,6 +310,15 @@ attention_diagonal:
   enabled: true
   interval: 32
   heads: [0]
+  top_k: 10
+  threshold: 512
+  block_size: 256
+
+laplacian_eigvals:
+  enabled: true
+  interval: 32
+  heads: [0]
+  top_k: 10
   threshold: 512
   block_size: 256
 
@@ -314,7 +341,13 @@ Important knobs:
 | `attention_diagonal.enabled` | Turn on attention diagonal analysis |
 | `attention_diagonal.interval` | Snapshot cadence for diagonal features |
 | `attention_diagonal.heads` | Heads to analyze |
+| `attention_diagonal.top_k` | Number of top diagonal values to keep (0 = omit eigvals) |
 | `attention_diagonal.threshold` | Sequence length cutoff for materialized vs matrix-free |
+| `laplacian_eigvals.enabled` | Turn on Laplacian eigenvalue analysis |
+| `laplacian_eigvals.interval` | Snapshot cadence for Laplacian features |
+| `laplacian_eigvals.heads` | Heads to analyze |
+| `laplacian_eigvals.top_k` | Number of top eigenvalues to keep |
+| `laplacian_eigvals.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `output` | JSONL output path |
 
 ## Running the custom backend
@@ -357,6 +390,7 @@ python experiments/extract.py \
   --degree-normalized \
   --attention-tracker \
   --attention-diagonal \
+  --laplacian-eigvals \
   --parquet
 ```
 

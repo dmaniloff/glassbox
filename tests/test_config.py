@@ -122,6 +122,37 @@ def test_yaml_attention_diagonal(tmp_path, monkeypatch):
     assert config.attention_diagonal.heads == [0, 2, 4]
 
 
+def test_laplacian_eigvals_defaults():
+    config = GlassboxConfig()
+    assert config.laplacian_eigvals.enabled is False
+    assert config.laplacian_eigvals.interval == 32
+    assert config.laplacian_eigvals.heads == [0]
+    assert config.laplacian_eigvals.top_k == 10
+    assert config.laplacian_eigvals.threshold == 512
+    assert config.laplacian_eigvals.block_size == 256
+
+
+def test_programmatic_kwargs_laplacian_eigvals():
+    config = GlassboxConfig(laplacian_eigvals={"enabled": True, "interval": 16, "top_k": 20})
+    assert config.laplacian_eigvals.enabled is True
+    assert config.laplacian_eigvals.interval == 16
+    assert config.laplacian_eigvals.top_k == 20
+    assert config.laplacian_eigvals.threshold == 512  # default preserved
+
+
+def test_yaml_laplacian_eigvals(tmp_path, monkeypatch):
+    yaml_content = (
+        "laplacian_eigvals:\n  enabled: true\n  interval: 64\n  top_k: 25\n  heads: [0, 1, 2]\n"
+    )
+    (tmp_path / "glassbox.yaml").write_text(yaml_content)
+    monkeypatch.chdir(tmp_path)
+    config = GlassboxConfig()
+    assert config.laplacian_eigvals.enabled is True
+    assert config.laplacian_eigvals.interval == 64
+    assert config.laplacian_eigvals.top_k == 25
+    assert config.laplacian_eigvals.heads == [0, 1, 2]
+
+
 def test_frozen_root():
     config = GlassboxConfig()
     with pytest.raises(ValidationError):

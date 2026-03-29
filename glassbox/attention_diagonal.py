@@ -34,26 +34,35 @@ EPSILON = 1e-10
 
 def compute_attention_diagonal_features_materialized(
     A: torch.Tensor,
+    top_k: int = 0,
 ) -> AttentionDiagonalFeatures:
     """Attention diagonal features from a materialized attention matrix.
 
     Args:
         A: Attention matrix of shape (L, L), already softmaxed.
+        top_k: Number of largest diagonal values to keep. 0 = omit eigvals.
 
     Returns:
-        AttentionDiagonalFeatures with attn_diag_logmean.
+        AttentionDiagonalFeatures with attn_diag_logmean and optional eigvals.
     """
     diag_A = A.diag()
     log_diag = torch.log(diag_A + EPSILON)
     attn_diag_logmean = log_diag.mean().item()
 
-    return AttentionDiagonalFeatures(attn_diag_logmean=attn_diag_logmean)
+    eigvals: list[float] = []
+    if top_k > 0:
+        k = min(top_k, diag_A.shape[0])
+        topk_vals, _ = torch.topk(diag_A, k)
+        eigvals = topk_vals.tolist()
+
+    return AttentionDiagonalFeatures(attn_diag_logmean=attn_diag_logmean, eigvals=eigvals)
 
 
 def compute_attention_diagonal_features_matrix_free(
     Q: torch.Tensor,
     K: torch.Tensor,
     scale: float,
+    top_k: int = 0,
     block_size: int = 256,
 ) -> AttentionDiagonalFeatures:
     """Attention diagonal features via blocked computation.
@@ -66,10 +75,11 @@ def compute_attention_diagonal_features_matrix_free(
         Q: Query tensor of shape (L, d).
         K: Key tensor of shape (L, d).
         scale: Attention scale factor (1 / sqrt(d)).
+        top_k: Number of largest diagonal values to keep. 0 = omit eigvals.
         block_size: Block size for blocked logsumexp.
 
     Returns:
-        AttentionDiagonalFeatures with attn_diag_logmean.
+        AttentionDiagonalFeatures with attn_diag_logmean and optional eigvals.
     """
     # Diagonal of scores matrix: s_ii = Q[i] · K[i] * scale
     s_diag = (Q * K).sum(dim=-1) * scale  # [L]
@@ -81,4 +91,11 @@ def compute_attention_diagonal_features_matrix_free(
     log_diag = s_diag - lse  # [L]
     attn_diag_logmean = log_diag.mean().item()
 
-    return AttentionDiagonalFeatures(attn_diag_logmean=attn_diag_logmean)
+    eigvals: list[float] = []
+    if top_k > 0:
+        diag_A = torch.exp(log_diag)  # [L]
+        k = min(top_k, diag_A.shape[0])
+        topk_vals, _ = torch.topk(diag_A, k)
+        eigvals = topk_vals.tolist()
+
+    return AttentionDiagonalFeatures(attn_diag_logmean=attn_diag_logmean, eigvals=eigvals)

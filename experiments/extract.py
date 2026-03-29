@@ -120,7 +120,14 @@ def load_dataset_samples(
     return samples
 
 
-_SKIP_FEATURE_FIELDS = {"singular_values"}  # list fields that don't belong in the wide parquet
+_SKIP_FEATURE_FIELDS = {"singular_values"}  # redundant copy of raw SVs; skip in wide parquet
+
+
+def _is_list_field(model: type, name: str) -> bool:
+    """True if the pydantic model field is list-typed (expanded into indexed columns)."""
+    annotation = model.model_fields[name].annotation
+    return getattr(annotation, "__origin__", None) is list
+
 
 # Hodge feature names derived from DegreeNormalizedFeatures model
 _HODGE_FEATURE_NAMES = [
@@ -129,15 +136,23 @@ _HODGE_FEATURE_NAMES = [
     if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
 ]
 
-# AttentionDiagonal feature names derived from AttentionDiagonalFeatures model
-_AD_FEATURE_NAMES = [f"ad_{f}" for f in AttentionDiagonalFeatures.model_fields]
+# AttentionDiagonal scalar feature names (list fields expanded separately as indexed columns)
+_AD_FEATURE_NAMES = [
+    f"ad_{f}"
+    for f in AttentionDiagonalFeatures.model_fields
+    if f not in _SKIP_FEATURE_FIELDS and not _is_list_field(AttentionDiagonalFeatures, f)
+]
 
 
 _META_COLUMNS = ["request_id", "label", "length", "sample_id", "phase", "prompt_length", "source"]
 
 
 def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
-    """Extract scalar features from a snapshot, raising on unexpected types."""
+    """Extract scalar features from a snapshot, raising on unexpected types.
+
+    List-valued features (e.g. eigvals) are expanded into indexed columns:
+    ``eigvals: [0.9, 0.7]`` → ``{prefix}eigval_0: 0.9, {prefix}eigval_1: 0.7``.
+    """
     result: dict[str, float] = {}
     feat_dict = snap.features.model_dump(exclude_none=True)
     # Prefix depends on signal type
@@ -145,17 +160,25 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
         non_spectral_prefix = "ad_"
     elif snap.feature_group == "attention_tracker":
         non_spectral_prefix = "at_"
+    elif snap.feature_group == "laplacian_eigvals":
+        non_spectral_prefix = "lap_"
     else:
         non_spectral_prefix = "hodge_"
     for k, v in feat_dict.items():
         if k in _SKIP_FEATURE_FIELDS:
             continue
-        if not isinstance(v, (int, float)):
-            raise TypeError(f"Unexpected non-scalar feature {k!r}: {type(v).__name__} = {v!r}")
-        if k in SPECTRAL_FEATURE_NAMES:
-            result[k] = v
+        if isinstance(v, list):
+            # Expand list into indexed columns (eigvals → eigval_0, eigval_1, ...)
+            stem = k.rstrip("s")  # eigvals → eigval
+            for i, x in enumerate(v):
+                result[f"{non_spectral_prefix}{stem}_{i}"] = x
+        elif isinstance(v, (int, float)):
+            if k in SPECTRAL_FEATURE_NAMES:
+                result[k] = v
+            else:
+                result[f"{non_spectral_prefix}{k}"] = v
         else:
-            result[f"{non_spectral_prefix}{k}"] = v
+            raise TypeError(f"Unexpected feature type {k!r}: {type(v).__name__} = {v!r}")
     return result
 
 
@@ -165,6 +188,9 @@ def _build_feature_columns(
     scores_matrix: bool,
     degree_normalized: bool,
     attention_diagonal: bool = False,
+    laplacian_eigvals: bool = False,
+    ad_top_k: int = 0,
+    lap_top_k: int = 10,
 ) -> list[str]:
     """Pre-compute all feature column names from model architecture.
 
@@ -179,7 +205,13 @@ def _build_feature_columns(
             ("degree_normalized_matrix", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES)
         )
     if attention_diagonal:
-        signals.append(("attention_diagonal", list(_AD_FEATURE_NAMES)))
+        ad_cols = list(_AD_FEATURE_NAMES)
+        if ad_top_k > 0:
+            ad_cols += [f"ad_eigval_{i}" for i in range(ad_top_k)]
+        signals.append(("attention_diagonal", ad_cols))
+    if laplacian_eigvals:
+        lap_cols = [f"lap_eigval_{i}" for i in range(lap_top_k)]
+        signals.append(("laplacian_eigvals", lap_cols))
 
     use_signal_prefix = len(signals) > 1
     columns: list[str] = []
@@ -404,6 +436,13 @@ def _write_parquet(
     help="Compute attention diagonal features (LLM-Check).",
 )
 @click.option(
+    "--laplacian-eigvals",
+    "laplacian_eigvals",
+    is_flag=True,
+    default=False,
+    help="Compute Laplacian eigenvalue features (LapEigvals).",
+)
+@click.option(
     "--threshold",
     type=int,
     default=None,
@@ -427,6 +466,7 @@ def main(
     scores_matrix: bool,
     degree_normalized: bool,
     attention_diagonal: bool,
+    laplacian_eigvals: bool,
     threshold: int | None,
     parquet: bool,
 ) -> None:
@@ -465,6 +505,7 @@ def main(
         "scores_matrix": scores_matrix,
         "degree_normalized": degree_normalized,
         "attention_diagonal": attention_diagonal,
+        "laplacian_eigvals": laplacian_eigvals,
         "max_tokens": max_tokens,
     }
 
@@ -480,11 +521,14 @@ def main(
         log(f"Degree-normalized: enabled (threshold={threshold or 2048})")
     if attention_diagonal:
         log(f"Attention diagonal: enabled (threshold={threshold or 512})")
+    if laplacian_eigvals:
+        log(f"Laplacian eigvals: enabled (threshold={threshold or 512})")
 
-    if not scores_matrix and not degree_normalized and not attention_diagonal:
+    any_enabled = scores_matrix or degree_normalized or attention_diagonal or laplacian_eigvals
+    if not any_enabled:
         raise click.UsageError(
             "At least one of --scores-matrix, --degree-normalized,"
-            " or --attention-diagonal must be enabled."
+            " --attention-diagonal, or --laplacian-eigvals must be enabled."
         )
 
     # Configure glassbox backend
@@ -515,6 +559,14 @@ def main(
         if threshold is not None:
             ad_cfg["threshold"] = threshold
         gb_kwargs["attention_diagonal"] = ad_cfg
+
+    if laplacian_eigvals:
+        lap_cfg: dict = {"enabled": True, "interval": 1}
+        if heads:
+            lap_cfg["heads"] = list(heads)
+        if threshold is not None:
+            lap_cfg["threshold"] = threshold
+        gb_kwargs["laplacian_eigvals"] = lap_cfg
 
     gb_config = GlassboxConfig(**gb_kwargs)
     svd_mod.SVDTritonAttentionImpl.config = gb_config
@@ -587,7 +639,14 @@ def main(
 
     if parquet:
         feature_columns = _build_feature_columns(
-            num_layers, heads, scores_matrix, degree_normalized, attention_diagonal
+            num_layers,
+            heads,
+            scores_matrix,
+            degree_normalized,
+            attention_diagonal,
+            laplacian_eigvals,
+            ad_top_k=gb_config.attention_diagonal.top_k,
+            lap_top_k=gb_config.laplacian_eigvals.top_k,
         )
         parquet_path = outdir / "features.parquet"
         _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)

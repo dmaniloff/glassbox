@@ -45,6 +45,10 @@ from glassbox.hodge import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
 )
+from glassbox.laplacian_eigvals import (
+    compute_laplacian_eigvals_materialized,
+    compute_laplacian_eigvals_matrix_free,
+)
 from glassbox.results import SVDSnapshot
 from glassbox.svd import (
     compute_degree_normalized_M,
@@ -154,6 +158,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             or self.config.degree_normalized_matrix.enabled
             or self.config.attention_tracker.enabled
             or self.config.attention_diagonal.enabled
+            or self.config.laplacian_eigvals.enabled
         ):
             return result
 
@@ -209,7 +214,18 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             self.config.attention_diagonal.enabled
             and state.step % self.config.attention_diagonal.interval == 0
         )
-        if spectral_due or normalized_due or attention_tracker_due or attn_diag_due:
+        lap_eigvals_due = (
+            self.config.laplacian_eigvals.enabled
+            and state.step % self.config.laplacian_eigvals.interval == 0
+        )
+        any_due = (
+            spectral_due
+            or normalized_due
+            or attention_tracker_due
+            or attn_diag_due
+            or lap_eigvals_due
+        )
+        if any_due:
             try:
                 self._run_svd(
                     layer_name,
@@ -221,6 +237,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                     run_normalized=normalized_due,
                     run_attention_tracker=attention_tracker_due,
                     run_attn_diag=attn_diag_due,
+                    run_lap_eigvals=lap_eigvals_due,
                 )
             except Exception:
                 logger.exception("[SVD] error in layer %s at step %d", layer_name, state.step)
@@ -279,6 +296,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         run_normalized: bool = False,
         run_attention_tracker: bool = False,
         run_attn_diag: bool = False,
+        run_lap_eigvals: bool = False,
     ) -> None:
         # Stack accumulated Q: [L_q, num_heads, head_size]
         Q_all = torch.cat(state.q_buffer, dim=0).float()
@@ -307,6 +325,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             heads.update(self.config.attention_tracker.heads)
         if run_attn_diag:
             heads.update(self.config.attention_diagonal.heads)
+        if run_lap_eigvals:
+            heads.update(self.config.laplacian_eigvals.heads)
 
         for head_idx in sorted(heads):
             if head_idx >= Q_all.shape[1]:
@@ -326,6 +346,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 self._run_attention_tracker(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
             if run_attn_diag and head_idx in self.config.attention_diagonal.heads:
                 self._run_attn_diag(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+            if run_lap_eigvals and head_idx in self.config.laplacian_eigvals.heads:
+                self._run_laplacian_eigvals(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
 
     def _run_svd_scores(
         self,
@@ -480,18 +502,60 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if L <= cfg.threshold:
             A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
             tier = "materialized"
-            features = compute_attention_diagonal_features_materialized(A)
+            features = compute_attention_diagonal_features_materialized(A, top_k=cfg.top_k)
         else:
             tier = "matrix_free"
             features = compute_attention_diagonal_features_matrix_free(
                 Qh,
                 Kh,
                 scale,
+                top_k=cfg.top_k,
                 block_size=cfg.block_size,
             )
 
         snapshot = SVDSnapshot(
             feature_group="attention_diagonal",
+            request_id=type(self).req_tracker.request_id,
+            layer=layer_name,
+            layer_idx=layer_idx,
+            head=head_idx,
+            step=state.step,
+            L=L,
+            tier=tier,
+            features=features,
+        )
+        self._emit_result(snapshot)
+
+    def _run_laplacian_eigvals(
+        self,
+        layer_name: str,
+        layer_idx: int | None,
+        state: PerLayerSVDState,
+        head_idx: int,
+        Qh: torch.Tensor,
+        Kh: torch.Tensor,
+        L: int,
+    ) -> None:
+        """Laplacian eigenvalue features from the attention graph."""
+        cfg = self.config.laplacian_eigvals
+        scale = 1.0 / math.sqrt(Qh.shape[1])
+
+        if L <= cfg.threshold:
+            A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
+            tier = "materialized"
+            features = compute_laplacian_eigvals_materialized(A, top_k=cfg.top_k)
+        else:
+            tier = "matrix_free"
+            features = compute_laplacian_eigvals_matrix_free(
+                Qh,
+                Kh,
+                scale,
+                top_k=cfg.top_k,
+                block_size=cfg.block_size,
+            )
+
+        snapshot = SVDSnapshot(
+            feature_group="laplacian_eigvals",
             request_id=type(self).req_tracker.request_id,
             layer=layer_name,
             layer_idx=layer_idx,

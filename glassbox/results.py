@@ -161,10 +161,15 @@ class AttentionTrackerFeatures(BaseModel):
 
 
 class AttentionDiagonalFeatures(BaseModel):
-    """Features from attention matrix diagonal (LLM-Check, NeurIPS 2024).
+    """Features from the attention matrix diagonal.
 
-    Mean log self-attention weight: mean_i(log(A[i,i])).
-    No SVD involved — this is a direct scalar statistic.
+    - ``attn_diag_logmean``: mean log self-attention weight mean_i(log(A[i,i]))
+      from LLM-Check (NeurIPS 2024).
+    - ``eigvals``: top-k diagonal values of A, sorted descending.  For causal
+      (lower-triangular) attention these are the eigenvalues of A, used as a
+      baseline in LapEigvals (EMNLP 2025, arXiv:2502.17598).
+
+    No SVD involved — direct scalar/vector statistics from diag(A).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -172,6 +177,30 @@ class AttentionDiagonalFeatures(BaseModel):
     attn_diag_logmean: float = Field(
         description="Mean of log diagonal of A. Higher = stronger self-attention."
     )
+    eigvals: list[float] = Field(
+        default=[],
+        description=(
+            "Top-k diagonal values of A, sorted descending (attention eigenvalues for causal A)."
+        ),
+    )
+
+
+class LaplacianEigvalsFeatures(BaseModel):
+    """Laplacian eigenvalue features from attention graphs.
+
+    Treats the attention matrix A as a weighted directed graph and computes
+    the in-degree graph Laplacian L = D_in - A, where D_in[i,i] = sum_j A[j,i]
+    (column sums of A).  For causal (lower-triangular) attention the diagonal
+    entries of L are its eigenvalues.
+
+    Reference:
+        Binkowski et al., "Hallucination Detection in LLMs Using Spectral
+        Features of Attention Maps", EMNLP 2025 (arXiv:2502.17598).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    eigvals: list[float] = Field(description="Top-k Laplacian diagonal values, sorted descending.")
 
 
 class SVDSnapshot(BaseModel):
@@ -179,7 +208,8 @@ class SVDSnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    # "scores_matrix" | "degree_normalized_matrix" | "attention_tracker" | "attention_diagonal"
+    # "scores_matrix" | "degree_normalized_matrix" | "attention_tracker"
+    # | "attention_diagonal" | "laplacian_eigvals"
     feature_group: str
     request_id: int
     layer: str
@@ -194,6 +224,7 @@ class SVDSnapshot(BaseModel):
         | DegreeNormalizedFeatures
         | AttentionTrackerFeatures
         | AttentionDiagonalFeatures
+        | LaplacianEigvalsFeatures
     )
 
     @classmethod
@@ -209,6 +240,8 @@ class SVDSnapshot(BaseModel):
                 d["features"] = AttentionTrackerFeatures(**feat_raw)
             elif fg == "attention_diagonal":
                 d["features"] = AttentionDiagonalFeatures(**feat_raw)
+            elif fg == "laplacian_eigvals":
+                d["features"] = LaplacianEigvalsFeatures(**feat_raw)
             else:
                 d["features"] = ScoresMatrixFeatures(**feat_raw)
         return cls(**d)

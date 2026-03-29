@@ -66,6 +66,45 @@ class TestMatrixFree:
         assert feat.attn_diag_logmean <= 0.0
 
 
+class TestEigvals:
+    def test_eigvals_returned_when_top_k(self):
+        L, d = 32, 16
+        Q = torch.randn(L, d)
+        K = torch.randn(L, d)
+        scale = 1.0 / math.sqrt(d)
+        A = torch.softmax(Q @ K.T * scale, dim=-1)
+        feat = compute_attention_diagonal_features_materialized(A, top_k=5)
+        assert len(feat.eigvals) == 5
+        for i in range(len(feat.eigvals) - 1):
+            assert feat.eigvals[i] >= feat.eigvals[i + 1]
+
+    def test_eigvals_empty_when_zero(self):
+        L = 16
+        A = torch.eye(L)
+        feat = compute_attention_diagonal_features_materialized(A, top_k=0)
+        assert feat.eigvals == []
+
+    def test_eigvals_in_unit_interval(self):
+        L, d = 64, 16
+        Q = torch.randn(L, d)
+        K = torch.randn(L, d)
+        scale = 1.0 / math.sqrt(d)
+        A = torch.softmax(Q @ K.T * scale, dim=-1)
+        feat = compute_attention_diagonal_features_materialized(A, top_k=10)
+        for v in feat.eigvals:
+            assert 0.0 <= v <= 1.0
+
+    def test_matrix_free_eigvals(self):
+        L, d = 32, 16
+        Q = torch.randn(L, d)
+        K = torch.randn(L, d)
+        scale = 1.0 / math.sqrt(d)
+        feat = compute_attention_diagonal_features_matrix_free(Q, K, scale, top_k=5)
+        assert len(feat.eigvals) == 5
+        for i in range(len(feat.eigvals) - 1):
+            assert feat.eigvals[i] >= feat.eigvals[i + 1]
+
+
 class TestMaterializedVsMatrixFree:
     """Verify the two paths produce identical results."""
 
@@ -93,6 +132,19 @@ class TestMaterializedVsMatrixFree:
         mat = compute_attention_diagonal_features_materialized(A)
         mf = compute_attention_diagonal_features_matrix_free(Q, K, scale, block_size=7)
         assert mat.attn_diag_logmean == pytest.approx(mf.attn_diag_logmean, abs=1e-4)
+
+    @pytest.mark.parametrize("L", [16, 64])
+    def test_eigvals_agreement(self, L):
+        d = 16
+        Q = torch.randn(L, d)
+        K = torch.randn(L, d)
+        scale = 1.0 / math.sqrt(d)
+        A = torch.softmax(Q @ K.T * scale, dim=-1)
+
+        mat = compute_attention_diagonal_features_materialized(A, top_k=5)
+        mf = compute_attention_diagonal_features_matrix_free(Q, K, scale, top_k=5, block_size=32)
+        for v_mat, v_mf in zip(mat.eigvals, mf.eigvals):
+            assert v_mat == pytest.approx(v_mf, abs=1e-4)
 
 
 class TestFrozen:

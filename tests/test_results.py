@@ -5,6 +5,7 @@ from glassbox.results import (
     AttentionDiagonalFeatures,
     AttentionTrackerFeatures,
     DegreeNormalizedFeatures,
+    LaplacianEigvalsFeatures,
     ScoresMatrixFeatures,
     SVDSnapshot,
     _spectral_from_svs,
@@ -213,6 +214,42 @@ class TestAttentionDiagonalSnapshot:
         restored = SVDSnapshot.from_jsonl_row(d)
         assert isinstance(restored.features, AttentionDiagonalFeatures)
         assert restored.features.attn_diag_logmean == -3.2
+
+
+# ── LaplacianEigvalsFeatures ─────────────────────────────────────────────
+
+
+class TestLaplacianEigvalsFeatures:
+    def test_construction(self):
+        f = LaplacianEigvalsFeatures(eigvals=[0.9, 0.8, 0.7])
+        assert f.eigvals == [0.9, 0.8, 0.7]
+
+    def test_frozen(self):
+        f = LaplacianEigvalsFeatures(eigvals=[0.5])
+        with pytest.raises(Exception):
+            f.eigvals = [0.0]
+
+
+class TestLaplacianEigvalsSnapshot:
+    def test_round_trip(self):
+        features = LaplacianEigvalsFeatures(eigvals=[0.95, 0.82, 0.71])
+        snap = SVDSnapshot(
+            feature_group="laplacian_eigvals",
+            request_id=0,
+            layer="model.layers.0.self_attn",
+            layer_idx=0,
+            head=0,
+            step=32,
+            L=128,
+            tier="materialized",
+            features=features,
+        )
+        d = snap.model_dump(exclude_none=True)
+        assert d["singular_values"] == []
+        assert d["features"]["eigvals"] == [0.95, 0.82, 0.71]
+        restored = SVDSnapshot.from_jsonl_row(d)
+        assert isinstance(restored.features, LaplacianEigvalsFeatures)
+        assert restored.features.eigvals == [0.95, 0.82, 0.71]
 
 
 # ── SPECTRAL_FEATURE_NAMES ────────────────────────────────────────────────

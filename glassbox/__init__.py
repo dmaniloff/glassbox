@@ -15,6 +15,7 @@ from glassbox.results import (
     AttentionDiagonalFeatures,
     AttentionTrackerFeatures,
     DegreeNormalizedFeatures,
+    LaplacianEigvalsFeatures,
     ScoresMatrixFeatures,
     SVDSnapshot,
 )
@@ -26,4 +27,5 @@ __all__ = [
     "DegreeNormalizedFeatures",
     "AttentionTrackerFeatures",
     "AttentionDiagonalFeatures",
+    "LaplacianEigvalsFeatures",
 ]
