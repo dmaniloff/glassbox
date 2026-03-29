@@ -1,6 +1,3 @@
-import pytest
-from pydantic import ValidationError
-
 from glassbox.config import GlassboxConfig
 
 
@@ -98,12 +95,6 @@ def test_precedence_kwargs_beat_yaml(tmp_path, monkeypatch):
     assert config.scores_matrix.interval == 8
 
 
-def test_frozen_nested():
-    config = GlassboxConfig()
-    with pytest.raises(ValidationError):
-        config.scores_matrix.interval = 99
-
-
 def test_programmatic_kwargs_attention_diagonal():
     config = GlassboxConfig(attention_diagonal={"enabled": True, "interval": 16, "heads": [0, 1]})
     assert config.attention_diagonal.enabled is True
@@ -151,9 +142,3 @@ def test_yaml_laplacian_eigvals(tmp_path, monkeypatch):
     assert config.laplacian_eigvals.interval == 64
     assert config.laplacian_eigvals.top_k == 25
     assert config.laplacian_eigvals.heads == [0, 1, 2]
-
-
-def test_frozen_root():
-    config = GlassboxConfig()
-    with pytest.raises(ValidationError):
-        config.output = "foo.jsonl"

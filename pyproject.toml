@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "glassbox"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
     "vllm>=0.15.1",
@@ -29,7 +29,7 @@ dev = ["pytest"]
 testpaths = ["tests"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 extend-exclude = ["benchmarks/results", "experiments/results"]
 
