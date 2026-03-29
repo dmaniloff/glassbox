@@ -239,7 +239,7 @@ This format is designed to feed downstream systems directly. You can:
 - monitor drift across prompts or tasks
 - aggregate by head, layer, request, or dataset
 
-The dataset extraction pipeline in `experiments/extract.py` can also write a wide Parquet file.
+The `glassbox-extract` CLI can also write a wide Parquet file.
 
 ## Example Downstream Uses
 
@@ -355,7 +355,7 @@ Important knobs:
 ### Test it on a single prompt
 
 ```bash
-python -m glassbox.backends.runner \
+glassbox-run \
   --model facebook/opt-125m \
   --interval 16 \
   --rank 4 \
@@ -382,7 +382,7 @@ Registered via the `vllm.general_plugins` entry point -- vLLM loads it automatic
 ### Run labeled extraction
 
 ```bash
-python experiments/extract.py \
+glassbox-extract \
   --model Qwen/Qwen2-7B-Instruct \
   --dataset halueval_hallucination \
   --max-samples 200 \

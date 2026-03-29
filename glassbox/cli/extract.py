@@ -14,9 +14,9 @@ dependency.  See ``scripts/upload_test_splits.py`` for how these
 datasets were created.
 
 Usage:
-    python experiments/extract.py --dataset halueval_hallucination --scores-matrix
-    python experiments/extract.py --dataset all --degree-normalized
-    python experiments/extract.py --dataset halueval_hallucination --max-samples 50
+    glassbox-extract --dataset halueval_hallucination --scores-matrix
+    glassbox-extract --dataset all --degree-normalized
+    glassbox-extract --dataset halueval_hallucination --max-samples 50
 """
 
 from __future__ import annotations
