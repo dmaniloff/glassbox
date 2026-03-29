@@ -219,8 +219,11 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             and state.step % self.config.laplacian_eigvals.interval == 0
         )
         any_due = (
-            spectral_due or normalized_due or attention_tracker_due
-            or attn_diag_due or lap_eigvals_due
+            spectral_due
+            or normalized_due
+            or attention_tracker_due
+            or attn_diag_due
+            or lap_eigvals_due
         )
         if any_due:
             try:

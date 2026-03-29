@@ -133,9 +133,7 @@ def test_laplacian_eigvals_defaults():
 
 
 def test_programmatic_kwargs_laplacian_eigvals():
-    config = GlassboxConfig(
-        laplacian_eigvals={"enabled": True, "interval": 16, "top_k": 20}
-    )
+    config = GlassboxConfig(laplacian_eigvals={"enabled": True, "interval": 16, "top_k": 20})
     assert config.laplacian_eigvals.enabled is True
     assert config.laplacian_eigvals.interval == 16
     assert config.laplacian_eigvals.top_k == 20
@@ -144,11 +142,7 @@ def test_programmatic_kwargs_laplacian_eigvals():
 
 def test_yaml_laplacian_eigvals(tmp_path, monkeypatch):
     yaml_content = (
-        "laplacian_eigvals:\n"
-        "  enabled: true\n"
-        "  interval: 64\n"
-        "  top_k: 25\n"
-        "  heads: [0, 1, 2]\n"
+        "laplacian_eigvals:\n  enabled: true\n  interval: 64\n  top_k: 25\n  heads: [0, 1, 2]\n"
     )
     (tmp_path / "glassbox.yaml").write_text(yaml_content)
     monkeypatch.chdir(tmp_path)

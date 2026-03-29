@@ -180,8 +180,7 @@ class AttentionDiagonalFeatures(BaseModel):
     eigvals: list[float] = Field(
         default=[],
         description=(
-            "Top-k diagonal values of A, sorted descending"
-            " (attention eigenvalues for causal A)."
+            "Top-k diagonal values of A, sorted descending (attention eigenvalues for causal A)."
         ),
     )
 
@@ -201,9 +200,7 @@ class LaplacianEigvalsFeatures(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    eigvals: list[float] = Field(
-        description="Top-k Laplacian diagonal values, sorted descending."
-    )
+    eigvals: list[float] = Field(description="Top-k Laplacian diagonal values, sorted descending.")
 
 
 class SVDSnapshot(BaseModel):
