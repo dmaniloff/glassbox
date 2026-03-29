@@ -142,5 +142,3 @@ def test_yaml_laplacian_eigvals(tmp_path, monkeypatch):
     assert config.laplacian_eigvals.interval == 64
     assert config.laplacian_eigvals.top_k == 25
     assert config.laplacian_eigvals.heads == [0, 1, 2]
-
-
