@@ -122,6 +122,13 @@ def load_dataset_samples(
 
 _SKIP_FEATURE_FIELDS = {"singular_values"}  # redundant copy of raw SVs; skip in wide parquet
 
+
+def _is_list_field(model: type, name: str) -> bool:
+    """True if the pydantic model field is list-typed (expanded into indexed columns)."""
+    annotation = model.model_fields[name].annotation
+    return getattr(annotation, "__origin__", None) is list
+
+
 # Hodge feature names derived from DegreeNormalizedFeatures model
 _HODGE_FEATURE_NAMES = [
     f"hodge_{f}"
@@ -129,11 +136,11 @@ _HODGE_FEATURE_NAMES = [
     if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
 ]
 
-# AttentionDiagonal scalar feature names (eigvals handled separately as indexed columns)
+# AttentionDiagonal scalar feature names (list fields expanded separately as indexed columns)
 _AD_FEATURE_NAMES = [
     f"ad_{f}"
     for f in AttentionDiagonalFeatures.model_fields
-    if f not in _SKIP_FEATURE_FIELDS and f != "eigvals"
+    if f not in _SKIP_FEATURE_FIELDS and not _is_list_field(AttentionDiagonalFeatures, f)
 ]
 
 
