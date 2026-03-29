@@ -65,11 +65,11 @@ logger = logging.getLogger(__name__)
 )
 @click.option(
     "--operator",
-    type=click.Choice(["S", "M", "A", "diag"]),
+    type=click.Choice(["S", "M", "A", "diag", "lap"]),
     default=None,
     help=(
         "Operator: S=scores, M=degree-normalized, A=attention-tracker,"
-        " diag=attention diagonal. [default: from config (S)]"
+        " diag=attention diagonal, lap=laplacian eigvals. [default: from config (S)]"
     ),
 )
 @click.option(
@@ -185,6 +185,7 @@ def main(
 
     attention_tracker: dict = {}
     attention_diagonal: dict = {}
+    laplacian_eigvals: dict = {}
 
     # Handle --operator for backward compat
     if operator == "M":
@@ -220,6 +221,17 @@ def main(
             attention_diagonal["interval"] = interval
         if heads:
             attention_diagonal["heads"] = list(heads)
+    elif operator == "lap":
+        scores_matrix["enabled"] = False
+        laplacian_eigvals["enabled"] = True
+        if interval is not None:
+            laplacian_eigvals["interval"] = interval
+        if heads:
+            laplacian_eigvals["heads"] = list(heads)
+        if threshold is not None:
+            laplacian_eigvals["threshold"] = threshold
+        if block_size is not None:
+            laplacian_eigvals["block_size"] = block_size
 
     # M-specific params
     if threshold is not None:
@@ -247,6 +259,8 @@ def main(
         overrides["attention_tracker"] = attention_tracker
     if attention_diagonal:
         overrides["attention_diagonal"] = attention_diagonal
+    if laplacian_eigvals:
+        overrides["laplacian_eigvals"] = laplacian_eigvals
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
@@ -270,11 +284,12 @@ def main(
     logger.info("Model: %s", model)
     logger.info(
         "Config: scores_matrix=%s degree_normalized_matrix=%s"
-        " attention_tracker=%s attention_diagonal=%s",
+        " attention_tracker=%s attention_diagonal=%s laplacian_eigvals=%s",
         "enabled" if config.scores_matrix.enabled else "disabled",
         "enabled" if config.degree_normalized_matrix.enabled else "disabled",
         "enabled" if config.attention_tracker.enabled else "disabled",
         "enabled" if config.attention_diagonal.enabled else "disabled",
+        "enabled" if config.laplacian_eigvals.enabled else "disabled",
     )
     if config.scores_matrix.enabled:
         logger.info(
@@ -305,6 +320,13 @@ def main(
             "Attention diagonal: interval=%s heads=%s",
             config.attention_diagonal.interval,
             config.attention_diagonal.heads,
+        )
+    if config.laplacian_eigvals.enabled:
+        logger.info(
+            "Laplacian eigvals: interval=%s heads=%s top_k=%s",
+            config.laplacian_eigvals.interval,
+            config.laplacian_eigvals.heads,
+            config.laplacian_eigvals.top_k,
         )
 
     llm = vllm.LLM(
