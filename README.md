@@ -10,13 +10,13 @@ The primary implementation is a custom vLLM attention backend in `glassbox/backe
 
 ## What It Extracts
 
-At configurable intervals during inference, `glassbox` computes features from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))` through multiple lenses:
+At configurable intervals during inference, `glassbox` computes features from different stages of the attention computation:
 
-1. The pre-softmax scores matrix `S = QK^T`
-2. The degree-normalized post-softmax operator `M = D_Q^{-1/2} A D_K^{-1/2}` (Dahlem et al., upcoming)
-3. The raw post-softmax attention matrix `A` — span-independent features from [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348)
-4. The diagonal of `A` — self-attention features from [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024)
-5. The in-degree graph Laplacian `L = D_in - A` — spectral features from [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals) (EMNLP 2025, [arXiv:2502.17598](https://arxiv.org/abs/2502.17598))
+1. **spectral** — SVD of the pre-softmax scores matrix `S = QK^T`
+2. **routing** — SVD + Hodge decomposition of the degree-normalized post-softmax matrix `M = D_Q^{-1/2} A D_K^{-1/2}` (Dahlem et al., upcoming)
+3. **tracker** — Span-independent features from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))` — [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348)
+4. **selfattn** — Self-attention features from the diagonal of `A` — [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024)
+5. **laplacian** — Spectral features from the in-degree graph Laplacian `L = D_in - A` — [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals) (EMNLP 2025, [arXiv:2502.17598](https://arxiv.org/abs/2502.17598))
 
 For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
 
@@ -110,7 +110,7 @@ In practice:
 - if `L <= threshold`, use a materialized path
 - if `L > threshold`, use blocked matrix-free operators
 
-That behavior is implemented in `_run_svd_normalized()` in `glassbox/backends/svd_backend.py`.
+That behavior is implemented in `_run_svd_routing()` in `glassbox/backends/svd_backend.py`.
 
 ### 5. On-demand entry lookup for curl estimates
 
@@ -118,7 +118,7 @@ Some routing metrics need access to selected entries of `M`. Instead of building
 
 ## Features We Compute
 
-### 1. Scores matrix features (pre-softmax scores)
+### 1. Spectral signal — scores matrix features (pre-softmax scores)
 
 These come from the singular values of the pre-softmax scores matrix `S = QK^T`.
 
@@ -128,7 +128,7 @@ These come from the singular values of the pre-softmax scores matrix `S = QK^T`.
 | `sv_ratio` | `σ₁(S) / σ₂(S)` | Spectral sharpness. High values suggest near-rank-1 structure; low values suggest multiple competing modes |
 | `sv_entropy` | `-Σ pᵢ log pᵢ`, with `pᵢ = σᵢ / Σⱼ σⱼ` | Entropy of the normalized singular-value distribution. Measures how concentrated or diffuse the spectrum is |
 
-### 2. Routing features from the Degree-normalized matrix (post-softmax attention) — Dahlem et al. (upcoming)
+### 2. Routing signal — degree-normalized matrix features (post-softmax attention) — Dahlem et al. (upcoming)
 
 These come from the singular values and routing decomposition of the normalized operator `M`.
 
@@ -148,7 +148,7 @@ These come from the singular values and routing decomposition of the normalized 
 
 The routing and Hodge-style metrics live in `glassbox/hodge.py`. The feature schemas are defined in `glassbox/results.py`.
 
-### 3. AttentionTracker features (raw post-softmax attention) — [arXiv:2411.00348](https://arxiv.org/abs/2411.00348)
+### 3. Tracker signal — AttentionTracker features (raw post-softmax attention) — [arXiv:2411.00348](https://arxiv.org/abs/2411.00348)
 
 These come from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`, without degree normalization. Based on the AttentionTracker paper, which uses these features for mechanistic classification of failure modes (prompt injection vs hallucination).
 
@@ -164,7 +164,7 @@ The computation reuses the same two-tier approach as the degree-normalized opera
 
 The feature computation lives in `glassbox/attention_tracker.py`.
 
-### 4. Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)
+### 4. SelfAttn signal — attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)
 
 These come from the diagonal of the post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`.
 
@@ -184,7 +184,7 @@ Two additional LLM-Check extractors require signals the attention backend cannot
 
 These will require either `torch.compile` passes (see `glassbox/passes/`) or vLLM observation hooks.
 
-### 5. Laplacian eigenvalue features (LapEigvals, EMNLP 2025) — [arXiv:2502.17598](https://arxiv.org/abs/2502.17598)
+### 5. Laplacian signal — eigenvalue features (LapEigvals, EMNLP 2025) — [arXiv:2502.17598](https://arxiv.org/abs/2502.17598)
 
 These come from the in-degree graph Laplacian of the attention matrix: `L = D_in - A`, where `D_in[i,i] = Σ_j A[j,i]` (column sums of `A`). Treating attention as a weighted directed graph, the Laplacian diagonal captures how much attention each token receives from other tokens (in-degree minus self-attention).
 
@@ -222,14 +222,14 @@ These modulate routing features by the effective LayerNorm gain, with the goal o
 
 The backend emits one JSON object per observation. Each row contains:
 
-- `feature_group`: `scores_matrix`, `degree_normalized_matrix`, `attention_tracker`, `attention_diagonal`, or `laplacian_eigvals`
+- `signal`: `spectral`, `routing`, `tracker`, `selfattn`, or `laplacian`
 - `request_id`
 - `layer` and `layer_idx`
 - `head`
 - `step`
 - `L`
 - `singular_values`
-- `tier`: `materialized` or `matrix_free` for normalized-operator runs
+- `tier`: `materialized` or `matrix_free` for signals that use the two-tier approach
 - `features`: derived metrics for that observation
 
 This format is designed to feed downstream systems directly. You can:
@@ -254,7 +254,7 @@ This repository expects vLLM to be installed separately.
 
 ```bash
 # using a Ubuntu 24.04 Deep Learning AMI, I just needed to
-source /opt/pytorch/bin/activate 
+source /opt/pytorch/bin/activate
 pip install vllm==0.15.1
 pip install huggingface-hub==0.36.0
 pip install pydantic-settings==2.12.0
@@ -279,14 +279,14 @@ Configuration is defined in `glassbox/config.py` and can be provided programmati
 Example:
 
 ```yaml
-scores_matrix:
+spectral:
   enabled: true
   interval: 32
   rank: 4
   method: randomized
   heads: [0]
 
-degree_normalized_matrix:
+routing:
   enabled: true
   interval: 32
   rank: 4
@@ -297,7 +297,7 @@ degree_normalized_matrix:
   hodge_target_cv: 0.05
   hodge_curl_seed: 42
 
-attention_tracker:
+tracker:
   enabled: true
   interval: 32
   rank: 4
@@ -306,7 +306,7 @@ attention_tracker:
   threshold: 512
   block_size: 256
 
-attention_diagonal:
+selfattn:
   enabled: true
   interval: 32
   heads: [0]
@@ -314,7 +314,7 @@ attention_diagonal:
   threshold: 512
   block_size: 256
 
-laplacian_eigvals:
+laplacian:
   enabled: true
   interval: 32
   heads: [0]
@@ -329,25 +329,25 @@ Important knobs:
 
 | Setting | Description |
 |---|---|
-| `scores_matrix.interval` | Snapshot cadence for `S = QK^T` |
-| `scores_matrix.rank` | Number of singular values to keep |
-| `scores_matrix.method` | `randomized` or `lanczos` |
-| `scores_matrix.heads` | Heads to analyze |
-| `degree_normalized_matrix.enabled` | Turn on normalized-operator analysis |
-| `degree_normalized_matrix.threshold` | Sequence length cutoff for materialized vs matrix-free execution |
-| `degree_normalized_matrix.block_size` | Row-block size for blocked operators |
-| `attention_tracker.enabled` | Turn on raw attention matrix analysis |
-| `attention_tracker.threshold` | Sequence length cutoff for materialized vs matrix-free |
-| `attention_diagonal.enabled` | Turn on attention diagonal analysis |
-| `attention_diagonal.interval` | Snapshot cadence for diagonal features |
-| `attention_diagonal.heads` | Heads to analyze |
-| `attention_diagonal.top_k` | Number of top diagonal values to keep (0 = omit eigvals) |
-| `attention_diagonal.threshold` | Sequence length cutoff for materialized vs matrix-free |
-| `laplacian_eigvals.enabled` | Turn on Laplacian eigenvalue analysis |
-| `laplacian_eigvals.interval` | Snapshot cadence for Laplacian features |
-| `laplacian_eigvals.heads` | Heads to analyze |
-| `laplacian_eigvals.top_k` | Number of top eigenvalues to keep |
-| `laplacian_eigvals.threshold` | Sequence length cutoff for materialized vs matrix-free |
+| `spectral.interval` | Snapshot cadence for `S = QK^T` |
+| `spectral.rank` | Number of singular values to keep |
+| `spectral.method` | `randomized` or `lanczos` |
+| `spectral.heads` | Heads to analyze |
+| `routing.enabled` | Turn on routing analysis |
+| `routing.threshold` | Sequence length cutoff for materialized vs matrix-free execution |
+| `routing.block_size` | Row-block size for blocked operators |
+| `tracker.enabled` | Turn on raw attention matrix analysis |
+| `tracker.threshold` | Sequence length cutoff for materialized vs matrix-free |
+| `selfattn.enabled` | Turn on attention diagonal analysis |
+| `selfattn.interval` | Snapshot cadence for diagonal features |
+| `selfattn.heads` | Heads to analyze |
+| `selfattn.top_k` | Number of top diagonal values to keep (0 = omit eigvals) |
+| `selfattn.threshold` | Sequence length cutoff for materialized vs matrix-free |
+| `laplacian.enabled` | Turn on Laplacian eigenvalue analysis |
+| `laplacian.interval` | Snapshot cadence for Laplacian features |
+| `laplacian.heads` | Heads to analyze |
+| `laplacian.top_k` | Number of top eigenvalues to keep |
+| `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `output` | JSONL output path |
 
 ## Running the custom backend
@@ -357,6 +357,7 @@ Important knobs:
 ```bash
 glassbox-run \
   --model facebook/opt-125m \
+  --signal spectral \
   --interval 16 \
   --rank 4 \
   --heads 0 \
@@ -386,11 +387,7 @@ glassbox-extract \
   --model Qwen/Qwen2-7B-Instruct \
   --dataset halueval_hallucination \
   --max-samples 200 \
-  --scores-matrix \
-  --degree-normalized \
-  --attention-tracker \
-  --attention-diagonal \
-  --laplacian-eigvals \
+  --signal spectral,routing,tracker,selfattn,laplacian \
   --parquet
 ```
 
@@ -403,4 +400,3 @@ This produces:
 ## Benchmarks
 
 Coming soon.
-

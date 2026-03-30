@@ -5,8 +5,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Canonical signal names (user-facing)
+SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
 
-class ScoresMatrixConfig(BaseModel):
+
+class SpectralConfig(BaseModel):
     """SVD of pre-softmax scores matrix S = QK^T."""
 
     model_config = ConfigDict(frozen=True)
@@ -18,7 +21,7 @@ class ScoresMatrixConfig(BaseModel):
     heads: list[int] = [0]
 
 
-class DegreeNormalizedMatrixConfig(BaseModel):
+class RoutingConfig(BaseModel):
     """SVD of post-softmax degree-normalized operator M = D_Q^{-1/2} A D_K^{-1/2}."""
 
     model_config = ConfigDict(frozen=True)
@@ -41,7 +44,7 @@ class DegreeNormalizedMatrixConfig(BaseModel):
     hodge_min_samples: int = 200
 
 
-class AttentionTrackerConfig(BaseModel):
+class TrackerConfig(BaseModel):
     """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
 
     model_config = ConfigDict(frozen=True)
@@ -55,7 +58,7 @@ class AttentionTrackerConfig(BaseModel):
     block_size: int = 256
 
 
-class AttentionDiagonalConfig(BaseModel):
+class SelfAttnConfig(BaseModel):
     """Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)."""
 
     model_config = ConfigDict(frozen=True)
@@ -68,7 +71,7 @@ class AttentionDiagonalConfig(BaseModel):
     block_size: int = 256
 
 
-class LaplacianEigvalsConfig(BaseModel):
+class LaplacianConfig(BaseModel):
     """Laplacian eigenvalues from attention graphs (LapEigvals, EMNLP 2025)."""
 
     model_config = ConfigDict(frozen=True)
@@ -96,11 +99,11 @@ class GlassboxConfig(BaseSettings):
         frozen=True,
     )
 
-    scores_matrix: ScoresMatrixConfig = ScoresMatrixConfig()
-    degree_normalized_matrix: DegreeNormalizedMatrixConfig = DegreeNormalizedMatrixConfig()
-    attention_tracker: AttentionTrackerConfig = AttentionTrackerConfig()
-    attention_diagonal: AttentionDiagonalConfig = AttentionDiagonalConfig()
-    laplacian_eigvals: LaplacianEigvalsConfig = LaplacianEigvalsConfig()
+    spectral: SpectralConfig = SpectralConfig()
+    routing: RoutingConfig = RoutingConfig()
+    tracker: TrackerConfig = TrackerConfig()
+    selfattn: SelfAttnConfig = SelfAttnConfig()
+    laplacian: LaplacianConfig = LaplacianConfig()
     output: str | None = None
 
     @classmethod

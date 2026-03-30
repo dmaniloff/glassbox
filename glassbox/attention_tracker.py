@@ -26,7 +26,7 @@ from glassbox.hodge import (
     compute_sigma2_asym_matrix_free,
     estimate_commutator_norm_matrix_free,
 )
-from glassbox.results import AttentionTrackerFeatures
+from glassbox.results import TrackerFeatures
 from glassbox.svd import (
     apply_A_blocked,
     apply_AT_blocked,
@@ -39,7 +39,7 @@ from glassbox.svd import (
 def compute_attention_tracker_features_materialized(
     A: torch.Tensor,
     rank: int,
-) -> AttentionTrackerFeatures:
+) -> TrackerFeatures:
     """All AttentionTracker features from a materialized attention matrix.
 
     Args:
@@ -47,7 +47,7 @@ def compute_attention_tracker_features_materialized(
         rank: Number of singular values to retain.
 
     Returns:
-        AttentionTrackerFeatures with sigma2, sigma2_asym, commutator_norm.
+        TrackerFeatures with sigma2, sigma2_asym, commutator_norm.
     """
     sigma = torch.linalg.svdvals(A)
     k = min(rank, len(sigma))
@@ -63,7 +63,7 @@ def compute_attention_tracker_features_materialized(
     A_fro = torch.linalg.norm(A, "fro").item()
     commutator_norm = torch.linalg.norm(comm, "fro").item() / (A_fro + EPSILON)
 
-    return AttentionTrackerFeatures.from_attention_tracker(
+    return TrackerFeatures.from_attention_tracker(
         singular_values=sigma[:k].cpu().tolist(),
         sigma2=sigma2,
         sigma2_asym=sigma2_asym,
@@ -78,7 +78,7 @@ def compute_attention_tracker_features_matrix_free(
     rank: int,
     method: str = "randomized",
     block_size: int = 256,
-) -> AttentionTrackerFeatures:
+) -> TrackerFeatures:
     """All AttentionTracker features via matrix-free blocked operations.
 
     Reuses existing matvec infrastructure by passing d_k_inv_sqrt = ones,
@@ -93,7 +93,7 @@ def compute_attention_tracker_features_matrix_free(
         block_size: Block size for blocked-streaming matvecs.
 
     Returns:
-        AttentionTrackerFeatures with sigma2, sigma2_asym, commutator_norm.
+        TrackerFeatures with sigma2, sigma2_asym, commutator_norm.
     """
     L = Q.shape[0]
     device = Q.device
@@ -125,7 +125,7 @@ def compute_attention_tracker_features_matrix_free(
     # --- commutator_norm via existing hodge.py (d_k_inv_sqrt=ones -> M=A) ---
     commutator_norm = estimate_commutator_norm_matrix_free(Q, K, ones, scale, A_fro, block_size)
 
-    return AttentionTrackerFeatures.from_attention_tracker(
+    return TrackerFeatures.from_attention_tracker(
         singular_values=S_sorted[:k].cpu().tolist(),
         sigma2=sigma2,
         sigma2_asym=sigma2_asym,

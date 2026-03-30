@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import torch
 
-from glassbox.results import AttentionDiagonalFeatures
+from glassbox.results import SelfAttnFeatures
 from glassbox.svd import compute_logsumexp_blocked
 
 EPSILON = 1e-10
@@ -35,7 +35,7 @@ EPSILON = 1e-10
 def compute_attention_diagonal_features_materialized(
     A: torch.Tensor,
     top_k: int = 0,
-) -> AttentionDiagonalFeatures:
+) -> SelfAttnFeatures:
     """Attention diagonal features from a materialized attention matrix.
 
     Args:
@@ -43,7 +43,7 @@ def compute_attention_diagonal_features_materialized(
         top_k: Number of largest diagonal values to keep. 0 = omit eigvals.
 
     Returns:
-        AttentionDiagonalFeatures with attn_diag_logmean and optional eigvals.
+        SelfAttnFeatures with attn_diag_logmean and optional eigvals.
     """
     diag_A = A.diag()
     log_diag = torch.log(diag_A + EPSILON)
@@ -55,7 +55,7 @@ def compute_attention_diagonal_features_materialized(
         topk_vals, _ = torch.topk(diag_A, k)
         eigvals = topk_vals.tolist()
 
-    return AttentionDiagonalFeatures(attn_diag_logmean=attn_diag_logmean, eigvals=eigvals)
+    return SelfAttnFeatures(attn_diag_logmean=attn_diag_logmean, eigvals=eigvals)
 
 
 def compute_attention_diagonal_features_matrix_free(
@@ -64,7 +64,7 @@ def compute_attention_diagonal_features_matrix_free(
     scale: float,
     top_k: int = 0,
     block_size: int = 256,
-) -> AttentionDiagonalFeatures:
+) -> SelfAttnFeatures:
     """Attention diagonal features via blocked computation.
 
     Avoids materializing L×L by computing:
@@ -79,7 +79,7 @@ def compute_attention_diagonal_features_matrix_free(
         block_size: Block size for blocked logsumexp.
 
     Returns:
-        AttentionDiagonalFeatures with attn_diag_logmean and optional eigvals.
+        SelfAttnFeatures with attn_diag_logmean and optional eigvals.
     """
     # Diagonal of scores matrix: s_ii = Q[i] · K[i] * scale
     s_diag = (Q * K).sum(dim=-1) * scale  # [L]
@@ -98,4 +98,4 @@ def compute_attention_diagonal_features_matrix_free(
         topk_vals, _ = torch.topk(diag_A, k)
         eigvals = topk_vals.tolist()
 
-    return AttentionDiagonalFeatures(attn_diag_logmean=attn_diag_logmean, eigvals=eigvals)
+    return SelfAttnFeatures(attn_diag_logmean=attn_diag_logmean, eigvals=eigvals)

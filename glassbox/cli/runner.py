@@ -3,7 +3,7 @@ Entry-point script that launches vLLM with the custom SVD attention backend.
 
 Usage:
     glassbox-run [OPTIONS]
-    glassbox-run --interval 16 --rank 2 --heads 0,1,2
+    glassbox-run --signal spectral,routing --rank 2 --heads 0,1,2
     glassbox-run --model facebook/opt-350m --method lanczos
     glassbox-run --config glassbox.yaml
 
@@ -20,7 +20,7 @@ import vllm
 
 # Import triggers @register_backend(AttentionBackendEnum.CUSTOM)
 import glassbox.backends.svd_backend as svd_mod
-from glassbox.config import GlassboxConfig
+from glassbox.config import SIGNAL_NAMES, GlassboxConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,12 +29,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _parse_signals(ctx, param, value):
+    """Parse --signal values: supports repeatable and comma-separated."""
+    if not value:
+        return ("spectral",)
+    result = []
+    for v in value:
+        for part in v.split(","):
+            part = part.strip()
+            if part not in SIGNAL_NAMES:
+                raise click.BadParameter(
+                    f"Unknown signal {part!r}. Choose from: {', '.join(SIGNAL_NAMES)}"
+                )
+            result.append(part)
+    return tuple(result)
+
+
 @click.command()
 @click.option(
     "--model",
     default="facebook/opt-125m",
     show_default=True,
     help="HuggingFace model name.",
+)
+@click.option(
+    "--signal",
+    "signals",
+    multiple=True,
+    default=None,
+    callback=_parse_signals,
+    help=(
+        "Signals to enable. Repeatable or comma-separated. "
+        f"Choices: {', '.join(SIGNAL_NAMES)}. [default: spectral]"
+    ),
 )
 @click.option(
     "--interval",
@@ -64,19 +91,10 @@ logger = logging.getLogger(__name__)
     help="Comma-separated head indices to analyze. [default: from config ([0])]",
 )
 @click.option(
-    "--operator",
-    type=click.Choice(["S", "M", "A", "diag", "lap"]),
-    default=None,
-    help=(
-        "Operator: S=scores, M=degree-normalized, A=attention-tracker,"
-        " diag=attention diagonal, lap=laplacian eigvals. [default: from config (S)]"
-    ),
-)
-@click.option(
     "--threshold",
     type=int,
     default=None,
-    help="Sequence length threshold for materialized vs matrix-free. [default: from config (2048)]",
+    help="Sequence length threshold for materialized vs matrix-free. [default: from config (512)]",
 )
 @click.option(
     "--block-size",
@@ -147,13 +165,13 @@ logger = logging.getLogger(__name__)
 )
 def main(
     model: str,
+    signals: tuple[str, ...],
     interval: int | None,
     rank: int | None,
     method: str | None,
     heads: tuple[int, ...],
     output: str | None,
     config_file: str | None,
-    operator: str | None,
     threshold: int | None,
     block_size: int | None,
     hodge: bool | None,
@@ -169,98 +187,54 @@ def main(
 
     # Build nested config overrides from CLI args
     overrides: dict = {}
-    scores_matrix: dict = {}
-    degree_normalized_matrix: dict = {}
+    signal_set = set(signals)
 
-    if interval is not None:
-        scores_matrix["interval"] = interval
-    if rank is not None:
-        scores_matrix["rank"] = rank
-    if method is not None:
-        scores_matrix["method"] = method
-    if heads:
-        scores_matrix["heads"] = list(heads)
     if output is not None:
         overrides["output"] = output
 
-    attention_tracker: dict = {}
-    attention_diagonal: dict = {}
-    laplacian_eigvals: dict = {}
+    # Signals with SVD rank/method: spectral, routing, tracker
+    _SVD_SIGNALS = {"spectral", "routing", "tracker"}
+    # Signals with threshold/block_size: routing, tracker, selfattn, laplacian
+    _THRESHOLD_SIGNALS = {"routing", "tracker", "selfattn", "laplacian"}
 
-    # Handle --operator for backward compat
-    if operator == "M":
-        scores_matrix["enabled"] = False
-        degree_normalized_matrix["enabled"] = True
-        if interval is not None:
-            degree_normalized_matrix["interval"] = interval
-        if rank is not None:
-            degree_normalized_matrix["rank"] = rank
-        if method is not None:
-            degree_normalized_matrix["method"] = method
-        if heads:
-            degree_normalized_matrix["heads"] = list(heads)
-    elif operator == "A":
-        scores_matrix["enabled"] = False
-        attention_tracker["enabled"] = True
-        if interval is not None:
-            attention_tracker["interval"] = interval
-        if rank is not None:
-            attention_tracker["rank"] = rank
-        if method is not None:
-            attention_tracker["method"] = method
-        if heads:
-            attention_tracker["heads"] = list(heads)
-        if threshold is not None:
-            attention_tracker["threshold"] = threshold
-        if block_size is not None:
-            attention_tracker["block_size"] = block_size
-    elif operator == "diag":
-        scores_matrix["enabled"] = False
-        attention_diagonal["enabled"] = True
-        if interval is not None:
-            attention_diagonal["interval"] = interval
-        if heads:
-            attention_diagonal["heads"] = list(heads)
-    elif operator == "lap":
-        scores_matrix["enabled"] = False
-        laplacian_eigvals["enabled"] = True
-        if interval is not None:
-            laplacian_eigvals["interval"] = interval
-        if heads:
-            laplacian_eigvals["heads"] = list(heads)
-        if threshold is not None:
-            laplacian_eigvals["threshold"] = threshold
-        if block_size is not None:
-            laplacian_eigvals["block_size"] = block_size
+    for sig_name in SIGNAL_NAMES:
+        sig_dict: dict = {}
+        sig_dict["enabled"] = sig_name in signal_set
 
-    # M-specific params
-    if threshold is not None:
-        degree_normalized_matrix["threshold"] = threshold
-    if block_size is not None:
-        degree_normalized_matrix["block_size"] = block_size
-    if hodge is not None:
-        degree_normalized_matrix["hodge"] = hodge
-    if hodge_target_cv is not None:
-        degree_normalized_matrix["hodge_target_cv"] = hodge_target_cv
-    if hodge_curl_seed is not None:
-        degree_normalized_matrix["hodge_curl_seed"] = hodge_curl_seed
-    if hodge_confidence is not None:
-        degree_normalized_matrix["hodge_confidence"] = hodge_confidence
-    if hodge_pilot_size is not None:
-        degree_normalized_matrix["hodge_pilot_size"] = hodge_pilot_size
-    if hodge_min_samples is not None:
-        degree_normalized_matrix["hodge_min_samples"] = hodge_min_samples
+        if sig_name in signal_set:
+            if interval is not None:
+                sig_dict["interval"] = interval
+            if heads:
+                sig_dict["heads"] = list(heads)
+            if sig_name in _SVD_SIGNALS:
+                if rank is not None:
+                    sig_dict["rank"] = rank
+                if method is not None:
+                    sig_dict["method"] = method
+            if sig_name in _THRESHOLD_SIGNALS:
+                if threshold is not None:
+                    sig_dict["threshold"] = threshold
+                if block_size is not None:
+                    sig_dict["block_size"] = block_size
 
-    if scores_matrix:
-        overrides["scores_matrix"] = scores_matrix
-    if degree_normalized_matrix:
-        overrides["degree_normalized_matrix"] = degree_normalized_matrix
-    if attention_tracker:
-        overrides["attention_tracker"] = attention_tracker
-    if attention_diagonal:
-        overrides["attention_diagonal"] = attention_diagonal
-    if laplacian_eigvals:
-        overrides["laplacian_eigvals"] = laplacian_eigvals
+        overrides[sig_name] = sig_dict
+
+    # Hodge params (routing-only)
+    if "routing" in signal_set:
+        routing_dict = overrides.get("routing", {})
+        if hodge is not None:
+            routing_dict["hodge"] = hodge
+        if hodge_target_cv is not None:
+            routing_dict["hodge_target_cv"] = hodge_target_cv
+        if hodge_curl_seed is not None:
+            routing_dict["hodge_curl_seed"] = hodge_curl_seed
+        if hodge_confidence is not None:
+            routing_dict["hodge_confidence"] = hodge_confidence
+        if hodge_pilot_size is not None:
+            routing_dict["hodge_pilot_size"] = hodge_pilot_size
+        if hodge_min_samples is not None:
+            routing_dict["hodge_min_samples"] = hodge_min_samples
+        overrides["routing"] = routing_dict
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
@@ -283,50 +257,49 @@ def main(
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
     logger.info(
-        "Config: scores_matrix=%s degree_normalized_matrix=%s"
-        " attention_tracker=%s attention_diagonal=%s laplacian_eigvals=%s",
-        "enabled" if config.scores_matrix.enabled else "disabled",
-        "enabled" if config.degree_normalized_matrix.enabled else "disabled",
-        "enabled" if config.attention_tracker.enabled else "disabled",
-        "enabled" if config.attention_diagonal.enabled else "disabled",
-        "enabled" if config.laplacian_eigvals.enabled else "disabled",
+        "Signals: spectral=%s routing=%s tracker=%s selfattn=%s laplacian=%s",
+        "enabled" if config.spectral.enabled else "disabled",
+        "enabled" if config.routing.enabled else "disabled",
+        "enabled" if config.tracker.enabled else "disabled",
+        "enabled" if config.selfattn.enabled else "disabled",
+        "enabled" if config.laplacian.enabled else "disabled",
     )
-    if config.scores_matrix.enabled:
+    if config.spectral.enabled:
         logger.info(
-            "Scores matrix: interval=%s rank=%s method=%s heads=%s",
-            config.scores_matrix.interval,
-            config.scores_matrix.rank,
-            config.scores_matrix.method,
-            config.scores_matrix.heads,
+            "Spectral: interval=%s rank=%s method=%s heads=%s",
+            config.spectral.interval,
+            config.spectral.rank,
+            config.spectral.method,
+            config.spectral.heads,
         )
-    if config.degree_normalized_matrix.enabled:
+    if config.routing.enabled:
         logger.info(
-            "Degree-normalized matrix: interval=%s rank=%s method=%s heads=%s",
-            config.degree_normalized_matrix.interval,
-            config.degree_normalized_matrix.rank,
-            config.degree_normalized_matrix.method,
-            config.degree_normalized_matrix.heads,
+            "Routing: interval=%s rank=%s method=%s heads=%s",
+            config.routing.interval,
+            config.routing.rank,
+            config.routing.method,
+            config.routing.heads,
         )
-    if config.attention_tracker.enabled:
+    if config.tracker.enabled:
         logger.info(
-            "Attention tracker: interval=%s rank=%s method=%s heads=%s",
-            config.attention_tracker.interval,
-            config.attention_tracker.rank,
-            config.attention_tracker.method,
-            config.attention_tracker.heads,
+            "Tracker: interval=%s rank=%s method=%s heads=%s",
+            config.tracker.interval,
+            config.tracker.rank,
+            config.tracker.method,
+            config.tracker.heads,
         )
-    if config.attention_diagonal.enabled:
+    if config.selfattn.enabled:
         logger.info(
-            "Attention diagonal: interval=%s heads=%s",
-            config.attention_diagonal.interval,
-            config.attention_diagonal.heads,
+            "SelfAttn: interval=%s heads=%s",
+            config.selfattn.interval,
+            config.selfattn.heads,
         )
-    if config.laplacian_eigvals.enabled:
+    if config.laplacian.enabled:
         logger.info(
-            "Laplacian eigvals: interval=%s heads=%s top_k=%s",
-            config.laplacian_eigvals.interval,
-            config.laplacian_eigvals.heads,
-            config.laplacian_eigvals.top_k,
+            "Laplacian: interval=%s heads=%s top_k=%s",
+            config.laplacian.interval,
+            config.laplacian.heads,
+            config.laplacian.top_k,
         )
 
     llm = vllm.LLM(

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from glassbox.results import ScoresMatrixFeatures
+from glassbox.results import SpectralFeatures
 
 
 def matvec_S(Q, K, v):
@@ -430,10 +430,10 @@ def compute_scores_matrix_features(
     K: torch.Tensor,
     rank: int,
     method: str = "randomized",
-) -> ScoresMatrixFeatures:
+) -> SpectralFeatures:
     """Compute spectral features of the scores matrix S = QK^T.
 
-    Returns a ScoresMatrixFeatures with singular_values and derived
+    Returns a SpectralFeatures with singular_values and derived
     spectral features (sv1, sv_ratio, sv_entropy) populated.
     """
     L = Q.shape[0]
@@ -451,4 +451,4 @@ def compute_scores_matrix_features(
     else:
         _, S, _ = randomized_svd(mv, mv_t, L, k, device=str(device))
 
-    return ScoresMatrixFeatures.from_singular_values(S.cpu().tolist())
+    return SpectralFeatures.from_singular_values(S.cpu().tolist())

@@ -635,8 +635,8 @@ def _build_summary(df_all, signals, labels, layer_ids, has_phases):
     from scipy.stats import pointbiserialr
 
     SIG_PREFIX = {
-        "scores_matrix": "S",
-        "degree_normalized_matrix": "DN",
+        "spectral": "S",
+        "routing": "DN",
     }
 
     summary_rows = []
@@ -846,7 +846,7 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
                 continue
             snap = SVDSnapshot.from_jsonl_row(json.loads(line))
             row = {
-                "signal": snap.feature_group,
+                "signal": snap.signal,
                 "request_id": snap.request_id,
                 "layer": snap.layer,
                 "layer_idx": snap.layer_idx,
@@ -929,13 +929,13 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
             f"interval={config.get('svd_interval')}, rank={config.get('svd_rank')}, "
             f"mode={config.get('mode', 'generate')}"
         )
-        if config.get("degree_normalized"):
-            log("  degree_normalized=True")
+        if config.get("signals"):
+            log(f"  signals={config['signals']}")
 
     layer_ids = sorted(df_stats["layer_idx"].unique())
 
     # ── Per-signal analysis ───────────────────────────────────────────────
-    signals = sorted(df_all["signal"].unique()) if "signal" in df_all.columns else ["scores_matrix"]
+    signals = sorted(df_all["signal"].unique()) if "signal" in df_all.columns else ["spectral"]
     log(f"Signals found: {signals}")
 
     # ── Bird's-eye summary (always) ───────────────────────────────────────
@@ -982,7 +982,7 @@ def main(results_dir: str, output_dir: str | None, detailed: bool) -> None:
             "SV Entropy",
         ]
 
-        # Add hodge features if present (degree_normalized_matrix with hodge=True)
+        # Add hodge features if present (routing signal with hodge=True)
         hodge_cols = sorted(
             [c for c in df_sig.columns if c.startswith("hodge_") and df_sig[c].notna().any()]
         )

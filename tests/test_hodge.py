@@ -542,13 +542,13 @@ class TestMatvecHelpers:
 
 class TestRoutingFeatures:
     def test_returns_typed_features(self):
-        from glassbox.results import DegreeNormalizedFeatures
+        from glassbox.results import RoutingFeatures
 
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=50)
-        assert isinstance(f, DegreeNormalizedFeatures)
+        assert isinstance(f, RoutingFeatures)
         assert len(f.singular_values) > 0
         # All hodge fields populated
         assert f.phi_hat is not None
@@ -708,11 +708,11 @@ class TestEdgeCases:
 
 class TestMaterializedPath:
     def test_returns_typed_features(self):
-        from glassbox.results import DegreeNormalizedFeatures
+        from glassbox.results import RoutingFeatures
 
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
         f = compute_routing_features_materialized(M, rank=4)
-        assert isinstance(f, DegreeNormalizedFeatures)
+        assert isinstance(f, RoutingFeatures)
         assert len(f.singular_values) > 0
         assert f.phi_hat is not None
         assert f.G is not None
