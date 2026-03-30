@@ -43,6 +43,7 @@ class RoutingConfig(BaseModel):
     #   L=1024: 174ms vs 110ms (0.6x). Materialized dominated by svdvals ~L^1.6.
     threshold: int = 512
     block_size: int = 256
+    causal: bool = True
     hodge_target_cv: float = 0.05
     hodge_curl_seed: int = 42
     hodge_confidence: float = 0.95
@@ -62,6 +63,7 @@ class TrackerConfig(BaseModel):
     heads: list[int] = [0]
     threshold: int = 512
     block_size: int = 256
+    causal: bool = True
 
 
 class SelfAttnConfig(BaseModel):
@@ -75,6 +77,7 @@ class SelfAttnConfig(BaseModel):
     top_k: int = 10
     threshold: int = 512
     block_size: int = 256
+    causal: bool = True
 
 
 class LaplacianConfig(BaseModel):
@@ -88,6 +91,7 @@ class LaplacianConfig(BaseModel):
     top_k: int = 10
     threshold: int = 512
     block_size: int = 256
+    causal: bool = True
 
 
 class GlassboxConfig(BaseSettings):

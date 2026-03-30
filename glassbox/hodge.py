@@ -94,6 +94,7 @@ def adaptive_curl_samples(
     confidence: float = 0.95,
     pilot_size: int = 100,
     floor: int = 200,
+    causal: bool = False,
 ) -> int:
     """Compute required triangle samples for target CV on curl RMS estimator.
 
@@ -124,7 +125,7 @@ def adaptive_curl_samples(
         kk = tri[:, 2].to(Q.device)
 
         def _entry(a, b):
-            return get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, a, b)
+            return get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, a, b, causal=causal)
 
         circs = (
             (_entry(ii, jj) - _entry(jj, ii))
@@ -160,6 +161,7 @@ def estimate_curl_matrix_free(
     pilot_size: int = 100,
     min_samples: int = 200,
     seed: int = 42,
+    causal: bool = False,
 ) -> float:
     """Triangle-sampling curl using on-the-fly M[i,j] lookups.
 
@@ -178,6 +180,7 @@ def estimate_curl_matrix_free(
         confidence=confidence,
         pilot_size=pilot_size,
         floor=min_samples,
+        causal=causal,
     )
     if n_samp == 0:
         return 0.0
@@ -190,7 +193,7 @@ def estimate_curl_matrix_free(
     kk = tri[:, 2].to(Q.device)
 
     def _entry(a, b):
-        return get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, a, b)
+        return get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, a, b, causal=causal)
 
     circs = (
         (_entry(ii, jj) - _entry(jj, ii))
@@ -207,20 +210,24 @@ def estimate_curl_matrix_free(
 # ---------------------------------------------------------------------------
 
 
-def compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size=256):
+def compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """Matrix-free G via blocked streaming.
 
     Computes ||M||_F^2 and <M, M^T>_F in one pass over row blocks.
     ||M_asym||_F^2 = (||M||_F^2 - <M, M^T>_F) / 2
     """
     L = Q.shape[0]
-    lse = compute_logsumexp_blocked(Q, K, scale, block_size)
+    lse = compute_logsumexp_blocked(Q, K, scale, block_size, causal=causal)
     norm_sq = torch.tensor(0.0, device=Q.device, dtype=Q.dtype)
     inner_sq = torch.tensor(0.0, device=Q.device, dtype=Q.dtype)
 
     for i0 in range(0, L, block_size):
         i1 = min(i0 + block_size, L)
         scores = Q[i0:i1] @ K.T * scale
+        if causal:
+            from glassbox.svd import _mask_causal
+
+            scores = _mask_causal(scores, i0)
         attn = torch.softmax(scores, dim=-1)  # [bs, L]
         M_block = attn * d_k_inv_sqrt.unsqueeze(0)  # [bs, L]
         norm_sq = norm_sq + (M_block**2).sum()
@@ -230,7 +237,9 @@ def compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size=256):
         col_idx = torch.arange(L, device=Q.device)
         ii_exp = col_idx.unsqueeze(1).expand(L, i1 - i0).reshape(-1)
         jj_exp = row_idx.unsqueeze(0).expand(L, i1 - i0).reshape(-1)
-        M_T_entries = get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, ii_exp, jj_exp)
+        M_T_entries = get_M_entries_batch(
+            Q, K, lse, d_k_inv_sqrt, scale, ii_exp, jj_exp, causal=causal
+        )
         M_T_block = M_T_entries.reshape(L, i1 - i0).T  # [bs, L]
         inner_sq = inner_sq + (M_block * M_T_block).sum()
 
@@ -247,7 +256,7 @@ def compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size=256):
 
 
 def compute_sigma2_asym_matrix_free(
-    Q, K, d_k_inv_sqrt, scale, block_size=256, svd_method="randomized"
+    Q, K, d_k_inv_sqrt, scale, block_size=256, svd_method="randomized", causal=False
 ):
     """Second singular value of M_asym = (M - M^T) / 2, computed matrix-free.
 
@@ -258,10 +267,10 @@ def compute_sigma2_asym_matrix_free(
     device = Q.device
 
     def matvec_asym(v):
-        return matvec_Masym_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
+        return matvec_Masym_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     def matvec_asym_t(v):
-        return -matvec_Masym_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
+        return -matvec_Masym_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     k = min(2, L - 1)
     if k < 2:
@@ -282,7 +291,7 @@ def compute_sigma2_asym_matrix_free(
 
 
 def estimate_commutator_norm_matrix_free(
-    Q, K, d_k_inv_sqrt, scale, M_fro_norm, block_size=256, n_hutchinson=10, seed=42
+    Q, K, d_k_inv_sqrt, scale, M_fro_norm, block_size=256, n_hutchinson=10, seed=42, causal=False
 ):
     """Estimate ||[M_sym, M_asym]||_F / ||M||_F via Hutchinson trace estimator.
 
@@ -303,7 +312,7 @@ def estimate_commutator_norm_matrix_free(
             torch.ones(L, device=device, dtype=dtype),
             -torch.ones(L, device=device, dtype=dtype),
         )
-        w = matvec_commutator_blocked(Q, K, z, d_k_inv_sqrt, scale, block_size)
+        w = matvec_commutator_blocked(Q, K, z, d_k_inv_sqrt, scale, block_size, causal=causal)
         trace_est = trace_est + w.dot(w)
 
     trace_est = trace_est / n_hutchinson
@@ -331,6 +340,7 @@ def compute_routing_features_matrix_free(
     min_samples=200,
     seed=42,
     n_hutchinson=10,
+    causal=False,
 ):
     """Compute all Hodge routing features matrix-free.
 
@@ -348,10 +358,10 @@ def compute_routing_features_matrix_free(
     k = min(max(rank, 2), L - 1)
 
     def matvec(v):
-        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size)
+        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     def matvec_t(u):
-        return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size)
+        return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     if svd_method == "lanczos":
         _, S, _ = svd_via_lanczos(matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device))
@@ -363,11 +373,11 @@ def compute_routing_features_matrix_free(
     phi_hat = 1.0 - sigma2
 
     # --- ||M||_F (exact, blocked) ---
-    M_fro_norm = compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size)
+    M_fro_norm = compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
     M_fro_val = M_fro_norm.item()
 
     # --- G (exact, blocked) ---
-    G, _ = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size)
+    G, _ = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     # --- C (sampled, Bernstein-bound adaptive) ---
     C = estimate_curl_matrix_free(
@@ -382,6 +392,7 @@ def compute_routing_features_matrix_free(
         pilot_size=pilot_size,
         min_samples=min_samples,
         seed=seed,
+        causal=causal,
     )
 
     # --- Pythagorean: Gamma = sqrt(G^2 - C^2) ---
@@ -389,11 +400,13 @@ def compute_routing_features_matrix_free(
     curl_ratio = C / (G + EPSILON)
 
     # --- sigma2_asym (matrix-free) ---
-    sigma2_asym = compute_sigma2_asym_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, svd_method)
+    sigma2_asym = compute_sigma2_asym_matrix_free(
+        Q, K, d_k_inv_sqrt, scale, block_size, svd_method, causal=causal
+    )
 
     # --- commutator_norm (Hutchinson, matrix-free) ---
     commutator_norm = estimate_commutator_norm_matrix_free(
-        Q, K, d_k_inv_sqrt, scale, M_fro_val, block_size, n_hutchinson, seed
+        Q, K, d_k_inv_sqrt, scale, M_fro_val, block_size, n_hutchinson, seed, causal=causal
     )
 
     return RoutingFeatures(

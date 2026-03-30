@@ -381,7 +381,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         if L <= cfg.threshold:
             # Materialized: dense tensor ops, much faster at small L
-            A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
+            scores = Qh @ Kh.T * scale
+            if cfg.causal:
+                scores = scores.masked_fill(
+                    ~torch.tril(torch.ones(L, L, dtype=torch.bool, device=scores.device)),
+                    float("-inf"),
+                )
+            A = torch.softmax(scores, dim=-1)
             M, _, _ = compute_degree_normalized_M(A)
             tier = "materialized"
             features = compute_routing_features_materialized(
@@ -392,8 +398,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             )
         else:
             # Matrix-free: O(Ld) matvecs, avoids materializing L×L matrix
-            _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, cfg.block_size)
-            lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size)
+            _, d_k_inv_sqrt = compute_dk_blocked(
+                Qh, Kh, scale, cfg.block_size, causal=cfg.causal
+            )
+            lse = compute_logsumexp_blocked(
+                Qh, Kh, scale, cfg.block_size, causal=cfg.causal
+            )
             tier = "matrix_free"
             features = compute_routing_features_matrix_free(
                 Qh,
@@ -409,6 +419,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 pilot_size=cfg.hodge_pilot_size,
                 min_samples=cfg.hodge_min_samples,
                 seed=cfg.hodge_curl_seed,
+                causal=cfg.causal,
             )
 
         snapshot = SVDSnapshot(
@@ -441,7 +452,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         k = min(cfg.rank, L - 1)
 
         if L <= cfg.threshold:
-            A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
+            scores = Qh @ Kh.T * scale
+            if cfg.causal:
+                scores = scores.masked_fill(
+                    ~torch.tril(torch.ones(L, L, dtype=torch.bool, device=scores.device)),
+                    float("-inf"),
+                )
+            A = torch.softmax(scores, dim=-1)
             tier = "materialized"
             features = compute_attention_tracker_features_materialized(A, rank=k)
         else:
@@ -453,6 +470,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 rank=k,
                 method=cfg.method,
                 block_size=cfg.block_size,
+                causal=cfg.causal,
             )
 
         snapshot = SVDSnapshot(
@@ -484,7 +502,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         scale = 1.0 / math.sqrt(Qh.shape[1])
 
         if L <= cfg.threshold:
-            A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
+            scores = Qh @ Kh.T * scale
+            if cfg.causal:
+                scores = scores.masked_fill(
+                    ~torch.tril(torch.ones(L, L, dtype=torch.bool, device=scores.device)),
+                    float("-inf"),
+                )
+            A = torch.softmax(scores, dim=-1)
             tier = "materialized"
             features = compute_attention_diagonal_features_materialized(A, top_k=cfg.top_k)
         else:
@@ -495,6 +519,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 scale,
                 top_k=cfg.top_k,
                 block_size=cfg.block_size,
+                causal=cfg.causal,
             )
 
         snapshot = SVDSnapshot(
@@ -525,7 +550,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         scale = 1.0 / math.sqrt(Qh.shape[1])
 
         if L <= cfg.threshold:
-            A = torch.softmax(Qh @ Kh.T * scale, dim=-1)
+            scores = Qh @ Kh.T * scale
+            if cfg.causal:
+                scores = scores.masked_fill(
+                    ~torch.tril(torch.ones(L, L, dtype=torch.bool, device=scores.device)),
+                    float("-inf"),
+                )
+            A = torch.softmax(scores, dim=-1)
             tier = "materialized"
             features = compute_laplacian_eigvals_materialized(A, top_k=cfg.top_k)
         else:
@@ -536,6 +567,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 scale,
                 top_k=cfg.top_k,
                 block_size=cfg.block_size,
+                causal=cfg.causal,
             )
 
         snapshot = SVDSnapshot(
