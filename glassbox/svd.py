@@ -451,4 +451,4 @@ def compute_scores_matrix_features(
     else:
         _, S, _ = randomized_svd(mv, mv_t, L, k, device=str(device))
 
-    return SpectralFeatures.from_singular_values(S.cpu().tolist())
+    return SpectralFeatures(singular_values=S.cpu().tolist())

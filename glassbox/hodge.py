@@ -396,7 +396,7 @@ def compute_routing_features_matrix_free(
         Q, K, d_k_inv_sqrt, scale, M_fro_val, block_size, n_hutchinson, seed
     )
 
-    return RoutingFeatures.from_hodge(
+    return RoutingFeatures(
         singular_values=S_sorted[:k].cpu().tolist(),
         phi_hat=phi_hat,
         sigma2=sigma2,
@@ -473,7 +473,7 @@ def compute_routing_features_materialized(
     Gamma = math.sqrt(max(G**2 - C**2, 0.0))
     curl_ratio = C / (G + EPSILON)
 
-    return RoutingFeatures.from_hodge(
+    return RoutingFeatures(
         singular_values=sigma[:k].cpu().tolist(),
         phi_hat=phi_hat,
         sigma2=sigma2,

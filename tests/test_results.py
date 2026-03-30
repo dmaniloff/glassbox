@@ -49,8 +49,8 @@ class TestSpectralFromSvs:
 
 
 class TestSpectralFeatures:
-    def test_from_svd(self):
-        f = SpectralFeatures.from_singular_values([429.6, 59.0, 41.9])
+    def test_derives_spectral(self):
+        f = SpectralFeatures(singular_values=[429.6, 59.0, 41.9])
         assert f.sv1 == 429.6
         assert f.sv_ratio == pytest.approx(429.6 / 59.0)
         assert f.sv_entropy is not None
@@ -60,8 +60,8 @@ class TestSpectralFeatures:
 
 
 class TestRoutingFeatures:
-    def test_from_hodge(self):
-        f = RoutingFeatures.from_hodge(
+    def test_derives_spectral(self):
+        f = RoutingFeatures(
             singular_values=[1.0, 0.5],
             phi_hat=0.31,
             G=0.15,
@@ -79,8 +79,8 @@ class TestRoutingFeatures:
 
 
 class TestTrackerFeatures:
-    def test_from_attention_tracker(self):
-        f = TrackerFeatures.from_attention_tracker(
+    def test_derives_spectral(self):
+        f = TrackerFeatures(
             singular_values=[1.0, 0.5, 0.1],
             sigma2=0.5,
             sigma2_asym=0.02,
@@ -107,7 +107,7 @@ class TestSVDSnapshot:
             "step": 32,
             "L": 128,
             "singular_values": [10.0, 5.0, 2.0],
-            "features": SpectralFeatures.from_singular_values([10.0, 5.0, 2.0]),
+            "features": SpectralFeatures(singular_values=[10.0, 5.0, 2.0]),
         }
         defaults.update(overrides)
         return SVDSnapshot(**defaults)
@@ -132,7 +132,7 @@ class TestSVDSnapshot:
         assert restored.features.sv_ratio == snap.features.sv_ratio
 
     def test_tracker_round_trip(self):
-        features = TrackerFeatures.from_attention_tracker(
+        features = TrackerFeatures(
             singular_values=[1.0, 0.5],
             sigma2=0.5,
             sigma2_asym=0.02,
@@ -152,7 +152,7 @@ class TestSVDSnapshot:
         assert restored.features.sv_ratio == pytest.approx(2.0)
 
     def test_routing_round_trip(self):
-        features = RoutingFeatures.from_hodge(
+        features = RoutingFeatures(
             singular_values=[1.0, 0.5],
             phi_hat=0.3,
             G=0.15,

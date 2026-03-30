@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SPECTRAL_FEATURE_NAMES = ["sv_ratio", "sv1", "sv_entropy"]
 
@@ -32,7 +32,8 @@ class SpectralFeatures(BaseModel):
     """Features from SVD of pre-softmax scores matrix S = QK^T.
 
     Single source of truth: singular_values are stored directly, and
-    spectral features (sv1, sv_ratio, sv_entropy) are derived from them.
+    spectral features (sv1, sv_ratio, sv_entropy) are derived from them
+    automatically on construction.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -47,19 +48,21 @@ class SpectralFeatures(BaseModel):
         None, description="Entropy of normalized singular value distribution."
     )
 
+    @model_validator(mode="before")
     @classmethod
-    def from_singular_values(cls, singular_values: list[float]) -> SpectralFeatures:
-        """Build from singular values, deriving spectral features."""
-        kwargs = _spectral_from_svs(singular_values)
-        kwargs["singular_values"] = singular_values
-        return cls(**kwargs)
+    def _derive_spectral(cls, values: dict) -> dict:
+        if isinstance(values, dict) and "singular_values" in values:
+            for k, v in _spectral_from_svs(values["singular_values"]).items():
+                values.setdefault(k, v)
+        return values
 
 
 class RoutingFeatures(BaseModel):
     """Features from SVD + Hodge decomposition of degree-normalized M.
 
     Single source of truth: singular_values are stored directly, and
-    spectral features (sv1, sv_ratio, sv_entropy) are derived from them.
+    spectral features (sv1, sv_ratio, sv_entropy) are derived from them
+    automatically on construction.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -99,21 +102,13 @@ class RoutingFeatures(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
     @classmethod
-    def from_hodge(
-        cls,
-        singular_values: list[float],
-        **hodge_features,
-    ) -> RoutingFeatures:
-        """Build from singular values and Hodge decomposition features.
-
-        Spectral features (sv1, sv_ratio, sv_entropy) are derived from
-        singular_values automatically.
-        """
-        kwargs = _spectral_from_svs(singular_values)
-        kwargs["singular_values"] = singular_values
-        kwargs.update(hodge_features)
-        return cls(**kwargs)
+    def _derive_spectral(cls, values: dict) -> dict:
+        if isinstance(values, dict) and "singular_values" in values:
+            for k, v in _spectral_from_svs(values["singular_values"]).items():
+                values.setdefault(k, v)
+        return values
 
 
 class TrackerFeatures(BaseModel):
@@ -121,6 +116,8 @@ class TrackerFeatures(BaseModel):
 
     Based on AttentionTracker (arXiv:2411.00348), span-independent features.
     Singular values come from A directly (not degree-normalized).
+    Spectral features (sv1, sv_ratio, sv_entropy) are derived from
+    singular_values automatically on construction.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -147,17 +144,13 @@ class TrackerFeatures(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
     @classmethod
-    def from_attention_tracker(
-        cls,
-        singular_values: list[float],
-        **tracker_features,
-    ) -> TrackerFeatures:
-        """Build from singular values and tracker features."""
-        kwargs = _spectral_from_svs(singular_values)
-        kwargs["singular_values"] = singular_values
-        kwargs.update(tracker_features)
-        return cls(**kwargs)
+    def _derive_spectral(cls, values: dict) -> dict:
+        if isinstance(values, dict) and "singular_values" in values:
+            for k, v in _spectral_from_svs(values["singular_values"]).items():
+                values.setdefault(k, v)
+        return values
 
 
 class SelfAttnFeatures(BaseModel):

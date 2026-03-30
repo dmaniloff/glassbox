@@ -63,7 +63,7 @@ def compute_attention_tracker_features_materialized(
     A_fro = torch.linalg.norm(A, "fro").item()
     commutator_norm = torch.linalg.norm(comm, "fro").item() / (A_fro + EPSILON)
 
-    return TrackerFeatures.from_attention_tracker(
+    return TrackerFeatures(
         singular_values=sigma[:k].cpu().tolist(),
         sigma2=sigma2,
         sigma2_asym=sigma2_asym,
@@ -125,7 +125,7 @@ def compute_attention_tracker_features_matrix_free(
     # --- commutator_norm via existing hodge.py (d_k_inv_sqrt=ones -> M=A) ---
     commutator_norm = estimate_commutator_norm_matrix_free(Q, K, ones, scale, A_fro, block_size)
 
-    return TrackerFeatures.from_attention_tracker(
+    return TrackerFeatures(
         singular_values=S_sorted[:k].cpu().tolist(),
         sigma2=sigma2,
         sigma2_asym=sigma2_asym,
