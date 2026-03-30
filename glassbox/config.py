@@ -8,6 +8,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Canonical signal names (user-facing)
 SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
 
+# Signals that use SVD rank/method
+SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
+
+# Signals that use threshold/block_size (materialized vs matrix-free two-tier)
+THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian"}
+
 
 class SpectralConfig(BaseModel):
     """SVD of pre-softmax scores matrix S = QK^T."""

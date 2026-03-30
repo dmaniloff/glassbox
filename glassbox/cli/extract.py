@@ -27,7 +27,7 @@ from pathlib import Path
 
 import click
 
-from glassbox.config import SIGNAL_NAMES
+from glassbox.config import SIGNAL_NAMES, SVD_SIGNALS, THRESHOLD_SIGNALS
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
     RoutingFeatures,
@@ -512,9 +512,6 @@ def main(
     # Configure glassbox backend
     gb_kwargs: dict = {"output": str(svd_features_path)}
 
-    # Signals with SVD rank/method
-    _SVD_SIGNALS = {"spectral", "routing", "tracker"}
-
     for sig_name in SIGNAL_NAMES:
         if sig_name not in signal_set:
             gb_kwargs[sig_name] = {"enabled": False}
@@ -523,11 +520,11 @@ def main(
         sig_cfg: dict = {"enabled": True, "interval": 1}
         if heads:
             sig_cfg["heads"] = list(heads)
-        if sig_name in _SVD_SIGNALS:
+        if sig_name in SVD_SIGNALS:
             sig_cfg["rank"] = svd_rank
             if method is not None:
                 sig_cfg["method"] = method
-        if threshold is not None:
+        if sig_name in THRESHOLD_SIGNALS and threshold is not None:
             sig_cfg["threshold"] = threshold
         gb_kwargs[sig_name] = sig_cfg
 

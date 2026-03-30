@@ -20,7 +20,7 @@ import vllm
 
 # Import triggers @register_backend(AttentionBackendEnum.CUSTOM)
 import glassbox.backends.svd_backend as svd_mod
-from glassbox.config import SIGNAL_NAMES, GlassboxConfig
+from glassbox.config import SIGNAL_NAMES, SVD_SIGNALS, THRESHOLD_SIGNALS, GlassboxConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -155,11 +155,6 @@ def main(
     if output is not None:
         overrides["output"] = output
 
-    # Signals with SVD rank/method: spectral, routing, tracker
-    _SVD_SIGNALS = {"spectral", "routing", "tracker"}
-    # Signals with threshold/block_size: routing, tracker, selfattn, laplacian
-    _THRESHOLD_SIGNALS = {"routing", "tracker", "selfattn", "laplacian"}
-
     # When --signal is explicitly provided, set enabled for each signal.
     # When not provided (None), don't override enabled — let YAML/config
     # defaults decide. If neither --signal nor YAML is provided, the config
@@ -177,12 +172,12 @@ def main(
                 sig_dict["interval"] = interval
             if heads:
                 sig_dict["heads"] = list(heads)
-            if sig_name in _SVD_SIGNALS:
+            if sig_name in SVD_SIGNALS:
                 if rank is not None:
                     sig_dict["rank"] = rank
                 if method is not None:
                     sig_dict["method"] = method
-            if sig_name in _THRESHOLD_SIGNALS:
+            if sig_name in THRESHOLD_SIGNALS:
                 if threshold is not None:
                     sig_dict["threshold"] = threshold
                 if block_size is not None:
