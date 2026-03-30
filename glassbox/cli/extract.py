@@ -209,10 +209,9 @@ def _build_feature_columns(
         lap_cols = [f"lap_eigval_{i}" for i in range(lap_top_k)]
         signal_entries.append(("laplacian", lap_cols))
 
-    use_signal_prefix = len(signal_entries) > 1
     columns: list[str] = []
     for signal_name, feature_names in signal_entries:
-        prefix = f"{signal_name}_" if use_signal_prefix else ""
+        prefix = f"{signal_name}_"
         for li in range(num_layers):
             for hi in heads:
                 for feat in feature_names:
@@ -267,21 +266,12 @@ def _write_parquet(
                 row = json.loads(line)
                 sample_meta[row["request_id"]] = row
 
-    # Signal prefixes are present when multiple signals are enabled
-    use_signal_prefix = any(
-        col.startswith("spectral_")
-        or col.startswith("routing_")
-        or col.startswith("tracker_")
-        or col.startswith("selfattn_")
-        for col in feature_columns[:1]
-    )
-
     def _pivot_request(buf: list[tuple[str, int, int, int, dict]], rid: int) -> dict:
         """Pivot one request_id's SVD rows into a single wide dict."""
         wide: dict = {"request_id": rid}
         length = None
         for sig, li, hi, seq_len, feats in buf:
-            prefix = f"{sig}_" if use_signal_prefix else ""
+            prefix = f"{sig}_"
             if length is None:
                 length = seq_len
             for k, v in feats.items():
