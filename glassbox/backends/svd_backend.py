@@ -198,32 +198,17 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         # 4. Check per-signal intervals and run SVD
         spectral_due = (
-            self.config.spectral.enabled
-            and state.step % self.config.spectral.interval == 0
+            self.config.spectral.enabled and state.step % self.config.spectral.interval == 0
         )
-        routing_due = (
-            self.config.routing.enabled
-            and state.step % self.config.routing.interval == 0
-        )
-        tracker_due = (
-            self.config.tracker.enabled
-            and state.step % self.config.tracker.interval == 0
-        )
+        routing_due = self.config.routing.enabled and state.step % self.config.routing.interval == 0
+        tracker_due = self.config.tracker.enabled and state.step % self.config.tracker.interval == 0
         selfattn_due = (
-            self.config.selfattn.enabled
-            and state.step % self.config.selfattn.interval == 0
+            self.config.selfattn.enabled and state.step % self.config.selfattn.interval == 0
         )
         laplacian_due = (
-            self.config.laplacian.enabled
-            and state.step % self.config.laplacian.interval == 0
+            self.config.laplacian.enabled and state.step % self.config.laplacian.interval == 0
         )
-        any_due = (
-            spectral_due
-            or routing_due
-            or tracker_due
-            or selfattn_due
-            or laplacian_due
-        )
+        any_due = spectral_due or routing_due or tracker_due or selfattn_due or laplacian_due
         if any_due:
             try:
                 self._run_svd(

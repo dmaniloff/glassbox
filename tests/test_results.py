@@ -4,9 +4,9 @@ from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
     LaplacianFeatures,
     RoutingFeatures,
-    SVDSnapshot,
     SelfAttnFeatures,
     SpectralFeatures,
+    SVDSnapshot,
     TrackerFeatures,
     _spectral_from_svs,
 )

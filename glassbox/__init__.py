@@ -14,9 +14,9 @@ from glassbox.config import GlassboxConfig
 from glassbox.results import (
     LaplacianFeatures,
     RoutingFeatures,
-    SVDSnapshot,
     SelfAttnFeatures,
     SpectralFeatures,
+    SVDSnapshot,
     TrackerFeatures,
 )
 

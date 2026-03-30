@@ -219,11 +219,7 @@ class SVDSnapshot(BaseModel):
     singular_values: list[float] = []
     tier: str | None = None  # "materialized" | "matrix_free"
     features: (
-        SpectralFeatures
-        | RoutingFeatures
-        | TrackerFeatures
-        | SelfAttnFeatures
-        | LaplacianFeatures
+        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
     )
 
     @classmethod

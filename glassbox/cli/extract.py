@@ -31,8 +31,8 @@ from glassbox.config import SIGNAL_NAMES
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
     RoutingFeatures,
-    SVDSnapshot,
     SelfAttnFeatures,
+    SVDSnapshot,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -199,9 +199,7 @@ def _build_feature_columns(
     if "spectral" in signals:
         signal_entries.append(("spectral", list(SPECTRAL_FEATURE_NAMES)))
     if "routing" in signals:
-        signal_entries.append(
-            ("routing", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES)
-        )
+        signal_entries.append(("routing", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES))
     if "selfattn" in signals:
         ad_cols = list(_AD_FEATURE_NAMES)
         if ad_top_k > 0:
@@ -434,10 +432,7 @@ def _parse_signals(ctx, param, value):
     multiple=True,
     default=None,
     callback=_parse_signals,
-    help=(
-        "Signals to enable. Repeatable or comma-separated. "
-        f"Choices: {', '.join(SIGNAL_NAMES)}."
-    ),
+    help=(f"Signals to enable. Repeatable or comma-separated. Choices: {', '.join(SIGNAL_NAMES)}."),
 )
 @click.option(
     "--threshold",

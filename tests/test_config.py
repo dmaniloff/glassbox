@@ -74,10 +74,7 @@ def test_yaml_tracker(tmp_path, monkeypatch):
 
 def test_yaml_routing(tmp_path, monkeypatch):
     yaml_content = (
-        "routing:\n"
-        "  enabled: true\n"
-        "  interval: 64\n"
-        "output: /var/log/glassbox/signals.jsonl\n"
+        "routing:\n  enabled: true\n  interval: 64\noutput: /var/log/glassbox/signals.jsonl\n"
     )
     (tmp_path / "glassbox.yaml").write_text(yaml_content)
     monkeypatch.chdir(tmp_path)
@@ -132,9 +129,7 @@ def test_programmatic_kwargs_laplacian():
 
 
 def test_yaml_laplacian(tmp_path, monkeypatch):
-    yaml_content = (
-        "laplacian:\n  enabled: true\n  interval: 64\n  top_k: 25\n  heads: [0, 1, 2]\n"
-    )
+    yaml_content = "laplacian:\n  enabled: true\n  interval: 64\n  top_k: 25\n  heads: [0, 1, 2]\n"
     (tmp_path / "glassbox.yaml").write_text(yaml_content)
     monkeypatch.chdir(tmp_path)
     config = GlassboxConfig()
