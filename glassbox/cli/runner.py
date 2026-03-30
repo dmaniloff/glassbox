@@ -64,7 +64,8 @@ def _parse_signals(ctx, param, value):
     callback=_parse_signals,
     help=(
         "Signals to enable. Repeatable or comma-separated. "
-        f"Choices: {', '.join(SIGNAL_NAMES)}. [default: spectral]"
+        f"Choices: {', '.join(SIGNAL_NAMES)}. [default: spectral] "
+        "Routing Hodge parameters (hodge_target_cv, etc.) are configurable via YAML only."
     ),
 )
 @click.option(
@@ -107,41 +108,6 @@ def _parse_signals(ctx, param, value):
     help="Block size for blocked-streaming matvecs. [default: from config (256)]",
 )
 @click.option(
-    "--hodge/--no-hodge",
-    default=None,
-    help="Compute Hodge decomposition features. [default: from config (False)]",
-)
-@click.option(
-    "--hodge-target-cv",
-    type=float,
-    default=None,
-    help="Target CV for adaptive curl sampling. [default: from config (0.05)]",
-)
-@click.option(
-    "--hodge-curl-seed",
-    type=int,
-    default=None,
-    help="Seed for curl triangle sampling. [default: from config (42)]",
-)
-@click.option(
-    "--hodge-confidence",
-    type=float,
-    default=None,
-    help="Bernstein bound confidence level. [default: from config (0.95)]",
-)
-@click.option(
-    "--hodge-pilot-size",
-    type=int,
-    default=None,
-    help="Pilot triangle samples for kurtosis estimation. [default: from config (100)]",
-)
-@click.option(
-    "--hodge-min-samples",
-    type=int,
-    default=None,
-    help="Minimum triangle sample count. [default: from config (200)]",
-)
-@click.option(
     "--output",
     type=click.Path(),
     default=None,
@@ -178,12 +144,6 @@ def main(
     config_file: str | None,
     threshold: int | None,
     block_size: int | None,
-    hodge: bool | None,
-    hodge_target_cv: float | None,
-    hodge_curl_seed: int | None,
-    hodge_confidence: float | None,
-    hodge_pilot_size: int | None,
-    hodge_min_samples: int | None,
     max_tokens: int,
     prompt: str,
 ) -> None:
@@ -230,31 +190,6 @@ def main(
 
         if sig_dict:
             overrides[sig_name] = sig_dict
-
-    # Hodge params (routing-only)
-    if signal_set is None or "routing" in signal_set:
-        routing_dict = overrides.get("routing", {})
-        hodge_updated = False
-        if hodge is not None:
-            routing_dict["hodge"] = hodge
-            hodge_updated = True
-        if hodge_target_cv is not None:
-            routing_dict["hodge_target_cv"] = hodge_target_cv
-            hodge_updated = True
-        if hodge_curl_seed is not None:
-            routing_dict["hodge_curl_seed"] = hodge_curl_seed
-            hodge_updated = True
-        if hodge_confidence is not None:
-            routing_dict["hodge_confidence"] = hodge_confidence
-            hodge_updated = True
-        if hodge_pilot_size is not None:
-            routing_dict["hodge_pilot_size"] = hodge_pilot_size
-            hodge_updated = True
-        if hodge_min_samples is not None:
-            routing_dict["hodge_min_samples"] = hodge_min_samples
-            hodge_updated = True
-        if hodge_updated:
-            overrides["routing"] = routing_dict
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
