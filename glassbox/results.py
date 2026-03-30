@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SPECTRAL_FEATURE_NAMES = ["sv_ratio", "sv1", "sv_entropy"]
 
@@ -28,11 +28,12 @@ def _spectral_from_svs(svs: list[float]) -> dict[str, float | None]:
     return {"sv1": sv1, "sv_ratio": sv_ratio, "sv_entropy": sv_entropy}
 
 
-class ScoresMatrixFeatures(BaseModel):
+class SpectralFeatures(BaseModel):
     """Features from SVD of pre-softmax scores matrix S = QK^T.
 
     Single source of truth: singular_values are stored directly, and
-    spectral features (sv1, sv_ratio, sv_entropy) are derived from them.
+    spectral features (sv1, sv_ratio, sv_entropy) are derived from them
+    automatically on construction.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -47,19 +48,21 @@ class ScoresMatrixFeatures(BaseModel):
         None, description="Entropy of normalized singular value distribution."
     )
 
+    @model_validator(mode="before")
     @classmethod
-    def from_singular_values(cls, singular_values: list[float]) -> ScoresMatrixFeatures:
-        """Build from singular values, deriving spectral features."""
-        kwargs = _spectral_from_svs(singular_values)
-        kwargs["singular_values"] = singular_values
-        return cls(**kwargs)
+    def _derive_spectral(cls, values: dict) -> dict:
+        if isinstance(values, dict) and "singular_values" in values:
+            for k, v in _spectral_from_svs(values["singular_values"]).items():
+                values.setdefault(k, v)
+        return values
 
 
-class DegreeNormalizedFeatures(BaseModel):
+class RoutingFeatures(BaseModel):
     """Features from SVD + Hodge decomposition of degree-normalized M.
 
     Single source of truth: singular_values are stored directly, and
-    spectral features (sv1, sv_ratio, sv_entropy) are derived from them.
+    spectral features (sv1, sv_ratio, sv_entropy) are derived from them
+    automatically on construction.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -99,28 +102,22 @@ class DegreeNormalizedFeatures(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
     @classmethod
-    def from_hodge(
-        cls,
-        singular_values: list[float],
-        **hodge_features,
-    ) -> DegreeNormalizedFeatures:
-        """Build from singular values and Hodge decomposition features.
-
-        Spectral features (sv1, sv_ratio, sv_entropy) are derived from
-        singular_values automatically.
-        """
-        kwargs = _spectral_from_svs(singular_values)
-        kwargs["singular_values"] = singular_values
-        kwargs.update(hodge_features)
-        return cls(**kwargs)
+    def _derive_spectral(cls, values: dict) -> dict:
+        if isinstance(values, dict) and "singular_values" in values:
+            for k, v in _spectral_from_svs(values["singular_values"]).items():
+                values.setdefault(k, v)
+        return values
 
 
-class AttentionTrackerFeatures(BaseModel):
+class TrackerFeatures(BaseModel):
     """Features from raw post-softmax attention matrix A.
 
     Based on AttentionTracker (arXiv:2411.00348), span-independent features.
     Singular values come from A directly (not degree-normalized).
+    Spectral features (sv1, sv_ratio, sv_entropy) are derived from
+    singular_values automatically on construction.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -147,20 +144,16 @@ class AttentionTrackerFeatures(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
     @classmethod
-    def from_attention_tracker(
-        cls,
-        singular_values: list[float],
-        **tracker_features,
-    ) -> AttentionTrackerFeatures:
-        """Build from singular values and tracker features."""
-        kwargs = _spectral_from_svs(singular_values)
-        kwargs["singular_values"] = singular_values
-        kwargs.update(tracker_features)
-        return cls(**kwargs)
+    def _derive_spectral(cls, values: dict) -> dict:
+        if isinstance(values, dict) and "singular_values" in values:
+            for k, v in _spectral_from_svs(values["singular_values"]).items():
+                values.setdefault(k, v)
+        return values
 
 
-class AttentionDiagonalFeatures(BaseModel):
+class SelfAttnFeatures(BaseModel):
     """Features from the attention matrix diagonal.
 
     - ``attn_diag_logmean``: mean log self-attention weight mean_i(log(A[i,i]))
@@ -185,7 +178,7 @@ class AttentionDiagonalFeatures(BaseModel):
     )
 
 
-class LaplacianEigvalsFeatures(BaseModel):
+class LaplacianFeatures(BaseModel):
     """Laplacian eigenvalue features from attention graphs.
 
     Treats the attention matrix A as a weighted directed graph and computes
@@ -208,9 +201,8 @@ class SVDSnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    # "scores_matrix" | "degree_normalized_matrix" | "attention_tracker"
-    # | "attention_diagonal" | "laplacian_eigvals"
-    feature_group: str
+    # "spectral" | "routing" | "tracker" | "selfattn" | "laplacian"
+    signal: str
     request_id: int
     layer: str
     layer_idx: int | None
@@ -220,28 +212,24 @@ class SVDSnapshot(BaseModel):
     singular_values: list[float] = []
     tier: str | None = None  # "materialized" | "matrix_free"
     features: (
-        ScoresMatrixFeatures
-        | DegreeNormalizedFeatures
-        | AttentionTrackerFeatures
-        | AttentionDiagonalFeatures
-        | LaplacianEigvalsFeatures
+        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
     )
 
     @classmethod
     def from_jsonl_row(cls, raw: dict) -> SVDSnapshot:
-        """Deserialize a JSONL row, discriminating features by feature_group."""
+        """Deserialize a JSONL row, discriminating features by signal."""
         d = dict(raw)
-        fg = d["feature_group"]
+        sig = d["signal"]
         feat_raw = d["features"]
         if isinstance(feat_raw, dict):
-            if fg == "degree_normalized_matrix":
-                d["features"] = DegreeNormalizedFeatures(**feat_raw)
-            elif fg == "attention_tracker":
-                d["features"] = AttentionTrackerFeatures(**feat_raw)
-            elif fg == "attention_diagonal":
-                d["features"] = AttentionDiagonalFeatures(**feat_raw)
-            elif fg == "laplacian_eigvals":
-                d["features"] = LaplacianEigvalsFeatures(**feat_raw)
+            if sig == "routing":
+                d["features"] = RoutingFeatures(**feat_raw)
+            elif sig == "tracker":
+                d["features"] = TrackerFeatures(**feat_raw)
+            elif sig == "selfattn":
+                d["features"] = SelfAttnFeatures(**feat_raw)
+            elif sig == "laplacian":
+                d["features"] = LaplacianFeatures(**feat_raw)
             else:
-                d["features"] = ScoresMatrixFeatures(**feat_raw)
+                d["features"] = SpectralFeatures(**feat_raw)
         return cls(**d)

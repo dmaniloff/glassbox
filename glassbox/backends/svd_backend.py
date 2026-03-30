@@ -8,7 +8,6 @@ Usage:
 
 Configuration via GlassboxConfig (see glassbox/config.py):
     - glassbox.yaml (primary)
-    - Legacy GLASSBOX_SVD_* env vars (deprecated, auto-migrated)
     - Programmatic kwargs
 """
 
@@ -154,11 +153,11 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         # Skip if no signals enabled
         if not (
-            self.config.scores_matrix.enabled
-            or self.config.degree_normalized_matrix.enabled
-            or self.config.attention_tracker.enabled
-            or self.config.attention_diagonal.enabled
-            or self.config.laplacian_eigvals.enabled
+            self.config.spectral.enabled
+            or self.config.routing.enabled
+            or self.config.tracker.enabled
+            or self.config.selfattn.enabled
+            or self.config.laplacian.enabled
         ):
             return result
 
@@ -199,32 +198,17 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         # 4. Check per-signal intervals and run SVD
         spectral_due = (
-            self.config.scores_matrix.enabled
-            and state.step % self.config.scores_matrix.interval == 0
+            self.config.spectral.enabled and state.step % self.config.spectral.interval == 0
         )
-        normalized_due = (
-            self.config.degree_normalized_matrix.enabled
-            and state.step % self.config.degree_normalized_matrix.interval == 0
+        routing_due = self.config.routing.enabled and state.step % self.config.routing.interval == 0
+        tracker_due = self.config.tracker.enabled and state.step % self.config.tracker.interval == 0
+        selfattn_due = (
+            self.config.selfattn.enabled and state.step % self.config.selfattn.interval == 0
         )
-        attention_tracker_due = (
-            self.config.attention_tracker.enabled
-            and state.step % self.config.attention_tracker.interval == 0
+        laplacian_due = (
+            self.config.laplacian.enabled and state.step % self.config.laplacian.interval == 0
         )
-        attn_diag_due = (
-            self.config.attention_diagonal.enabled
-            and state.step % self.config.attention_diagonal.interval == 0
-        )
-        lap_eigvals_due = (
-            self.config.laplacian_eigvals.enabled
-            and state.step % self.config.laplacian_eigvals.interval == 0
-        )
-        any_due = (
-            spectral_due
-            or normalized_due
-            or attention_tracker_due
-            or attn_diag_due
-            or lap_eigvals_due
-        )
+        any_due = spectral_due or routing_due or tracker_due or selfattn_due or laplacian_due
         if any_due:
             try:
                 self._run_svd(
@@ -234,10 +218,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                     kv_cache,
                     attn_metadata,
                     run_spectral=spectral_due,
-                    run_normalized=normalized_due,
-                    run_attention_tracker=attention_tracker_due,
-                    run_attn_diag=attn_diag_due,
-                    run_lap_eigvals=lap_eigvals_due,
+                    run_routing=routing_due,
+                    run_tracker=tracker_due,
+                    run_selfattn=selfattn_due,
+                    run_laplacian=laplacian_due,
                 )
             except Exception:
                 logger.exception("[SVD] error in layer %s at step %d", layer_name, state.step)
@@ -293,10 +277,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
         run_spectral: bool = True,
-        run_normalized: bool = False,
-        run_attention_tracker: bool = False,
-        run_attn_diag: bool = False,
-        run_lap_eigvals: bool = False,
+        run_routing: bool = False,
+        run_tracker: bool = False,
+        run_selfattn: bool = False,
+        run_laplacian: bool = False,
     ) -> None:
         # Stack accumulated Q: [L_q, num_heads, head_size]
         Q_all = torch.cat(state.q_buffer, dim=0).float()
@@ -318,15 +302,15 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # Union of active heads for signals that are due
         heads: set[int] = set()
         if run_spectral:
-            heads.update(self.config.scores_matrix.heads)
-        if run_normalized:
-            heads.update(self.config.degree_normalized_matrix.heads)
-        if run_attention_tracker:
-            heads.update(self.config.attention_tracker.heads)
-        if run_attn_diag:
-            heads.update(self.config.attention_diagonal.heads)
-        if run_lap_eigvals:
-            heads.update(self.config.laplacian_eigvals.heads)
+            heads.update(self.config.spectral.heads)
+        if run_routing:
+            heads.update(self.config.routing.heads)
+        if run_tracker:
+            heads.update(self.config.tracker.heads)
+        if run_selfattn:
+            heads.update(self.config.selfattn.heads)
+        if run_laplacian:
+            heads.update(self.config.laplacian.heads)
 
         for head_idx in sorted(heads):
             if head_idx >= Q_all.shape[1]:
@@ -338,16 +322,16 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             Qh = Q_all[:, head_idx, :]  # [L, d]
             Kh = K_all[:, kv_head_idx, :]  # [L, d]
 
-            if run_spectral and head_idx in self.config.scores_matrix.heads:
+            if run_spectral and head_idx in self.config.spectral.heads:
                 self._run_svd_scores(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_normalized and head_idx in self.config.degree_normalized_matrix.heads:
-                self._run_svd_normalized(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_attention_tracker and head_idx in self.config.attention_tracker.heads:
-                self._run_attention_tracker(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_attn_diag and head_idx in self.config.attention_diagonal.heads:
-                self._run_attn_diag(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_lap_eigvals and head_idx in self.config.laplacian_eigvals.heads:
-                self._run_laplacian_eigvals(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+            if run_routing and head_idx in self.config.routing.heads:
+                self._run_svd_routing(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+            if run_tracker and head_idx in self.config.tracker.heads:
+                self._run_tracker(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+            if run_selfattn and head_idx in self.config.selfattn.heads:
+                self._run_selfattn(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+            if run_laplacian and head_idx in self.config.laplacian.heads:
+                self._run_laplacian(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
 
     def _run_svd_scores(
         self,
@@ -360,7 +344,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         L: int,
     ) -> None:
         """SVD of the scores matrix S = QK^T."""
-        cfg = self.config.scores_matrix
+        cfg = self.config.spectral
         features = compute_scores_matrix_features(
             Qh,
             Kh,
@@ -368,7 +352,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             method=cfg.method,
         )
         snapshot = SVDSnapshot(
-            feature_group="scores_matrix",
+            signal="spectral",
             request_id=type(self).req_tracker.request_id,
             layer=layer_name,
             layer_idx=layer_idx,
@@ -380,7 +364,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         )
         self._emit_result(snapshot)
 
-    def _run_svd_normalized(
+    def _run_svd_routing(
         self,
         layer_name: str,
         layer_idx: int | None,
@@ -391,7 +375,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         L: int,
     ) -> None:
         """SVD of the degree-normalized cross-operator M."""
-        cfg = self.config.degree_normalized_matrix
+        cfg = self.config.routing
         scale = 1.0 / math.sqrt(Qh.shape[1])
         k = min(cfg.rank, L - 1)
 
@@ -428,7 +412,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             )
 
         snapshot = SVDSnapshot(
-            feature_group="degree_normalized_matrix",
+            signal="routing",
             request_id=type(self).req_tracker.request_id,
             layer=layer_name,
             layer_idx=layer_idx,
@@ -441,7 +425,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         )
         self._emit_result(snapshot)
 
-    def _run_attention_tracker(
+    def _run_tracker(
         self,
         layer_name: str,
         layer_idx: int | None,
@@ -452,7 +436,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         L: int,
     ) -> None:
         """Features from raw post-softmax attention matrix A."""
-        cfg = self.config.attention_tracker
+        cfg = self.config.tracker
         scale = 1.0 / math.sqrt(Qh.shape[1])
         k = min(cfg.rank, L - 1)
 
@@ -472,7 +456,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             )
 
         snapshot = SVDSnapshot(
-            feature_group="attention_tracker",
+            signal="tracker",
             request_id=type(self).req_tracker.request_id,
             layer=layer_name,
             layer_idx=layer_idx,
@@ -485,7 +469,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         )
         self._emit_result(snapshot)
 
-    def _run_attn_diag(
+    def _run_selfattn(
         self,
         layer_name: str,
         layer_idx: int | None,
@@ -496,7 +480,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         L: int,
     ) -> None:
         """Mean log self-attention weight from the diagonal of A."""
-        cfg = self.config.attention_diagonal
+        cfg = self.config.selfattn
         scale = 1.0 / math.sqrt(Qh.shape[1])
 
         if L <= cfg.threshold:
@@ -514,7 +498,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             )
 
         snapshot = SVDSnapshot(
-            feature_group="attention_diagonal",
+            signal="selfattn",
             request_id=type(self).req_tracker.request_id,
             layer=layer_name,
             layer_idx=layer_idx,
@@ -526,7 +510,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         )
         self._emit_result(snapshot)
 
-    def _run_laplacian_eigvals(
+    def _run_laplacian(
         self,
         layer_name: str,
         layer_idx: int | None,
@@ -537,7 +521,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         L: int,
     ) -> None:
         """Laplacian eigenvalue features from the attention graph."""
-        cfg = self.config.laplacian_eigvals
+        cfg = self.config.laplacian
         scale = 1.0 / math.sqrt(Qh.shape[1])
 
         if L <= cfg.threshold:
@@ -555,7 +539,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             )
 
         snapshot = SVDSnapshot(
-            feature_group="laplacian_eigvals",
+            signal="laplacian",
             request_id=type(self).req_tracker.request_id,
             layer=layer_name,
             layer_idx=layer_idx,
@@ -591,7 +575,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             else:
                 logger.info(
                     "[%s] %s head=%d step=%d L=%d features=%s",
-                    snapshot.feature_group,
+                    snapshot.signal,
                     snapshot.layer,
                     snapshot.head,
                     snapshot.step,

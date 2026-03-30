@@ -23,7 +23,7 @@ from functools import lru_cache
 
 import torch
 
-from glassbox.results import DegreeNormalizedFeatures
+from glassbox.results import RoutingFeatures
 from glassbox.svd import (
     compute_logsumexp_blocked,
     compute_M_fro_norm_blocked,
@@ -334,7 +334,7 @@ def compute_routing_features_matrix_free(
 ):
     """Compute all Hodge routing features matrix-free.
 
-    Returns a DegreeNormalizedFeatures with singular_values, spectral
+    Returns a RoutingFeatures with singular_values, spectral
     features, and Hodge decomposition features populated.
 
     The Pythagorean identity G^2 = Gamma^2 + C^2 holds by construction:
@@ -396,7 +396,7 @@ def compute_routing_features_matrix_free(
         Q, K, d_k_inv_sqrt, scale, M_fro_val, block_size, n_hutchinson, seed
     )
 
-    return DegreeNormalizedFeatures.from_hodge(
+    return RoutingFeatures(
         singular_values=S_sorted[:k].cpu().tolist(),
         phi_hat=phi_hat,
         sigma2=sigma2,
@@ -445,10 +445,10 @@ def compute_G_materialized(M):
 
 def compute_routing_features_materialized(
     M, rank, svd_method="randomized", target_cv=0.05, seed=42
-) -> DegreeNormalizedFeatures:
+) -> RoutingFeatures:
     """All routing features from materialized M.
 
-    Returns a DegreeNormalizedFeatures with singular_values, spectral
+    Returns a RoutingFeatures with singular_values, spectral
     features, and Hodge decomposition features populated.
 
     Used when L <= threshold. Dense tensor ops are much faster than
@@ -473,7 +473,7 @@ def compute_routing_features_materialized(
     Gamma = math.sqrt(max(G**2 - C**2, 0.0))
     curl_ratio = C / (G + EPSILON)
 
-    return DegreeNormalizedFeatures.from_hodge(
+    return RoutingFeatures(
         singular_values=sigma[:k].cpu().tolist(),
         phi_hat=phi_hat,
         sigma2=sigma2,

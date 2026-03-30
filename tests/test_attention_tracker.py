@@ -12,7 +12,7 @@ from glassbox.attention_tracker import (
     compute_attention_tracker_features_materialized,
     compute_attention_tracker_features_matrix_free,
 )
-from glassbox.results import AttentionTrackerFeatures
+from glassbox.results import TrackerFeatures
 from glassbox.svd import (
     apply_A_blocked,
     compute_M_fro_norm_blocked,
@@ -43,7 +43,7 @@ class TestMaterialized:
     def test_returns_correct_type(self):
         _, _, _, A = _make_A(32, 16)
         feats = compute_attention_tracker_features_materialized(A, rank=4)
-        assert isinstance(feats, AttentionTrackerFeatures)
+        assert isinstance(feats, TrackerFeatures)
 
     def test_fields_populated(self):
         _, _, _, A = _make_A(32, 16)
@@ -83,7 +83,7 @@ class TestMatrixFree:
     def test_returns_correct_type(self):
         Q, K, scale, _ = _make_A(32, 16)
         feats = compute_attention_tracker_features_matrix_free(Q, K, scale, rank=4, block_size=16)
-        assert isinstance(feats, AttentionTrackerFeatures)
+        assert isinstance(feats, TrackerFeatures)
 
     def test_fields_populated(self):
         Q, K, scale, _ = _make_A(32, 16)

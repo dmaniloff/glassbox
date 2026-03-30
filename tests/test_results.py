@@ -2,12 +2,12 @@ import pytest
 
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
-    AttentionDiagonalFeatures,
-    AttentionTrackerFeatures,
-    DegreeNormalizedFeatures,
-    LaplacianEigvalsFeatures,
-    ScoresMatrixFeatures,
+    LaplacianFeatures,
+    RoutingFeatures,
+    SelfAttnFeatures,
+    SpectralFeatures,
     SVDSnapshot,
+    TrackerFeatures,
     _spectral_from_svs,
 )
 
@@ -45,23 +45,23 @@ class TestSpectralFromSvs:
         assert result["sv_ratio"] is None
 
 
-# ── ScoresMatrixFeatures ──────────────────────────────────────────────────
+# ── SpectralFeatures ─────────────────────────────────────────────────────
 
 
-class TestScoresMatrixFeatures:
-    def test_from_svd(self):
-        f = ScoresMatrixFeatures.from_singular_values([429.6, 59.0, 41.9])
+class TestSpectralFeatures:
+    def test_derives_spectral(self):
+        f = SpectralFeatures(singular_values=[429.6, 59.0, 41.9])
         assert f.sv1 == 429.6
         assert f.sv_ratio == pytest.approx(429.6 / 59.0)
         assert f.sv_entropy is not None
 
 
-# ── DegreeNormalizedFeatures ──────────────────────────────────────────────
+# ── RoutingFeatures ──────────────────────────────────────────────────────
 
 
-class TestDegreeNormalizedFeatures:
-    def test_from_hodge(self):
-        f = DegreeNormalizedFeatures.from_hodge(
+class TestRoutingFeatures:
+    def test_derives_spectral(self):
+        f = RoutingFeatures(
             singular_values=[1.0, 0.5],
             phi_hat=0.31,
             G=0.15,
@@ -75,12 +75,12 @@ class TestDegreeNormalizedFeatures:
         assert f.sigma2 is None  # not passed
 
 
-# ── AttentionTrackerFeatures ──────────────────────────────────────────────
+# ── TrackerFeatures ──────────────────────────────────────────────────────
 
 
-class TestAttentionTrackerFeatures:
-    def test_from_attention_tracker(self):
-        f = AttentionTrackerFeatures.from_attention_tracker(
+class TestTrackerFeatures:
+    def test_derives_spectral(self):
+        f = TrackerFeatures(
             singular_values=[1.0, 0.5, 0.1],
             sigma2=0.5,
             sigma2_asym=0.02,
@@ -99,7 +99,7 @@ class TestAttentionTrackerFeatures:
 class TestSVDSnapshot:
     def _make_snapshot(self, **overrides):
         defaults = {
-            "feature_group": "scores_matrix",
+            "signal": "spectral",
             "request_id": 0,
             "layer": "model.layers.0.self_attn",
             "layer_idx": 0,
@@ -107,21 +107,21 @@ class TestSVDSnapshot:
             "step": 32,
             "L": 128,
             "singular_values": [10.0, 5.0, 2.0],
-            "features": ScoresMatrixFeatures.from_singular_values([10.0, 5.0, 2.0]),
+            "features": SpectralFeatures(singular_values=[10.0, 5.0, 2.0]),
         }
         defaults.update(overrides)
         return SVDSnapshot(**defaults)
 
     def test_construction(self):
         snap = self._make_snapshot()
-        assert snap.feature_group == "scores_matrix"
+        assert snap.signal == "spectral"
         assert snap.features.sv1 == 10.0
 
     def test_model_dump_excludes_none(self):
         snap = self._make_snapshot()
         d = snap.model_dump(exclude_none=True)
         assert "tier" not in d
-        assert d["feature_group"] == "scores_matrix"
+        assert d["signal"] == "spectral"
         assert d["features"]["sv1"] == 10.0
 
     def test_round_trip(self):
@@ -131,15 +131,15 @@ class TestSVDSnapshot:
         assert restored.features.sv1 == snap.features.sv1
         assert restored.features.sv_ratio == snap.features.sv_ratio
 
-    def test_attention_tracker_round_trip(self):
-        features = AttentionTrackerFeatures.from_attention_tracker(
+    def test_tracker_round_trip(self):
+        features = TrackerFeatures(
             singular_values=[1.0, 0.5],
             sigma2=0.5,
             sigma2_asym=0.02,
             commutator_norm=0.03,
         )
         snap = self._make_snapshot(
-            feature_group="attention_tracker",
+            signal="tracker",
             tier="materialized",
             features=features,
         )
@@ -151,14 +151,14 @@ class TestSVDSnapshot:
         assert restored.features.sigma2_asym == 0.02
         assert restored.features.sv_ratio == pytest.approx(2.0)
 
-    def test_degree_normalized_round_trip(self):
-        features = DegreeNormalizedFeatures.from_hodge(
+    def test_routing_round_trip(self):
+        features = RoutingFeatures(
             singular_values=[1.0, 0.5],
             phi_hat=0.3,
             G=0.15,
         )
         snap = self._make_snapshot(
-            feature_group="degree_normalized_matrix",
+            signal="routing",
             tier="materialized",
             features=features,
         )
@@ -170,20 +170,20 @@ class TestSVDSnapshot:
         assert restored.features.sv_ratio == pytest.approx(2.0)
 
 
-# ── AttentionDiagonalFeatures ─────────────────────────────────────────────
+# ── SelfAttnFeatures ────────────────────────────────────────────────────
 
 
-class TestAttentionDiagonalFeatures:
+class TestSelfAttnFeatures:
     def test_construction(self):
-        f = AttentionDiagonalFeatures(attn_diag_logmean=-2.5)
+        f = SelfAttnFeatures(attn_diag_logmean=-2.5)
         assert f.attn_diag_logmean == -2.5
 
 
-class TestAttentionDiagonalSnapshot:
+class TestSelfAttnSnapshot:
     def test_round_trip(self):
-        features = AttentionDiagonalFeatures(attn_diag_logmean=-3.2)
+        features = SelfAttnFeatures(attn_diag_logmean=-3.2)
         snap = SVDSnapshot(
-            feature_group="attention_diagonal",
+            signal="selfattn",
             request_id=0,
             layer="model.layers.0.self_attn",
             layer_idx=0,
@@ -197,24 +197,24 @@ class TestAttentionDiagonalSnapshot:
         assert d["singular_values"] == []
         assert d["features"]["attn_diag_logmean"] == -3.2
         restored = SVDSnapshot.from_jsonl_row(d)
-        assert isinstance(restored.features, AttentionDiagonalFeatures)
+        assert isinstance(restored.features, SelfAttnFeatures)
         assert restored.features.attn_diag_logmean == -3.2
 
 
-# ── LaplacianEigvalsFeatures ─────────────────────────────────────────────
+# ── LaplacianFeatures ──────────────────────────────────────────────────
 
 
-class TestLaplacianEigvalsFeatures:
+class TestLaplacianFeatures:
     def test_construction(self):
-        f = LaplacianEigvalsFeatures(eigvals=[0.9, 0.8, 0.7])
+        f = LaplacianFeatures(eigvals=[0.9, 0.8, 0.7])
         assert f.eigvals == [0.9, 0.8, 0.7]
 
 
-class TestLaplacianEigvalsSnapshot:
+class TestLaplacianSnapshot:
     def test_round_trip(self):
-        features = LaplacianEigvalsFeatures(eigvals=[0.95, 0.82, 0.71])
+        features = LaplacianFeatures(eigvals=[0.95, 0.82, 0.71])
         snap = SVDSnapshot(
-            feature_group="laplacian_eigvals",
+            signal="laplacian",
             request_id=0,
             layer="model.layers.0.self_attn",
             layer_idx=0,
@@ -228,7 +228,7 @@ class TestLaplacianEigvalsSnapshot:
         assert d["singular_values"] == []
         assert d["features"]["eigvals"] == [0.95, 0.82, 0.71]
         restored = SVDSnapshot.from_jsonl_row(d)
-        assert isinstance(restored.features, LaplacianEigvalsFeatures)
+        assert isinstance(restored.features, LaplacianFeatures)
         assert restored.features.eigvals == [0.95, 0.82, 0.71]
 
 

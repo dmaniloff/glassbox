@@ -23,14 +23,14 @@ from __future__ import annotations
 
 import torch
 
-from glassbox.results import LaplacianEigvalsFeatures
+from glassbox.results import LaplacianFeatures
 from glassbox.svd import apply_AT_blocked, compute_logsumexp_blocked
 
 
 def compute_laplacian_eigvals_materialized(
     A: torch.Tensor,
     top_k: int = 10,
-) -> LaplacianEigvalsFeatures:
+) -> LaplacianFeatures:
     """Laplacian diagonal features from a materialized attention matrix.
 
     Args:
@@ -38,7 +38,7 @@ def compute_laplacian_eigvals_materialized(
         top_k: Number of largest diagonal values to keep.
 
     Returns:
-        LaplacianEigvalsFeatures with sorted eigvals.
+        LaplacianFeatures with sorted eigvals.
     """
     d_col = A.sum(dim=0)  # in-degree: column sums [L]
     diag_A = A.diag()  # self-attention [L]
@@ -47,7 +47,7 @@ def compute_laplacian_eigvals_materialized(
     k = min(top_k, diag_L.shape[0])
     topk_vals, _ = torch.topk(diag_L, k)
 
-    return LaplacianEigvalsFeatures(eigvals=topk_vals.tolist())
+    return LaplacianFeatures(eigvals=topk_vals.tolist())
 
 
 def compute_laplacian_eigvals_matrix_free(
@@ -56,7 +56,7 @@ def compute_laplacian_eigvals_matrix_free(
     scale: float,
     top_k: int = 10,
     block_size: int = 256,
-) -> LaplacianEigvalsFeatures:
+) -> LaplacianFeatures:
     """Laplacian diagonal features via blocked computation.
 
     Avoids materializing the L x L attention matrix by computing:
@@ -71,7 +71,7 @@ def compute_laplacian_eigvals_matrix_free(
         block_size: Block size for blocked computation.
 
     Returns:
-        LaplacianEigvalsFeatures with sorted eigvals.
+        LaplacianFeatures with sorted eigvals.
     """
     L = Q.shape[0]
 
@@ -90,4 +90,4 @@ def compute_laplacian_eigvals_matrix_free(
     k = min(top_k, L)
     topk_vals, _ = torch.topk(diag_L, k)
 
-    return LaplacianEigvalsFeatures(eigvals=topk_vals.tolist())
+    return LaplacianFeatures(eigvals=topk_vals.tolist())

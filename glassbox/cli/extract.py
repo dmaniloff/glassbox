@@ -14,9 +14,9 @@ dependency.  See ``scripts/upload_test_splits.py`` for how these
 datasets were created.
 
 Usage:
-    glassbox-extract --dataset halueval_hallucination --scores-matrix
-    glassbox-extract --dataset all --degree-normalized
-    glassbox-extract --dataset halueval_hallucination --max-samples 50
+    glassbox-extract --signal spectral --dataset halueval_hallucination
+    glassbox-extract --signal spectral,routing --dataset all
+    glassbox-extract --signal selfattn --dataset halueval_hallucination --max-samples 50
 """
 
 from __future__ import annotations
@@ -27,11 +27,13 @@ from pathlib import Path
 
 import click
 
+from glassbox.config import SIGNAL_NAMES, SVD_SIGNALS, THRESHOLD_SIGNALS
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
-    AttentionDiagonalFeatures,
-    DegreeNormalizedFeatures,
+    RoutingFeatures,
+    SelfAttnFeatures,
     SVDSnapshot,
+    TrackerFeatures,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -129,18 +131,25 @@ def _is_list_field(model: type, name: str) -> bool:
     return getattr(annotation, "__origin__", None) is list
 
 
-# Hodge feature names derived from DegreeNormalizedFeatures model
+# Hodge feature names derived from RoutingFeatures model
 _HODGE_FEATURE_NAMES = [
     f"hodge_{f}"
-    for f in DegreeNormalizedFeatures.model_fields
+    for f in RoutingFeatures.model_fields
     if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
 ]
 
-# AttentionDiagonal scalar feature names (list fields expanded separately as indexed columns)
+# Tracker feature names derived from TrackerFeatures model
+_AT_FEATURE_NAMES = [
+    f"at_{f}"
+    for f in TrackerFeatures.model_fields
+    if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
+]
+
+# SelfAttn scalar feature names (list fields expanded separately as indexed columns)
 _AD_FEATURE_NAMES = [
     f"ad_{f}"
-    for f in AttentionDiagonalFeatures.model_fields
-    if f not in _SKIP_FEATURE_FIELDS and not _is_list_field(AttentionDiagonalFeatures, f)
+    for f in SelfAttnFeatures.model_fields
+    if f not in _SKIP_FEATURE_FIELDS and not _is_list_field(SelfAttnFeatures, f)
 ]
 
 
@@ -156,11 +165,11 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
     result: dict[str, float] = {}
     feat_dict = snap.features.model_dump(exclude_none=True)
     # Prefix depends on signal type
-    if snap.feature_group == "attention_diagonal":
+    if snap.signal == "selfattn":
         non_spectral_prefix = "ad_"
-    elif snap.feature_group == "attention_tracker":
+    elif snap.signal == "tracker":
         non_spectral_prefix = "at_"
-    elif snap.feature_group == "laplacian_eigvals":
+    elif snap.signal == "laplacian":
         non_spectral_prefix = "lap_"
     else:
         non_spectral_prefix = "hodge_"
@@ -185,10 +194,7 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
 def _build_feature_columns(
     num_layers: int,
     heads: list[int] | tuple[int, ...],
-    scores_matrix: bool,
-    degree_normalized: bool,
-    attention_diagonal: bool = False,
-    laplacian_eigvals: bool = False,
+    signals: tuple[str, ...],
     ad_top_k: int = 0,
     lap_top_k: int = 10,
 ) -> list[str]:
@@ -197,26 +203,25 @@ def _build_feature_columns(
     Column names follow the pattern: {signal_prefix}{feature}_L{layer}_H{head}
     where signal_prefix is only added when multiple signals are enabled.
     """
-    signals: list[tuple[str, list[str]]] = []
-    if scores_matrix:
-        signals.append(("scores_matrix", list(SPECTRAL_FEATURE_NAMES)))
-    if degree_normalized:
-        signals.append(
-            ("degree_normalized_matrix", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES)
-        )
-    if attention_diagonal:
+    signal_entries: list[tuple[str, list[str]]] = []
+    if "spectral" in signals:
+        signal_entries.append(("spectral", list(SPECTRAL_FEATURE_NAMES)))
+    if "routing" in signals:
+        signal_entries.append(("routing", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES))
+    if "tracker" in signals:
+        signal_entries.append(("tracker", list(SPECTRAL_FEATURE_NAMES) + _AT_FEATURE_NAMES))
+    if "selfattn" in signals:
         ad_cols = list(_AD_FEATURE_NAMES)
         if ad_top_k > 0:
             ad_cols += [f"ad_eigval_{i}" for i in range(ad_top_k)]
-        signals.append(("attention_diagonal", ad_cols))
-    if laplacian_eigvals:
+        signal_entries.append(("selfattn", ad_cols))
+    if "laplacian" in signals:
         lap_cols = [f"lap_eigval_{i}" for i in range(lap_top_k)]
-        signals.append(("laplacian_eigvals", lap_cols))
+        signal_entries.append(("laplacian", lap_cols))
 
-    use_signal_prefix = len(signals) > 1
     columns: list[str] = []
-    for signal_name, feature_names in signals:
-        prefix = f"{signal_name}_" if use_signal_prefix else ""
+    for signal_name, feature_names in signal_entries:
+        prefix = f"{signal_name}_"
         for li in range(num_layers):
             for hi in heads:
                 for feat in feature_names:
@@ -239,7 +244,7 @@ def _write_parquet(
     dict, and writes in batches via ParquetWriter to bound memory usage.
 
     Output has one row per request (i.e. per phase) with columns:
-        {signal}_{feature}_L{layer}_H{head}  (e.g. scores_matrix_sv_ratio_L0_H0)
+        {signal}_{feature}_L{layer}_H{head}  (e.g. spectral_sv_ratio_L0_H0)
         label, source, length, phase, sample_id
     """
     import pyarrow as pa
@@ -271,21 +276,12 @@ def _write_parquet(
                 row = json.loads(line)
                 sample_meta[row["request_id"]] = row
 
-    # Signal prefixes are present when multiple signals are enabled
-    use_signal_prefix = any(
-        col.startswith("scores_matrix_")
-        or col.startswith("degree_normalized_matrix_")
-        or col.startswith("attention_tracker_")
-        or col.startswith("attention_diagonal_")
-        for col in feature_columns[:1]
-    )
-
     def _pivot_request(buf: list[tuple[str, int, int, int, dict]], rid: int) -> dict:
         """Pivot one request_id's SVD rows into a single wide dict."""
         wide: dict = {"request_id": rid}
         length = None
         for sig, li, hi, seq_len, feats in buf:
-            prefix = f"{sig}_" if use_signal_prefix else ""
+            prefix = f"{sig}_"
             if length is None:
                 length = seq_len
             for k, v in feats.items():
@@ -355,7 +351,7 @@ def _write_parquet(
                         wide_rows = []
 
                 current_rid = snap.request_id
-                buf.append((snap.feature_group, snap.layer_idx, snap.head, snap.L, feats))
+                buf.append((snap.signal, snap.layer_idx, snap.head, snap.L, feats))
 
         # Flush last request + remaining batch
         if buf and current_rid is not None:
@@ -373,6 +369,22 @@ def _write_parquet(
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
+
+
+def _parse_signals(ctx, param, value):
+    """Parse --signal values: supports repeatable and comma-separated."""
+    if not value:
+        return ()
+    result = []
+    for v in value:
+        for part in v.split(","):
+            part = part.strip()
+            if part not in SIGNAL_NAMES:
+                raise click.BadParameter(
+                    f"Unknown signal {part!r}. Choose from: {', '.join(SIGNAL_NAMES)}"
+                )
+            result.append(part)
+    return tuple(result)
 
 
 @click.command()
@@ -415,38 +427,18 @@ def _write_parquet(
     help="Comma-separated head indices to analyze.",
 )
 @click.option(
-    "--scores-matrix",
-    "scores_matrix",
-    is_flag=True,
-    default=False,
-    help="Compute scores-matrix SVD features.",
-)
-@click.option(
-    "--degree-normalized",
-    "degree_normalized",
-    is_flag=True,
-    default=False,
-    help="Compute degree-normalized matrix features.",
-)
-@click.option(
-    "--attention-diagonal",
-    "attention_diagonal",
-    is_flag=True,
-    default=False,
-    help="Compute attention diagonal features (LLM-Check).",
-)
-@click.option(
-    "--laplacian-eigvals",
-    "laplacian_eigvals",
-    is_flag=True,
-    default=False,
-    help="Compute Laplacian eigenvalue features (LapEigvals).",
+    "--signal",
+    "signals",
+    multiple=True,
+    default=None,
+    callback=_parse_signals,
+    help=(f"Signals to enable. Repeatable or comma-separated. Choices: {', '.join(SIGNAL_NAMES)}."),
 )
 @click.option(
     "--threshold",
     type=int,
     default=None,
-    help="Seq length threshold for materialized vs matrix-free. [default: 2048]",
+    help="Seq length threshold for materialized vs matrix-free. [default: 512]",
 )
 @click.option(
     "--parquet",
@@ -463,10 +455,7 @@ def main(
     svd_rank: int,
     method: str | None,
     heads: tuple[int, ...],
-    scores_matrix: bool,
-    degree_normalized: bool,
-    attention_diagonal: bool,
-    laplacian_eigvals: bool,
+    signals: tuple[str, ...],
     threshold: int | None,
     parquet: bool,
 ) -> None:
@@ -475,6 +464,12 @@ def main(
 
     import glassbox.backends.svd_backend as svd_mod
     from glassbox.config import GlassboxConfig
+
+    if not signals:
+        raise click.UsageError(
+            "At least one signal must be specified. "
+            f"Use --signal with one or more of: {', '.join(SIGNAL_NAMES)}"
+        )
 
     # Load dataset(s)
     if dataset_name == "all":
@@ -493,6 +488,8 @@ def main(
     outdir = Path("experiments/results") / timestamp
     outdir.mkdir(parents=True, exist_ok=True)
 
+    signal_set = set(signals)
+
     # Write config metadata (num_layers added after LLM creation below)
     config = {
         "model": model,
@@ -502,10 +499,7 @@ def main(
         "svd_rank": svd_rank,
         "method": method or "randomized",
         "heads": list(heads) if heads else [0],
-        "scores_matrix": scores_matrix,
-        "degree_normalized": degree_normalized,
-        "attention_diagonal": attention_diagonal,
-        "laplacian_eigvals": laplacian_eigvals,
+        "signals": list(signals),
         "max_tokens": max_tokens,
     }
 
@@ -515,58 +509,34 @@ def main(
     log(f"Model: {model}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
     log(f"SVD: rank={svd_rank}, method={method or 'randomized'}")
+    log(f"Signals: {', '.join(signals)}")
     if heads:
         log(f"Heads: {list(heads)}")
-    if degree_normalized:
-        log(f"Degree-normalized: enabled (threshold={threshold or 2048})")
-    if attention_diagonal:
-        log(f"Attention diagonal: enabled (threshold={threshold or 512})")
-    if laplacian_eigvals:
-        log(f"Laplacian eigvals: enabled (threshold={threshold or 512})")
-
-    any_enabled = scores_matrix or degree_normalized or attention_diagonal or laplacian_eigvals
-    if not any_enabled:
-        raise click.UsageError(
-            "At least one of --scores-matrix, --degree-normalized,"
-            " --attention-diagonal, or --laplacian-eigvals must be enabled."
-        )
+    if "routing" in signal_set:
+        log(f"Routing: enabled (threshold={threshold or 512})")
+    if "selfattn" in signal_set:
+        log(f"SelfAttn: enabled (threshold={threshold or 512})")
+    if "laplacian" in signal_set:
+        log(f"Laplacian: enabled (threshold={threshold or 512})")
 
     # Configure glassbox backend
     gb_kwargs: dict = {"output": str(svd_features_path)}
 
-    if scores_matrix:
-        scores_cfg: dict = {"interval": 1, "rank": svd_rank}
-        if method is not None:
-            scores_cfg["method"] = method
-        if heads:
-            scores_cfg["heads"] = list(heads)
-        gb_kwargs["scores_matrix"] = scores_cfg
+    for sig_name in SIGNAL_NAMES:
+        if sig_name not in signal_set:
+            gb_kwargs[sig_name] = {"enabled": False}
+            continue
 
-    if degree_normalized:
-        dn_cfg: dict = {"enabled": True, "interval": 1, "rank": svd_rank}
-        if method is not None:
-            dn_cfg["method"] = method
+        sig_cfg: dict = {"enabled": True, "interval": 1}
         if heads:
-            dn_cfg["heads"] = list(heads)
-        if threshold is not None:
-            dn_cfg["threshold"] = threshold
-        gb_kwargs["degree_normalized_matrix"] = dn_cfg
-
-    if attention_diagonal:
-        ad_cfg: dict = {"enabled": True, "interval": 1}
-        if heads:
-            ad_cfg["heads"] = list(heads)
-        if threshold is not None:
-            ad_cfg["threshold"] = threshold
-        gb_kwargs["attention_diagonal"] = ad_cfg
-
-    if laplacian_eigvals:
-        lap_cfg: dict = {"enabled": True, "interval": 1}
-        if heads:
-            lap_cfg["heads"] = list(heads)
-        if threshold is not None:
-            lap_cfg["threshold"] = threshold
-        gb_kwargs["laplacian_eigvals"] = lap_cfg
+            sig_cfg["heads"] = list(heads)
+        if sig_name in SVD_SIGNALS:
+            sig_cfg["rank"] = svd_rank
+            if method is not None:
+                sig_cfg["method"] = method
+        if sig_name in THRESHOLD_SIGNALS and threshold is not None:
+            sig_cfg["threshold"] = threshold
+        gb_kwargs[sig_name] = sig_cfg
 
     gb_config = GlassboxConfig(**gb_kwargs)
     svd_mod.SVDTritonAttentionImpl.config = gb_config
@@ -641,12 +611,9 @@ def main(
         feature_columns = _build_feature_columns(
             num_layers,
             heads,
-            scores_matrix,
-            degree_normalized,
-            attention_diagonal,
-            laplacian_eigvals,
-            ad_top_k=gb_config.attention_diagonal.top_k,
-            lap_top_k=gb_config.laplacian_eigvals.top_k,
+            signals,
+            ad_top_k=gb_config.selfattn.top_k,
+            lap_top_k=gb_config.laplacian.top_k,
         )
         parquet_path = outdir / "features.parquet"
         _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)
