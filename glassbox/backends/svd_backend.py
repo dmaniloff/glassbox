@@ -398,12 +398,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             )
         else:
             # Matrix-free: O(Ld) matvecs, avoids materializing L×L matrix
-            _, d_k_inv_sqrt = compute_dk_blocked(
-                Qh, Kh, scale, cfg.block_size, causal=cfg.causal
-            )
-            lse = compute_logsumexp_blocked(
-                Qh, Kh, scale, cfg.block_size, causal=cfg.causal
-            )
+            _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, cfg.block_size, causal=cfg.causal)
+            lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size, causal=cfg.causal)
             tier = "matrix_free"
             features = compute_routing_features_matrix_free(
                 Qh,
