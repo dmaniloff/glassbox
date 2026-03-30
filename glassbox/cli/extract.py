@@ -33,6 +33,7 @@ from glassbox.results import (
     RoutingFeatures,
     SelfAttnFeatures,
     SVDSnapshot,
+    TrackerFeatures,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -137,6 +138,13 @@ _HODGE_FEATURE_NAMES = [
     if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
 ]
 
+# Tracker feature names derived from TrackerFeatures model
+_AT_FEATURE_NAMES = [
+    f"at_{f}"
+    for f in TrackerFeatures.model_fields
+    if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
+]
+
 # SelfAttn scalar feature names (list fields expanded separately as indexed columns)
 _AD_FEATURE_NAMES = [
     f"ad_{f}"
@@ -200,6 +208,8 @@ def _build_feature_columns(
         signal_entries.append(("spectral", list(SPECTRAL_FEATURE_NAMES)))
     if "routing" in signals:
         signal_entries.append(("routing", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES))
+    if "tracker" in signals:
+        signal_entries.append(("tracker", list(SPECTRAL_FEATURE_NAMES) + _AT_FEATURE_NAMES))
     if "selfattn" in signals:
         ad_cols = list(_AD_FEATURE_NAMES)
         if ad_top_k > 0:
