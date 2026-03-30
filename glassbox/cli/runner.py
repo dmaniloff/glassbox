@@ -30,9 +30,13 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_signals(ctx, param, value):
-    """Parse --signal values: supports repeatable and comma-separated."""
+    """Parse --signal values: supports repeatable and comma-separated.
+
+    Returns None when not explicitly provided (lets YAML/config defaults
+    control which signals are enabled).
+    """
     if not value:
-        return ("spectral",)
+        return None
     result = []
     for v in value:
         for part in v.split(","):
@@ -165,7 +169,7 @@ def _parse_signals(ctx, param, value):
 )
 def main(
     model: str,
-    signals: tuple[str, ...],
+    signals: tuple[str, ...] | None,
     interval: int | None,
     rank: int | None,
     method: str | None,
@@ -187,7 +191,6 @@ def main(
 
     # Build nested config overrides from CLI args
     overrides: dict = {}
-    signal_set = set(signals)
 
     if output is not None:
         overrides["output"] = output
@@ -197,11 +200,19 @@ def main(
     # Signals with threshold/block_size: routing, tracker, selfattn, laplacian
     _THRESHOLD_SIGNALS = {"routing", "tracker", "selfattn", "laplacian"}
 
+    # When --signal is explicitly provided, set enabled for each signal.
+    # When not provided (None), don't override enabled — let YAML/config
+    # defaults decide. If neither --signal nor YAML is provided, the config
+    # defaults apply (spectral enabled, others disabled).
+    signal_set = set(signals) if signals is not None else None
+
     for sig_name in SIGNAL_NAMES:
         sig_dict: dict = {}
-        sig_dict["enabled"] = sig_name in signal_set
+        if signal_set is not None:
+            sig_dict["enabled"] = sig_name in signal_set
 
-        if sig_name in signal_set:
+        is_active = signal_set is None or sig_name in signal_set
+        if is_active:
             if interval is not None:
                 sig_dict["interval"] = interval
             if heads:
@@ -217,24 +228,33 @@ def main(
                 if block_size is not None:
                     sig_dict["block_size"] = block_size
 
-        overrides[sig_name] = sig_dict
+        if sig_dict:
+            overrides[sig_name] = sig_dict
 
     # Hodge params (routing-only)
-    if "routing" in signal_set:
+    if signal_set is None or "routing" in signal_set:
         routing_dict = overrides.get("routing", {})
+        hodge_updated = False
         if hodge is not None:
             routing_dict["hodge"] = hodge
+            hodge_updated = True
         if hodge_target_cv is not None:
             routing_dict["hodge_target_cv"] = hodge_target_cv
+            hodge_updated = True
         if hodge_curl_seed is not None:
             routing_dict["hodge_curl_seed"] = hodge_curl_seed
+            hodge_updated = True
         if hodge_confidence is not None:
             routing_dict["hodge_confidence"] = hodge_confidence
+            hodge_updated = True
         if hodge_pilot_size is not None:
             routing_dict["hodge_pilot_size"] = hodge_pilot_size
+            hodge_updated = True
         if hodge_min_samples is not None:
             routing_dict["hodge_min_samples"] = hodge_min_samples
-        overrides["routing"] = routing_dict
+            hodge_updated = True
+        if hodge_updated:
+            overrides["routing"] = routing_dict
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
