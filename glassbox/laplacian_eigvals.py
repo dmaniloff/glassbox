@@ -56,6 +56,7 @@ def compute_laplacian_eigvals_matrix_free(
     scale: float,
     top_k: int = 10,
     block_size: int = 256,
+    causal: bool = False,
 ) -> LaplacianFeatures:
     """Laplacian diagonal features via blocked computation.
 
@@ -69,6 +70,7 @@ def compute_laplacian_eigvals_matrix_free(
         scale: Attention scale factor (1 / sqrt(d)).
         top_k: Number of largest diagonal values to keep.
         block_size: Block size for blocked computation.
+        causal: Apply causal mask (token i attends only to j <= i).
 
     Returns:
         LaplacianFeatures with sorted eigvals.
@@ -77,12 +79,12 @@ def compute_laplacian_eigvals_matrix_free(
 
     # Diagonal of A: diag(A)[i] = exp(s_ii - lse[i])
     s_diag = (Q * K).sum(dim=-1) * scale  # [L]
-    lse = compute_logsumexp_blocked(Q, K, scale, block_size)  # [L]
+    lse = compute_logsumexp_blocked(Q, K, scale, block_size, causal=causal)  # [L]
     diag_A = torch.exp(s_diag - lse)  # [L]
 
     # Column sums of A: d_col[j] = sum_i A[i,j] = (A^T @ 1)[j]
     ones = torch.ones(L, device=Q.device, dtype=Q.dtype)
-    d_col = apply_AT_blocked(Q, K, ones, scale, block_size)  # [L]
+    d_col = apply_AT_blocked(Q, K, ones, scale, block_size, causal=causal)  # [L]
 
     # Laplacian diagonal
     diag_L = d_col - diag_A  # [L]

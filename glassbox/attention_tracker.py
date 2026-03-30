@@ -78,6 +78,7 @@ def compute_attention_tracker_features_matrix_free(
     rank: int,
     method: str = "randomized",
     block_size: int = 256,
+    causal: bool = False,
 ) -> TrackerFeatures:
     """All AttentionTracker features via matrix-free blocked operations.
 
@@ -91,6 +92,7 @@ def compute_attention_tracker_features_matrix_free(
         rank: Number of singular values to compute.
         method: SVD algorithm ("randomized" or "lanczos").
         block_size: Block size for blocked-streaming matvecs.
+        causal: Apply causal mask (token i attends only to j <= i).
 
     Returns:
         TrackerFeatures with sigma2, sigma2_asym, commutator_norm.
@@ -103,10 +105,10 @@ def compute_attention_tracker_features_matrix_free(
     k = min(max(rank, 2), L - 1)
 
     def matvec(v):
-        return apply_A_blocked(Q, K, v, scale, block_size)
+        return apply_A_blocked(Q, K, v, scale, block_size, causal=causal)
 
     def matvec_t(u):
-        return apply_AT_blocked(Q, K, u, scale, block_size)
+        return apply_AT_blocked(Q, K, u, scale, block_size, causal=causal)
 
     if method == "lanczos":
         _, S, _ = svd_via_lanczos(matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device))
@@ -117,13 +119,17 @@ def compute_attention_tracker_features_matrix_free(
     sigma2 = S_sorted[1].item() if len(S_sorted) > 1 else 0.0
 
     # --- sigma2_asym via existing hodge.py (d_k_inv_sqrt=ones -> M=A) ---
-    sigma2_asym = compute_sigma2_asym_matrix_free(Q, K, ones, scale, block_size, method)
+    sigma2_asym = compute_sigma2_asym_matrix_free(
+        Q, K, ones, scale, block_size, method, causal=causal
+    )
 
     # --- ||A||_F via existing svd.py (d_k_inv_sqrt=ones -> ||M||_F = ||A||_F) ---
-    A_fro = compute_M_fro_norm_blocked(Q, K, ones, scale, block_size).item()
+    A_fro = compute_M_fro_norm_blocked(Q, K, ones, scale, block_size, causal=causal).item()
 
     # --- commutator_norm via existing hodge.py (d_k_inv_sqrt=ones -> M=A) ---
-    commutator_norm = estimate_commutator_norm_matrix_free(Q, K, ones, scale, A_fro, block_size)
+    commutator_norm = estimate_commutator_norm_matrix_free(
+        Q, K, ones, scale, A_fro, block_size, causal=causal
+    )
 
     return TrackerFeatures(
         singular_values=S_sorted[:k].cpu().tolist(),

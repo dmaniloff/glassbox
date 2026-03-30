@@ -64,6 +64,7 @@ def compute_attention_diagonal_features_matrix_free(
     scale: float,
     top_k: int = 0,
     block_size: int = 256,
+    causal: bool = False,
 ) -> SelfAttnFeatures:
     """Attention diagonal features via blocked computation.
 
@@ -77,6 +78,7 @@ def compute_attention_diagonal_features_matrix_free(
         scale: Attention scale factor (1 / sqrt(d)).
         top_k: Number of largest diagonal values to keep. 0 = omit eigvals.
         block_size: Block size for blocked logsumexp.
+        causal: Apply causal mask (token i attends only to j <= i).
 
     Returns:
         SelfAttnFeatures with attn_diag_logmean and optional eigvals.
@@ -85,7 +87,7 @@ def compute_attention_diagonal_features_matrix_free(
     s_diag = (Q * K).sum(dim=-1) * scale  # [L]
 
     # Row-wise logsumexp via existing blocked implementation
-    lse = compute_logsumexp_blocked(Q, K, scale, block_size)  # [L]
+    lse = compute_logsumexp_blocked(Q, K, scale, block_size, causal=causal)  # [L]
 
     # log(diag(A)[i]) = s_ii - logsumexp_i (numerically stable, no exp needed)
     log_diag = s_diag - lse  # [L]

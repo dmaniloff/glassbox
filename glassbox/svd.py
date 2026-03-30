@@ -14,6 +14,22 @@ import torch
 from glassbox.results import SpectralFeatures
 
 
+def _mask_causal(scores: torch.Tensor, row_offset: int) -> torch.Tensor:
+    """Mask scores[r, j] to -inf where j > row_offset + r (future tokens).
+
+    Args:
+        scores: Score matrix of shape (bs, L_k).
+        row_offset: Global row index of the first row in the block.
+
+    Returns:
+        Masked scores with -inf above the causal diagonal.
+    """
+    bs, L_k = scores.shape
+    row_idx = torch.arange(row_offset, row_offset + bs, device=scores.device).unsqueeze(1)
+    col_idx = torch.arange(L_k, device=scores.device).unsqueeze(0)
+    return scores.masked_fill(col_idx > row_idx, float("-inf"))
+
+
 def matvec_S(Q, K, v):
     """Calculate Sv = Q K^T v in two O(Ld) passes, avoid computing S: [L, L]."""
     # v: [L], Q,K: [L, d]
@@ -28,77 +44,88 @@ def matvec_ST(Q, K, u):
     return K @ z  # [L]
 
 
-def apply_A_blocked(Q, K, v, scale, block_size=256):
+def apply_A_blocked(Q, K, v, scale, block_size=256, causal=False):
     """A @ v via blocked row-streaming. Peak memory: O(block_size * L_k)."""
     L_q = Q.shape[0]
     result = torch.zeros(L_q, device=Q.device, dtype=Q.dtype)
     for i0 in range(0, L_q, block_size):
         i1 = min(i0 + block_size, L_q)
         scores = Q[i0:i1] @ K.T * scale  # [bs, L_k]
+        if causal:
+            scores = _mask_causal(scores, i0)
         attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
         result[i0:i1] = attn @ v  # [bs]
     return result
 
 
-def apply_AT_blocked(Q, K, u, scale, block_size=256):
+def apply_AT_blocked(Q, K, u, scale, block_size=256, causal=False):
     """A^T @ u via blocked row-streaming."""
     L_k = K.shape[0]
     result = torch.zeros(L_k, device=K.device, dtype=K.dtype)
     for i0 in range(0, Q.shape[0], block_size):
         i1 = min(i0 + block_size, Q.shape[0])
         scores = Q[i0:i1] @ K.T * scale
+        if causal:
+            scores = _mask_causal(scores, i0)
         attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
         result += attn.T @ u[i0:i1]  # [L_k]
     return result
 
 
-def compute_dk_blocked(Q, K, scale, block_size=256, epsilon=1e-10):
+def compute_dk_blocked(Q, K, scale, block_size=256, epsilon=1e-10, causal=False):
     """Compute D_K (column sums of A) via apply_AT_blocked.
 
     Uses Moore-Penrose pseudoinverse: zero-degree positions get 0 instead of
     large values.
     """
     ones = torch.ones(Q.shape[0], device=Q.device, dtype=Q.dtype)
-    d_k = apply_AT_blocked(Q, K, ones, scale, block_size)
+    d_k = apply_AT_blocked(Q, K, ones, scale, block_size, causal=causal)
     d_k_inv_sqrt = torch.where(d_k > epsilon, 1.0 / torch.sqrt(d_k), torch.zeros_like(d_k))
     return d_k, d_k_inv_sqrt
 
 
-def compute_logsumexp_blocked(Q, K, scale, block_size=256):
+def compute_logsumexp_blocked(Q, K, scale, block_size=256, causal=False):
     """Precompute lse[i] = logsumexp(Q_i . K^T * scale) for all rows."""
     L_q = Q.shape[0]
     lse = torch.zeros(L_q, device=Q.device, dtype=Q.dtype)
     for i0 in range(0, L_q, block_size):
         i1 = min(i0 + block_size, L_q)
         scores = Q[i0:i1] @ K.T * scale  # [bs, L_k]
+        if causal:
+            scores = _mask_causal(scores, i0)
         lse[i0:i1] = torch.logsumexp(scores, dim=-1)
     return lse
 
 
-def get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, ii, jj):
+def get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, ii, jj, causal=False):
     """Compute M[ii, jj] on the fly. O(N*d) cost."""
     scores = (Q[ii] * K[jj]).sum(dim=-1) * scale  # [N]
     A_ij = torch.exp(scores - lse[ii])  # [N]
-    return A_ij * d_k_inv_sqrt[jj]  # [N]
+    result = A_ij * d_k_inv_sqrt[jj]  # [N]
+    if causal:
+        result = result * (jj <= ii).to(result.dtype)
+    return result
 
 
-def matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+def matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """M @ x = A @ (D_K^{-1/2} * x). D_Q^{-1/2} = I for row-stochastic A."""
-    return apply_A_blocked(Q, K, d_k_inv_sqrt * x, scale, block_size)
+    return apply_A_blocked(Q, K, d_k_inv_sqrt * x, scale, block_size, causal=causal)
 
 
-def matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+def matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """M^T @ x = D_K^{-1/2} * (A^T @ x)."""
-    return d_k_inv_sqrt * apply_AT_blocked(Q, K, x, scale, block_size)
+    return d_k_inv_sqrt * apply_AT_blocked(Q, K, x, scale, block_size, causal=causal)
 
 
-def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256):
+def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """Compute ||M||_F without materializing M."""
     L_q = Q.shape[0]
     norm_sq = torch.tensor(0.0, device=Q.device, dtype=Q.dtype)
     for i0 in range(0, L_q, block_size):
         i1 = min(i0 + block_size, L_q)
         scores = Q[i0:i1] @ K.T * scale
+        if causal:
+            scores = _mask_causal(scores, i0)
         attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
         M_block = attn * d_k_inv_sqrt.unsqueeze(0)  # broadcast [bs, L_k]
         norm_sq = norm_sq + (M_block**2).sum()
@@ -139,35 +166,35 @@ def compute_degree_normalized_M(A, epsilon=1e-10):
     return M, d_q_inv_sqrt, d_k_inv_sqrt
 
 
-def matvec_B_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+def matvec_B_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """B @ x = M^T @ (M @ x)."""
-    y = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
-    return matvec_MT_blocked(Q, K, y, d_k_inv_sqrt, scale, block_size)
+    y = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
+    return matvec_MT_blocked(Q, K, y, d_k_inv_sqrt, scale, block_size, causal=causal)
 
 
-def matvec_Masym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+def matvec_Masym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """(M - M^T)/2 @ x = (M@x - M^T@x) / 2."""
-    Mx = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
-    MTx = matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    Mx = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
+    MTx = matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
     return (Mx - MTx) / 2.0
 
 
-def matvec_Msym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+def matvec_Msym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """(M + M^T)/2 @ x = (M@x + M^T@x) / 2."""
-    Mx = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
-    MTx = matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
+    Mx = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
+    MTx = matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
     return (Mx + MTx) / 2.0
 
 
-def matvec_commutator_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256):
+def matvec_commutator_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """[M_sym, M_asym] @ x = M_sym(M_asym(x)) - M_asym(M_sym(x)).
 
     Cost: 8 matvecs per application (2 per sym/asym call, 4 calls total).
     """
-    asym_x = matvec_Masym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
-    term1 = matvec_Msym_blocked(Q, K, asym_x, d_k_inv_sqrt, scale, block_size)
-    sym_x = matvec_Msym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size)
-    term2 = matvec_Masym_blocked(Q, K, sym_x, d_k_inv_sqrt, scale, block_size)
+    asym_x = matvec_Masym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
+    term1 = matvec_Msym_blocked(Q, K, asym_x, d_k_inv_sqrt, scale, block_size, causal=causal)
+    sym_x = matvec_Msym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
+    term2 = matvec_Masym_blocked(Q, K, sym_x, d_k_inv_sqrt, scale, block_size, causal=causal)
     return term1 - term2
 
 
