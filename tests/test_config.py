@@ -137,3 +137,23 @@ def test_yaml_laplacian(tmp_path, monkeypatch):
     assert config.laplacian.interval == 64
     assert config.laplacian.top_k == 25
     assert config.laplacian.heads == [0, 1, 2]
+
+
+# ── OTel config ─────────────────────────────────────────────────────────
+
+
+def test_otel_default():
+    config = GlassboxConfig()
+    assert config.otel is False
+
+
+def test_otel_enabled():
+    config = GlassboxConfig(otel=True)
+    assert config.otel is True
+
+
+def test_otel_from_yaml(tmp_path, monkeypatch):
+    (tmp_path / "glassbox.yaml").write_text("otel: true\n")
+    monkeypatch.chdir(tmp_path)
+    config = GlassboxConfig()
+    assert config.otel is True

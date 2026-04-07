@@ -218,6 +218,57 @@ These summarize how curl-like behavior is distributed across important value dim
 
 These modulate routing features by the effective LayerNorm gain, with the goal of emphasizing heads and layers whose routed signal is more strongly amplified by the surrounding network.
 
+## Signal Emission Architecture
+
+Extracted signals flow through a pluggable handler system with two tiers, designed for two downstream use cases: **offline training** of detection models and **real-time inference-time detection**.
+
+```
+                    ┌─────────────────────┐
+                    │   Attention Backend  │
+                    │   (SVDSnapshot)      │
+                    └────────┬────────────┘
+                             │
+                 ┌───────────┴───────────┐
+                 │                       │
+          Tier 2: Full stream     Tier 1: Real-time
+          (per layer/head/step)   (per snapshot)
+                 │                       │
+         ┌───────┴───────┐          OtelHandler
+         │               │         glassbox.* spans
+      callback        JsonlHandler       │
+         │             .jsonl file   OTel Collector
+         │                               │
+    custom consumer              Jaeger / detector
+    (Kafka, Redis, etc.)         / alerting
+```
+
+**Tier 2 — Full feature stream (training / bulk analysis):**
+`JsonlHandler` writes every snapshot as a JSON line. Custom handlers can implement the `SnapshotHandler` protocol to forward snapshots to Kafka, Redis Streams, or any other sink.
+
+**Tier 1 — OTel integration (real-time detection):**
+`OtelHandler` emits each snapshot as a short-lived OpenTelemetry span with `glassbox.*` attributes (signal type, layer, head, step, and all derived features). It piggybacks on vLLM's global `TracerProvider` — when vLLM is started with `--otlp-traces-endpoint`, Glassbox spans flow through the same collector (Jaeger, Tempo, Datadog, etc.) with zero additional configuration.
+
+Multiple handlers can be active simultaneously (e.g. JSONL for archival + OTel for real-time). When neither `output` nor `otel` is configured, a `LoggingHandler` logs snapshots to stderr.
+
+### Custom handlers
+
+Any object with `handle(snapshot)` and `close()` methods satisfies the `SnapshotHandler` protocol:
+
+```python
+from glassbox import SnapshotHandler, SVDSnapshot
+from glassbox.backends.svd_backend import SVDTritonAttentionImpl
+
+class MyHandler:
+    def handle(self, snapshot: SVDSnapshot) -> None:
+        # forward to Kafka, Redis, a classifier, etc.
+        ...
+    def close(self) -> None:
+        ...
+
+# Register before engine creation
+SVDTritonAttentionImpl._handlers.append(MyHandler())
+```
+
 ## Output Format
 
 The backend emits one JSON object per observation. Each row contains:
@@ -272,6 +323,12 @@ For local development:
 pip install -e .[dev]
 ```
 
+For OpenTelemetry support (already present when running inside vLLM):
+
+```bash
+pip install -e .[otel]
+```
+
 ## Configuration
 
 Configuration is defined in `glassbox/config.py` and can be provided programmatically or through `glassbox.yaml`.
@@ -323,6 +380,7 @@ laplacian:
   block_size: 256
 
 output: experiments/results/svd_features.jsonl
+otel: false
 ```
 
 Important knobs:
@@ -349,6 +407,7 @@ Important knobs:
 | `laplacian.top_k` | Number of top eigenvalues to keep |
 | `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `output` | JSONL output path |
+| `otel` | Emit snapshots as OpenTelemetry spans (`true` / `false`) |
 
 ## Running the custom backend
 

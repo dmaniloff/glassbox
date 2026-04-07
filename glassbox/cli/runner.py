@@ -114,6 +114,11 @@ def _parse_signals(ctx, param, value):
     help="JSONL output file path. [default: from config (log to stderr)]",
 )
 @click.option(
+    "--otel/--no-otel",
+    default=None,
+    help="Emit snapshots as OpenTelemetry spans. [default: from config (False)]",
+)
+@click.option(
     "--config",
     "config_file",
     type=click.Path(exists=True),
@@ -141,6 +146,7 @@ def main(
     method: str | None,
     heads: tuple[int, ...],
     output: str | None,
+    otel: bool | None,
     config_file: str | None,
     threshold: int | None,
     block_size: int | None,
@@ -154,6 +160,8 @@ def main(
 
     if output is not None:
         overrides["output"] = output
+    if otel is not None:
+        overrides["otel"] = otel
 
     # When --signal is explicitly provided, set enabled for each signal.
     # When not provided (None), don't override enabled — let YAML/config
@@ -202,7 +210,7 @@ def main(
     # args through the vLLM call path. So we set the config as a class
     # variable on SVDTritonAttentionImpl before vLLM creates the engine.
     config = GlassboxConfig(**overrides)
-    svd_mod.SVDTritonAttentionImpl.config = config
+    svd_mod.SVDTritonAttentionImpl.set_config(config)
 
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
@@ -251,6 +259,8 @@ def main(
             config.laplacian.heads,
             config.laplacian.top_k,
         )
+    if config.otel:
+        logger.info("OTel emission: enabled")
 
     llm = vllm.LLM(
         model=model,

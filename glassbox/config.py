@@ -115,6 +115,7 @@ class GlassboxConfig(BaseSettings):
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()
     output: str | None = None
+    otel: bool = False
 
     @classmethod
     def settings_customise_sources(
