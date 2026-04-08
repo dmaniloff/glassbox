@@ -112,26 +112,60 @@ class OtelHandler:
     If the ``opentelemetry`` packages are not installed, the handler
     silently no-ops.
 
-    One span is emitted per snapshot (i.e. per layer/head/step).  The
-    ``heads``, ``interval``, and signal selection should be configured to
-    match what your trained detection model expects.
+    Spans are organised in a two-level hierarchy:
+
+    - A **parent span** (``glassbox.step``) groups all snapshots for a
+      given ``(request_id, step)`` pair.
+    - **Child spans** (``glassbox.<signal>``) carry per-layer/head features.
+
+    The parent span is created lazily on the first snapshot for a new
+    ``(request_id, step)`` and ended when the next step (or request)
+    arrives.  This is safe because vLLM processes layers sequentially
+    within a single decode step — all snapshots for step *N* arrive
+    before any snapshot for step *N+1*.
+
+    The ``heads``, ``interval``, and signal selection should be configured
+    to match what your trained detection model expects.
     """
 
     def __init__(self) -> None:
         self._tracer = None
+        self._trace_mod = None
+        self._active_key: tuple[int, int] | None = None
+        self._active_span = None
         try:
             from opentelemetry import trace
 
             self._tracer = trace.get_tracer("glassbox")
+            self._trace_mod = trace
         except ImportError:
             logger.debug("opentelemetry not available; OtelHandler will no-op")
+
+    def _end_active_span(self) -> None:
+        if self._active_span is not None:
+            self._active_span.end()
+            self._active_span = None
+            self._active_key = None
 
     def handle(self, snapshot: SVDSnapshot) -> None:
         if self._tracer is None:
             return
 
+        key = (snapshot.request_id, snapshot.step)
+
+        # New (request_id, step) → close previous parent, start new one
+        if self._active_key != key:
+            self._end_active_span()
+            self._active_span = self._tracer.start_span("glassbox.step")
+            self._active_span.set_attribute("glassbox.request_id", snapshot.request_id)
+            self._active_span.set_attribute("glassbox.step", snapshot.step)
+            self._active_key = key
+
+        # Child span nested under the parent
+        ctx = self._trace_mod.set_span_in_context(self._active_span)
         with self._tracer.start_as_current_span(
             f"glassbox.{snapshot.signal}",
+            context=ctx,
         ) as span:
             span.set_attribute("glassbox.signal", snapshot.signal)
             span.set_attribute("glassbox.request_id", snapshot.request_id)
@@ -154,7 +188,7 @@ class OtelHandler:
                     span.set_attribute(f"glassbox.{key}", value)
 
     def close(self) -> None:
-        pass
+        self._end_active_span()
 
 
 # ---------------------------------------------------------------------------

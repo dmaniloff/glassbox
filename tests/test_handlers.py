@@ -109,26 +109,92 @@ class TestLoggingHandler:
 
 
 class TestOtelHandler:
-    def test_creates_span_with_attributes(self):
-        mock_span = MagicMock()
-        mock_span.__enter__ = MagicMock(return_value=mock_span)
-        mock_span.__exit__ = MagicMock(return_value=False)
-
+    @staticmethod
+    def _make_handler():
+        """Create an OtelHandler with a mock tracer and trace module."""
+        mock_trace_mod = MagicMock()
         mock_tracer = MagicMock()
-        mock_tracer.start_as_current_span.return_value = mock_span
+
+        # Parent spans returned by start_span (not context-managed)
+        parent_span = MagicMock()
+        mock_tracer.start_span.return_value = parent_span
+
+        # Child spans returned by start_as_current_span (context-managed)
+        child_span = MagicMock()
+        child_span.__enter__ = MagicMock(return_value=child_span)
+        child_span.__exit__ = MagicMock(return_value=False)
+        mock_tracer.start_as_current_span.return_value = child_span
 
         handler = OtelHandler()
         handler._tracer = mock_tracer
+        handler._trace_mod = mock_trace_mod
+        return handler, mock_tracer, parent_span, child_span, mock_trace_mod
+
+    def test_creates_parent_and_child_spans(self):
+        handler, mock_tracer, parent_span, child_span, mock_trace_mod = self._make_handler()
 
         handler.handle(_make_snapshot())
 
-        mock_tracer.start_as_current_span.assert_called_once_with("glassbox.spectral")
-        attr_calls = {c[0][0]: c[0][1] for c in mock_span.set_attribute.call_args_list}
+        # Parent span created for (request_id=0, step=32)
+        mock_tracer.start_span.assert_called_once_with("glassbox.step")
+        parent_span.set_attribute.assert_any_call("glassbox.request_id", 0)
+        parent_span.set_attribute.assert_any_call("glassbox.step", 32)
+
+        # Child span created under parent context
+        ctx = mock_trace_mod.set_span_in_context.return_value
+        mock_tracer.start_as_current_span.assert_called_once_with(
+            "glassbox.spectral", context=ctx,
+        )
+        attr_calls = {c[0][0]: c[0][1] for c in child_span.set_attribute.call_args_list}
         assert attr_calls["glassbox.signal"] == "spectral"
         assert attr_calls["glassbox.head"] == 0
         assert attr_calls["glassbox.L"] == 128
         assert attr_calls["glassbox.sv1"] == 10.0
         assert attr_calls["glassbox.sv_ratio"] == pytest.approx(2.0)
+
+    def test_same_step_reuses_parent_span(self):
+        handler, mock_tracer, parent_span, _, _ = self._make_handler()
+
+        handler.handle(_make_snapshot(layer="model.layers.0.self_attn", layer_idx=0))
+        handler.handle(_make_snapshot(layer="model.layers.1.self_attn", layer_idx=1))
+
+        # Only one parent span created
+        mock_tracer.start_span.assert_called_once()
+        # Two child spans
+        assert mock_tracer.start_as_current_span.call_count == 2
+
+    def test_new_step_ends_previous_parent(self):
+        handler, mock_tracer, parent_span, _, _ = self._make_handler()
+
+        handler.handle(_make_snapshot(step=32))
+
+        # New step → new parent span; start_span returns a fresh mock each time
+        parent_span_2 = MagicMock()
+        mock_tracer.start_span.return_value = parent_span_2
+
+        handler.handle(_make_snapshot(step=64))
+
+        # First parent was ended
+        parent_span.end.assert_called_once()
+        # Second parent started
+        assert mock_tracer.start_span.call_count == 2
+
+    def test_close_ends_active_parent(self):
+        handler, _, parent_span, _, _ = self._make_handler()
+
+        handler.handle(_make_snapshot())
+        handler.close()
+
+        parent_span.end.assert_called_once()
+
+    def test_close_idempotent(self):
+        handler, _, parent_span, _, _ = self._make_handler()
+
+        handler.handle(_make_snapshot())
+        handler.close()
+        handler.close()  # should not raise or double-end
+
+        parent_span.end.assert_called_once()
 
     def test_noops_when_otel_unavailable(self):
         handler = OtelHandler()
