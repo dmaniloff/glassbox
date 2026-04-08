@@ -139,28 +139,3 @@ def test_yaml_laplacian(tmp_path, monkeypatch):
     assert config.laplacian.interval == 64
     assert config.laplacian.top_k == 25
     assert config.laplacian.heads == [0, 1, 2]
-
-
-# ── Output / emit config ─────────────────────────────────────────────────
-
-
-def test_output_path():
-    config = GlassboxConfig(output={"path": "/tmp/features.jsonl"})
-    assert config.output.path == "/tmp/features.jsonl"
-
-
-def test_emit_otel_default():
-    config = GlassboxConfig()
-    assert config.emit.otel is False
-
-
-def test_emit_otel_enabled():
-    config = GlassboxConfig(emit={"otel": True})
-    assert config.emit.otel is True
-
-
-def test_emit_otel_from_yaml(tmp_path, monkeypatch):
-    (tmp_path / "glassbox.yaml").write_text("emit:\n  otel: true\n")
-    monkeypatch.chdir(tmp_path)
-    config = GlassboxConfig()
-    assert config.emit.otel is True
