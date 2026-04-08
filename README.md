@@ -246,7 +246,7 @@ Extracted signals flow through a pluggable handler system with two tiers, design
 `JsonlHandler` writes every snapshot as a JSON line. Custom handlers can implement the `SnapshotHandler` protocol to forward snapshots to Kafka, Redis Streams, or any other sink.
 
 **Tier 1 — OTel integration (real-time detection):**
-`OtelHandler` emits each snapshot as a short-lived OpenTelemetry span with `glassbox.*` attributes (signal type, layer, head, step, and all derived features). It piggybacks on vLLM's global `TracerProvider` — when vLLM is started with `--otlp-traces-endpoint`, Glassbox spans flow through the same collector (Jaeger, Tempo, Datadog, etc.) with zero additional configuration.
+`OtelHandler` emits each snapshot as a short-lived OpenTelemetry span with `glassbox.*` attributes (signal type, layer, head, step, and all derived features). It piggybacks on vLLM's global `TracerProvider` — when vLLM is started with `--otlp-traces-endpoint`, Glassbox spans flow through the same collector (Jaeger, Tempo, Datadog, etc.) with zero additional configuration. The `heads`, `interval`, and signal selection should be configured to match what your trained detection model expects.
 
 Multiple handlers can be active simultaneously (e.g. JSONL for archival + OTel for real-time). When neither `output` nor `otel` is configured, a `LoggingHandler` logs snapshots to stderr.
 

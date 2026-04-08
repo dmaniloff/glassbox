@@ -111,6 +111,10 @@ class OtelHandler:
 
     If the ``opentelemetry`` packages are not installed, the handler
     silently no-ops.
+
+    One span is emitted per snapshot (i.e. per layer/head/step).  The
+    ``heads``, ``interval``, and signal selection should be configured to
+    match what your trained detection model expects.
     """
 
     def __init__(self) -> None:
