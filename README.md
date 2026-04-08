@@ -379,8 +379,11 @@ laplacian:
   threshold: 512
   block_size: 256
 
-output: experiments/results/svd_features.jsonl
-otel: false
+output:
+  path: experiments/results/svd_features.jsonl
+
+emit:
+  otel: false
 ```
 
 Important knobs:
@@ -406,8 +409,8 @@ Important knobs:
 | `laplacian.heads` | Heads to analyze |
 | `laplacian.top_k` | Number of top eigenvalues to keep |
 | `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free |
-| `output` | JSONL output path |
-| `otel` | Emit snapshots as OpenTelemetry spans (`true` / `false`) |
+| `output.path` | JSONL output path (feature logging pipeline) |
+| `emit.otel` | Emit snapshots as OpenTelemetry spans (inference pipeline) |
 
 ## Running the custom backend
 

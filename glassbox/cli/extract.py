@@ -520,7 +520,7 @@ def main(
         log(f"Laplacian: enabled (threshold={threshold or 512})")
 
     # Configure glassbox backend
-    gb_kwargs: dict = {"output": str(svd_features_path)}
+    gb_kwargs: dict = {"output": {"path": str(svd_features_path)}}
 
     for sig_name in SIGNAL_NAMES:
         if sig_name not in signal_set:
@@ -539,7 +539,7 @@ def main(
         gb_kwargs[sig_name] = sig_cfg
 
     gb_config = GlassboxConfig(**gb_kwargs)
-    svd_mod.SVDTritonAttentionImpl.config = gb_config
+    svd_mod.SVDTritonAttentionImpl.set_config(gb_config)
 
     # Create vLLM engine
     log("Creating vLLM engine with CUSTOM attention backend")

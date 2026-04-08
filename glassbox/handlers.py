@@ -161,16 +161,16 @@ class OtelHandler:
 def create_handlers_from_config(config: GlassboxConfig) -> list[SnapshotHandler]:
     """Build handler list from config fields.
 
-    - ``config.output`` set  -> ``JsonlHandler``
-    - ``config.otel`` True   -> ``OtelHandler``
-    - neither                -> ``LoggingHandler`` (fallback)
+    - ``config.output.path`` set   -> ``JsonlHandler``
+    - ``config.emit.otel`` True    -> ``OtelHandler``
+    - neither                      -> ``LoggingHandler`` (fallback)
 
     Multiple handlers can be active simultaneously (e.g. JSONL + OTel).
     """
     handlers: list[SnapshotHandler] = []
-    if config.output:
-        handlers.append(JsonlHandler(config.output))
-    if config.otel:
+    if config.output.path:
+        handlers.append(JsonlHandler(config.output.path))
+    if config.emit.otel:
         handlers.append(OtelHandler())
     if not handlers:
         handlers.append(LoggingHandler())

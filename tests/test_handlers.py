@@ -149,19 +149,19 @@ class TestOtelHandler:
 
 class TestCreateHandlersFromConfig:
     def test_output_creates_jsonl(self):
-        config = GlassboxConfig(output="/tmp/test.jsonl")
+        config = GlassboxConfig(output={"path": "/tmp/test.jsonl"})
         handlers = create_handlers_from_config(config)
         assert len(handlers) == 1
         assert isinstance(handlers[0], JsonlHandler)
 
     def test_otel_creates_otel_handler(self):
-        config = GlassboxConfig(otel=True)
+        config = GlassboxConfig(emit={"otel": True})
         handlers = create_handlers_from_config(config)
         assert len(handlers) == 1
         assert isinstance(handlers[0], OtelHandler)
 
     def test_both_creates_two_handlers(self):
-        config = GlassboxConfig(output="/tmp/test.jsonl", otel=True)
+        config = GlassboxConfig(output={"path": "/tmp/test.jsonl"}, emit={"otel": True})
         handlers = create_handlers_from_config(config)
         assert len(handlers) == 2
         types = {type(h) for h in handlers}

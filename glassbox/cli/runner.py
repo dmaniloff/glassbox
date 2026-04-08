@@ -159,9 +159,9 @@ def main(
     overrides: dict = {}
 
     if output is not None:
-        overrides["output"] = output
+        overrides["output"] = {"path": output}
     if otel is not None:
-        overrides["otel"] = otel
+        overrides["emit"] = {"otel": otel}
 
     # When --signal is explicitly provided, set enabled for each signal.
     # When not provided (None), don't override enabled — let YAML/config
@@ -259,7 +259,7 @@ def main(
             config.laplacian.heads,
             config.laplacian.top_k,
         )
-    if config.otel:
+    if config.emit.otel:
         logger.info("OTel emission: enabled")
 
     llm = vllm.LLM(

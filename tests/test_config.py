@@ -18,7 +18,8 @@ def test_defaults():
     assert config.selfattn.interval == 32
     assert config.selfattn.threshold == 512
     assert config.selfattn.heads == [0]
-    assert config.output is None
+    assert config.output.path is None
+    assert config.emit.otel is False
 
 
 def test_programmatic_kwargs():
@@ -74,14 +75,15 @@ def test_yaml_tracker(tmp_path, monkeypatch):
 
 def test_yaml_routing(tmp_path, monkeypatch):
     yaml_content = (
-        "routing:\n  enabled: true\n  interval: 64\noutput: /var/log/glassbox/signals.jsonl\n"
+        "routing:\n  enabled: true\n  interval: 64\n"
+        "output:\n  path: /var/log/glassbox/signals.jsonl\n"
     )
     (tmp_path / "glassbox.yaml").write_text(yaml_content)
     monkeypatch.chdir(tmp_path)
     config = GlassboxConfig()
     assert config.routing.enabled is True
     assert config.routing.interval == 64
-    assert config.output == "/var/log/glassbox/signals.jsonl"
+    assert config.output.path == "/var/log/glassbox/signals.jsonl"
 
 
 def test_precedence_kwargs_beat_yaml(tmp_path, monkeypatch):
@@ -139,21 +141,26 @@ def test_yaml_laplacian(tmp_path, monkeypatch):
     assert config.laplacian.heads == [0, 1, 2]
 
 
-# ── OTel config ─────────────────────────────────────────────────────────
+# ── Output / emit config ─────────────────────────────────────────────────
 
 
-def test_otel_default():
+def test_output_path():
+    config = GlassboxConfig(output={"path": "/tmp/features.jsonl"})
+    assert config.output.path == "/tmp/features.jsonl"
+
+
+def test_emit_otel_default():
     config = GlassboxConfig()
-    assert config.otel is False
+    assert config.emit.otel is False
 
 
-def test_otel_enabled():
-    config = GlassboxConfig(otel=True)
-    assert config.otel is True
+def test_emit_otel_enabled():
+    config = GlassboxConfig(emit={"otel": True})
+    assert config.emit.otel is True
 
 
-def test_otel_from_yaml(tmp_path, monkeypatch):
-    (tmp_path / "glassbox.yaml").write_text("otel: true\n")
+def test_emit_otel_from_yaml(tmp_path, monkeypatch):
+    (tmp_path / "glassbox.yaml").write_text("emit:\n  otel: true\n")
     monkeypatch.chdir(tmp_path)
     config = GlassboxConfig()
-    assert config.otel is True
+    assert config.emit.otel is True
