@@ -231,7 +231,7 @@ Extracted signals flow through a pluggable handler system with two tiers, design
                  ┌───────────┴───────────┐
                  │                       │
           Tier 2: Full stream     Tier 1: Real-time
-          (per layer/head/step)   (per snapshot)
+          (offline / bulk)        (inference-time)
                  │                       │
          ┌───────┴───────┐          OtelHandler
          │               │         glassbox.* spans
