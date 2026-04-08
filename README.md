@@ -235,11 +235,11 @@ Extracted signals flow through a pluggable handler system with two tiers, design
                  │                       │
          ┌───────┴───────┐          OtelHandler
          │               │         glassbox.* spans
-      callback        JsonlHandler       │
-         │             .jsonl file   OTel Collector
-         │                               │
-    custom consumer              Jaeger / detector
-    (Kafka, Redis, etc.)         / alerting
+    JsonlHandler    Custom handler       │
+    .jsonl file    (Kafka, Redis,   OTel Collector
+                    webhook, etc.)       │
+                                   Jaeger / detector
+                                   / alerting
 ```
 
 **Tier 2 — Full feature stream (training / bulk analysis):**
