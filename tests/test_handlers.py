@@ -82,7 +82,6 @@ class TestJsonlHandler:
         handler.close()  # should not raise
 
 
-
 # ── LoggingHandler ───────────────────────────────────────────────────────
 
 
@@ -102,7 +101,6 @@ class TestLoggingHandler:
     def test_close_is_noop(self):
         handler = LoggingHandler()
         handler.close()  # should not raise
-
 
 
 # ── OtelHandler ──────────────────────────────────────────────────────────
@@ -143,7 +141,8 @@ class TestOtelHandler:
         # Child span created under parent context
         ctx = mock_trace_mod.set_span_in_context.return_value
         mock_tracer.start_as_current_span.assert_called_once_with(
-            "glassbox.spectral", context=ctx,
+            "glassbox.spectral",
+            context=ctx,
         )
         attr_calls = {c[0][0]: c[0][1] for c in child_span.set_attribute.call_args_list}
         assert attr_calls["glassbox.signal"] == "spectral"
@@ -200,7 +199,6 @@ class TestOtelHandler:
         handler = OtelHandler()
         handler._tracer = None
         handler.handle(_make_snapshot())  # should not raise
-
 
 
 # ── create_handlers_from_config ──────────────────────────────────────────

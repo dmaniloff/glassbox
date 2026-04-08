@@ -115,7 +115,7 @@ class OtelHandler:
     Spans are organised in a two-level hierarchy:
 
     - A **parent span** (``glassbox.step``) groups all snapshots for a
-      given ``(request_id, step)`` pair.
+    given ``(request_id, step)`` pair.
     - **Child spans** (``glassbox.<signal>``) carry per-layer/head features.
 
     The parent span is created lazily on the first snapshot for a new
@@ -123,6 +123,14 @@ class OtelHandler:
     arrives.  This is safe because vLLM processes layers sequentially
     within a single decode step — all snapshots for step *N* arrive
     before any snapshot for step *N+1*.
+
+    In Jaeger this should show up as:
+
+    glassbox.step (request_id=7, step=32)
+    ├── glassbox.spectral (layer=0, head=0, sv_ratio=2.1)
+    ├── glassbox.spectral (layer=1, head=0, sv_ratio=1.8)
+    ├── glassbox.routing  (layer=0, head=0, curl_norm=0.3)
+    └── ...
 
     The ``heads``, ``interval``, and signal selection should be configured
     to match what your trained detection model expects.
