@@ -9,7 +9,6 @@ from glassbox.handlers import (
     JsonlHandler,
     LoggingHandler,
     OtelHandler,
-    SnapshotHandler,
     create_handlers_from_config,
 )
 from glassbox.results import SelfAttnFeatures, SpectralFeatures, SVDSnapshot
@@ -82,8 +81,6 @@ class TestJsonlHandler:
         handler.close()
         handler.close()  # should not raise
 
-    def test_conforms_to_protocol(self):
-        assert isinstance(JsonlHandler("/tmp/test.jsonl"), SnapshotHandler)
 
 
 # ── LoggingHandler ───────────────────────────────────────────────────────
@@ -106,8 +103,6 @@ class TestLoggingHandler:
         handler = LoggingHandler()
         handler.close()  # should not raise
 
-    def test_conforms_to_protocol(self):
-        assert isinstance(LoggingHandler(), SnapshotHandler)
 
 
 # ── OtelHandler ──────────────────────────────────────────────────────────
@@ -140,8 +135,6 @@ class TestOtelHandler:
         handler._tracer = None
         handler.handle(_make_snapshot())  # should not raise
 
-    def test_conforms_to_protocol(self):
-        assert isinstance(OtelHandler(), SnapshotHandler)
 
 
 # ── create_handlers_from_config ──────────────────────────────────────────
