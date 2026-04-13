@@ -412,9 +412,36 @@ Important knobs:
 | `output.path` | JSONL output path (feature logging pipeline) |
 | `emit.otel` | Emit snapshots as OpenTelemetry spans (inference pipeline) |
 
-## Running the custom backend
+## Running Glassbox
 
-### Test it on a single prompt
+There are three ways to run Glassbox, depending on your use case:
+
+| Mode | Use case | Typical emission |
+|------|----------|-----------------|
+| `vllm serve` | Production / inference-time detection | OTel spans via `glassbox.yaml` |
+| `glassbox-run` | Development / single-prompt testing | OTel (`--otel`) or JSONL (`--output`) |
+| `glassbox-extract` | Offline feature extraction for training detection models | JSONL + Parquet |
+
+### `vllm serve` — production inference
+
+```bash
+vllm serve facebook/opt-125m --attention-backend CUSTOM --enforce-eager
+```
+
+Glassbox registers itself via the `vllm.general_plugins` entry point — vLLM loads it automatically. Configure via a `glassbox.yaml` in the working directory:
+
+```yaml
+spectral:
+  enabled: true
+  interval: 32
+  heads: [0]
+emit:
+  otel: true
+```
+
+When vLLM is started with `--otlp-traces-endpoint`, Glassbox spans flow through the same OTel collector with zero additional configuration. The `heads`, `interval`, and signal selection should match what your trained detection model expects.
+
+### `glassbox-run` — single-prompt testing
 
 ```bash
 glassbox-run \
@@ -423,26 +450,13 @@ glassbox-run \
   --interval 16 \
   --rank 4 \
   --heads 0 \
-  --output svd_features.jsonl \
+  --otel \
   --prompt "The future of artificial intelligence is"
 ```
 
-This launches vLLM with:
+Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`, `--config`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`.
 
-- `attention_backend="CUSTOM"`
-- `enforce_eager=True`
-
-and writes inference-time snapshots to `svd_features.jsonl`.
-
-### Run it in a vLLM server
-
-```bash
-vllm serve model --attention-backend CUSTOM
-```
-
-Registered via the `vllm.general_plugins` entry point -- vLLM loads it automatically.
-
-### Run labeled extraction
+### `glassbox-extract` — offline feature extraction
 
 ```bash
 glassbox-extract \
@@ -453,11 +467,13 @@ glassbox-extract \
   --parquet
 ```
 
-This produces:
+Runs two-phase prefill (question-only + full prompt+response) on labeled datasets and produces:
 
-- per-request sample metadata
-- JSONL snapshot features
-- optional wide Parquet features for downstream training or analysis
+- `samples.jsonl` — per-request sample metadata
+- `svd_features.jsonl` — snapshot features
+- `features.parquet` — optional wide Parquet for downstream training (with `--parquet`)
+
+Output goes to `experiments/results/{timestamp}/` by default, or override with `--outdir`. Also supports `--otel` (for debugging long runs) and `--config` (YAML).
 
 ## Benchmarks
 
