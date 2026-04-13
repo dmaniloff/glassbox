@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import click
+import yaml
 
 from glassbox.config import SIGNAL_NAMES, SVD_SIGNALS, THRESHOLD_SIGNALS
 from glassbox.results import (
@@ -447,6 +448,27 @@ def _parse_signals(ctx, param, value):
     default=False,
     help="Also save results as wide Parquet (shade-compatible format).",
 )
+@click.option(
+    "--outdir",
+    type=click.Path(),
+    default=None,
+    help="Output directory for results. [default: experiments/results/{timestamp}]",
+)
+@click.option(
+    "--otel/--no-otel",
+    default=False,
+    help=(
+        "Also emit snapshots as OTel spans "
+        "(for debugging; typical extract use is JSONL). [default: False]"
+    ),
+)
+@click.option(
+    "--config",
+    "config_file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to YAML config file. [default: glassbox.yaml if present]",
+)
 def main(
     model: str,
     dataset_name: str,
@@ -458,6 +480,9 @@ def main(
     signals: tuple[str, ...],
     threshold: int | None,
     parquet: bool,
+    outdir: str | None,
+    otel: bool,
+    config_file: str | None,
 ) -> None:
     """Run prefill-only spectral feature extraction on a labeled dataset."""
     import vllm
@@ -484,9 +509,12 @@ def main(
     max_tokens = 1
 
     # Set up output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    outdir = Path("experiments/results") / timestamp
-    outdir.mkdir(parents=True, exist_ok=True)
+    if outdir is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        outdir_path = Path("experiments/results") / timestamp
+    else:
+        outdir_path = Path(outdir)
+    outdir_path.mkdir(parents=True, exist_ok=True)
 
     signal_set = set(signals)
 
@@ -503,9 +531,9 @@ def main(
         "max_tokens": max_tokens,
     }
 
-    svd_features_path = outdir / "svd_features.jsonl"
+    svd_features_path = outdir_path / "svd_features.jsonl"
 
-    log(f"Results directory: {outdir}")
+    log(f"Results directory: {outdir_path}")
     log(f"Model: {model}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
     log(f"SVD: rank={svd_rank}, method={method or 'randomized'}")
@@ -520,7 +548,9 @@ def main(
         log(f"Laplacian: enabled (threshold={threshold or 512})")
 
     # Configure glassbox backend
-    gb_kwargs: dict = {"output": str(svd_features_path)}
+    gb_kwargs: dict = {"output": {"path": str(svd_features_path)}}
+    if otel:
+        gb_kwargs["emit"] = {"otel": True}
 
     for sig_name in SIGNAL_NAMES:
         if sig_name not in signal_set:
@@ -538,8 +568,18 @@ def main(
             sig_cfg["threshold"] = threshold
         gb_kwargs[sig_name] = sig_cfg
 
+    # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
+    if config_file:
+        with open(config_file) as f:
+            yaml_data = yaml.safe_load(f) or {}
+        for key, val in yaml_data.items():
+            if key not in gb_kwargs:
+                gb_kwargs[key] = val
+            elif isinstance(gb_kwargs[key], dict) and isinstance(val, dict):
+                gb_kwargs[key] = {**val, **gb_kwargs[key]}
+
     gb_config = GlassboxConfig(**gb_kwargs)
-    svd_mod.SVDTritonAttentionImpl.config = gb_config
+    svd_mod.SVDTritonAttentionImpl.set_config(gb_config)
 
     # Create vLLM engine
     log("Creating vLLM engine with CUSTOM attention backend")
@@ -561,9 +601,9 @@ def main(
     # Save num_layers from model config so parquet can be regenerated without HF download
     num_layers = llm.llm_engine.model_config.hf_config.num_hidden_layers
     config["num_layers"] = num_layers
-    (outdir / "config.json").write_text(json.dumps(config, indent=2))
+    (outdir_path / "config.json").write_text(json.dumps(config, indent=2))
 
-    samples_path = outdir / "samples.jsonl"
+    samples_path = outdir_path / "samples.jsonl"
     samples_f = open(samples_path, "w")
 
     request_counter = 0
@@ -615,7 +655,7 @@ def main(
             ad_top_k=gb_config.selfattn.top_k,
             lap_top_k=gb_config.laplacian.top_k,
         )
-        parquet_path = outdir / "features.parquet"
+        parquet_path = outdir_path / "features.parquet"
         _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)
 
 

@@ -218,6 +218,57 @@ These summarize how curl-like behavior is distributed across important value dim
 
 These modulate routing features by the effective LayerNorm gain, with the goal of emphasizing heads and layers whose routed signal is more strongly amplified by the surrounding network.
 
+## Signal Emission Architecture
+
+Extracted signals flow through a pluggable handler system with two tiers, designed for two downstream use cases: **offline training** of detection models and **real-time inference-time detection**.
+
+```
+                    ┌─────────────────────┐
+                    │   Attention Backend  │
+                    │   (SVDSnapshot)      │
+                    └────────┬────────────┘
+                             │
+                 ┌───────────┴───────────┐
+                 │                       │
+          Tier 2: Full stream     Tier 1: Real-time
+          (offline / bulk)        (inference-time)
+                 │                       │
+         ┌───────┴───────┐          OtelHandler
+         │               │         glassbox.* spans
+    JsonlHandler    Custom handler       │
+    .jsonl file    (Kafka, Redis,   OTel Collector
+                    webhook, etc.)       │
+                                   Jaeger / detector
+                                   / alerting
+```
+
+**Tier 2 — Full feature stream (training / bulk analysis):**
+`JsonlHandler` writes every snapshot as a JSON line. Custom handlers can implement the `SnapshotHandler` protocol to forward snapshots to Kafka, Redis Streams, or any other sink.
+
+**Tier 1 — OTel integration (real-time detection):**
+`OtelHandler` emits each snapshot as a short-lived OpenTelemetry span with `glassbox.*` attributes (signal type, layer, head, step, and all derived features). It piggybacks on vLLM's global `TracerProvider` — when vLLM is started with `--otlp-traces-endpoint`, Glassbox spans flow through the same collector (Jaeger, Tempo, Datadog, etc.) with zero additional configuration. The `heads`, `interval`, and signal selection should be configured to match what your trained detection model expects.
+
+Multiple handlers can be active simultaneously (e.g. JSONL for archival + OTel for real-time). When neither `output` nor `otel` is configured, a `LoggingHandler` logs snapshots to stderr.
+
+### Custom handlers
+
+Any object with `handle(snapshot)` and `close()` methods satisfies the `SnapshotHandler` protocol:
+
+```python
+from glassbox import SnapshotHandler, SVDSnapshot
+from glassbox.backends.svd_backend import SVDTritonAttentionImpl
+
+class MyHandler:
+    def handle(self, snapshot: SVDSnapshot) -> None:
+        # forward to Kafka, Redis, a classifier, etc.
+        ...
+    def close(self) -> None:
+        ...
+
+# Register before engine creation
+SVDTritonAttentionImpl._handlers.append(MyHandler())
+```
+
 ## Output Format
 
 The backend emits one JSON object per observation. Each row contains:
@@ -272,6 +323,12 @@ For local development:
 pip install -e .[dev]
 ```
 
+For OpenTelemetry support (already present when running inside vLLM):
+
+```bash
+pip install -e .[otel]
+```
+
 ## Configuration
 
 Configuration is defined in `glassbox/config.py` and can be provided programmatically or through `glassbox.yaml`.
@@ -322,7 +379,11 @@ laplacian:
   threshold: 512
   block_size: 256
 
-output: experiments/results/svd_features.jsonl
+output:
+  path: experiments/results/svd_features.jsonl
+
+emit:
+  otel: false
 ```
 
 Important knobs:
@@ -348,11 +409,39 @@ Important knobs:
 | `laplacian.heads` | Heads to analyze |
 | `laplacian.top_k` | Number of top eigenvalues to keep |
 | `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free |
-| `output` | JSONL output path |
+| `output.path` | JSONL output path (feature logging pipeline) |
+| `emit.otel` | Emit snapshots as OpenTelemetry spans (inference pipeline) |
 
-## Running the custom backend
+## Running Glassbox
 
-### Test it on a single prompt
+There are three ways to run Glassbox, depending on your use case:
+
+| Mode | Use case | Typical emission |
+|------|----------|-----------------|
+| `vllm serve` | Production / inference-time detection | OTel spans via `glassbox.yaml` |
+| `glassbox-run` | Development / single-prompt testing | OTel (`--otel`) or JSONL (`--output`) |
+| `glassbox-extract` | Offline feature extraction for training detection models | JSONL + Parquet |
+
+### `vllm serve` — production inference
+
+```bash
+vllm serve facebook/opt-125m --attention-backend CUSTOM --enforce-eager
+```
+
+Glassbox registers itself via the `vllm.general_plugins` entry point — vLLM loads it automatically. Configure via a `glassbox.yaml` in the working directory:
+
+```yaml
+spectral:
+  enabled: true
+  interval: 32
+  heads: [0]
+emit:
+  otel: true
+```
+
+When vLLM is started with `--otlp-traces-endpoint`, Glassbox spans flow through the same OTel collector with zero additional configuration. The `heads`, `interval`, and signal selection should match what your trained detection model expects.
+
+### `glassbox-run` — single-prompt testing
 
 ```bash
 glassbox-run \
@@ -361,26 +450,13 @@ glassbox-run \
   --interval 16 \
   --rank 4 \
   --heads 0 \
-  --output svd_features.jsonl \
+  --otel \
   --prompt "The future of artificial intelligence is"
 ```
 
-This launches vLLM with:
+Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`, `--config`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`.
 
-- `attention_backend="CUSTOM"`
-- `enforce_eager=True`
-
-and writes inference-time snapshots to `svd_features.jsonl`.
-
-### Run it in a vLLM server
-
-```bash
-vllm serve model --attention-backend CUSTOM
-```
-
-Registered via the `vllm.general_plugins` entry point -- vLLM loads it automatically.
-
-### Run labeled extraction
+### `glassbox-extract` — offline feature extraction
 
 ```bash
 glassbox-extract \
@@ -391,11 +467,13 @@ glassbox-extract \
   --parquet
 ```
 
-This produces:
+Runs two-phase prefill (question-only + full prompt+response) on labeled datasets and produces:
 
-- per-request sample metadata
-- JSONL snapshot features
-- optional wide Parquet features for downstream training or analysis
+- `samples.jsonl` — per-request sample metadata
+- `svd_features.jsonl` — snapshot features
+- `features.parquet` — optional wide Parquet for downstream training (with `--parquet`)
+
+Output goes to `experiments/results/{timestamp}/` by default, or override with `--outdir`. Also supports `--otel` (for debugging long runs) and `--config` (YAML).
 
 ## Benchmarks
 

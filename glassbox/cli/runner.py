@@ -17,6 +17,7 @@ import logging
 
 import click
 import vllm
+import yaml
 
 # Import triggers @register_backend(AttentionBackendEnum.CUSTOM)
 import glassbox.backends.svd_backend as svd_mod
@@ -111,7 +112,16 @@ def _parse_signals(ctx, param, value):
     "--output",
     type=click.Path(),
     default=None,
-    help="JSONL output file path. [default: from config (log to stderr)]",
+    help=(
+        "JSONL output file path "
+        "(for debugging/archival; typical runner use is --otel). "
+        "[default: log to stderr]"
+    ),
+)
+@click.option(
+    "--otel/--no-otel",
+    default=None,
+    help="Emit snapshots as OpenTelemetry spans. [default: from config (False)]",
 )
 @click.option(
     "--config",
@@ -141,6 +151,7 @@ def main(
     method: str | None,
     heads: tuple[int, ...],
     output: str | None,
+    otel: bool | None,
     config_file: str | None,
     threshold: int | None,
     block_size: int | None,
@@ -153,7 +164,9 @@ def main(
     overrides: dict = {}
 
     if output is not None:
-        overrides["output"] = output
+        overrides["output"] = {"path": output}
+    if otel is not None:
+        overrides["emit"] = {"otel": otel}
 
     # When --signal is explicitly provided, set enabled for each signal.
     # When not provided (None), don't override enabled — let YAML/config
@@ -188,8 +201,6 @@ def main(
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
-        import yaml
-
         with open(config_file) as f:
             yaml_data = yaml.safe_load(f) or {}
         for key, val in yaml_data.items():
@@ -202,7 +213,7 @@ def main(
     # args through the vLLM call path. So we set the config as a class
     # variable on SVDTritonAttentionImpl before vLLM creates the engine.
     config = GlassboxConfig(**overrides)
-    svd_mod.SVDTritonAttentionImpl.config = config
+    svd_mod.SVDTritonAttentionImpl.set_config(config)
 
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
@@ -251,6 +262,8 @@ def main(
             config.laplacian.heads,
             config.laplacian.top_k,
         )
+    if config.emit.otel:
+        logger.info("OTel emission: enabled")
 
     llm = vllm.LLM(
         model=model,

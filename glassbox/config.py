@@ -94,6 +94,22 @@ class LaplacianConfig(BaseModel):
     causal: bool = True
 
 
+class OutputConfig(BaseModel):
+    """Feature logging pipeline — write full snapshots for training/analysis."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str | None = None
+
+
+class EmitConfig(BaseModel):
+    """Inference pipeline — real-time signal emission for live monitoring."""
+
+    model_config = ConfigDict(frozen=True)
+
+    otel: bool = False
+
+
 class GlassboxConfig(BaseSettings):
     """Root configuration for the Glassbox observability framework.
 
@@ -114,7 +130,8 @@ class GlassboxConfig(BaseSettings):
     tracker: TrackerConfig = TrackerConfig()
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()
-    output: str | None = None
+    output: OutputConfig = OutputConfig()
+    emit: EmitConfig = EmitConfig()
 
     @classmethod
     def settings_customise_sources(

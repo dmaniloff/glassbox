@@ -215,6 +215,22 @@ class SVDSnapshot(BaseModel):
         SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
     )
 
+    def __repr__(self) -> str:
+        feat_dict = self.features.model_dump(exclude_none=True)
+        feat_str = " ".join(f"{k}={v}" for k, v in feat_dict.items() if k != "singular_values")
+        parts = [
+            f"[{self.signal}]",
+            self.layer,
+            f"head={self.head}",
+            f"step={self.step}",
+            f"L={self.L}",
+        ]
+        if self.tier is not None:
+            parts.append(f"tier={self.tier}")
+        if feat_str:
+            parts.append(feat_str)
+        return " ".join(parts)
+
     @classmethod
     def from_jsonl_row(cls, raw: dict) -> SVDSnapshot:
         """Deserialize a JSONL row, discriminating features by signal."""

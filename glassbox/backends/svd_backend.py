@@ -13,12 +13,10 @@ Configuration via GlassboxConfig (see glassbox/config.py):
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import re
 from dataclasses import dataclass, field
-from typing import IO
 
 import torch
 from vllm.v1.attention.backends.registry import (
@@ -40,6 +38,7 @@ from glassbox.attention_tracker import (
     compute_attention_tracker_features_matrix_free,
 )
 from glassbox.config import GlassboxConfig
+from glassbox.handlers import LoggingHandler, create_handlers_from_config
 from glassbox.hodge import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
@@ -116,11 +115,23 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     # Class-level request tracking; shared mutable.
     req_tracker: ReqTracker = ReqTracker()
 
-    # Class-level output file handle; mutable.
+    # Class-level snapshot handlers; shared mutable.
     # Same rationale as other class-level state: vLLM may create one attention
     # impl per layer (many instances of SVDTritonAttentionImpl).
-    # Keeping one handle on the class so every layer writes to the same file.
-    _output_fh: IO | None = None
+    # Keeping one handler list on the class so every layer emits to the same sinks.
+    _handlers: list = [LoggingHandler()]
+
+    @classmethod
+    def set_config(cls, config: GlassboxConfig) -> None:
+        """Set config and initialise handlers.
+
+        Must be called before engine creation.  Replaces direct assignment
+        to ``cls.config``.
+        """
+        cls.config = config
+        for h in cls._handlers:
+            h.close()
+        cls._handlers = create_handlers_from_config(config)
 
     def forward(
         self,
@@ -580,33 +591,6 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         self._emit_result(snapshot)
 
     def _emit_result(self, snapshot: SVDSnapshot) -> None:
-        """Write SVD results to JSONL or log."""
-        cls = type(self)
-
-        if self.config.output:
-            if cls._output_fh is None:
-                cls._output_fh = open(self.config.output, "a")
-            cls._output_fh.write(json.dumps(snapshot.model_dump(exclude_none=True)) + "\n")
-            cls._output_fh.flush()
-        else:
-            if snapshot.singular_values:
-                k = len(snapshot.singular_values)
-                logger.info(
-                    "[SVD] %s head=%d step=%d L=%d top-%d singular values: %s",
-                    snapshot.layer,
-                    snapshot.head,
-                    snapshot.step,
-                    snapshot.L,
-                    k,
-                    snapshot.singular_values,
-                )
-            else:
-                logger.info(
-                    "[%s] %s head=%d step=%d L=%d features=%s",
-                    snapshot.signal,
-                    snapshot.layer,
-                    snapshot.head,
-                    snapshot.step,
-                    snapshot.L,
-                    snapshot.features.model_dump(exclude_none=True),
-                )
+        """Dispatch snapshot to all registered handlers."""
+        for handler in type(self)._handlers:
+            handler.handle(snapshot)

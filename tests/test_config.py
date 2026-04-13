@@ -18,7 +18,8 @@ def test_defaults():
     assert config.selfattn.interval == 32
     assert config.selfattn.threshold == 512
     assert config.selfattn.heads == [0]
-    assert config.output is None
+    assert config.output.path is None
+    assert config.emit.otel is False
 
 
 def test_programmatic_kwargs():
@@ -74,14 +75,15 @@ def test_yaml_tracker(tmp_path, monkeypatch):
 
 def test_yaml_routing(tmp_path, monkeypatch):
     yaml_content = (
-        "routing:\n  enabled: true\n  interval: 64\noutput: /var/log/glassbox/signals.jsonl\n"
+        "routing:\n  enabled: true\n  interval: 64\n"
+        "output:\n  path: /var/log/glassbox/signals.jsonl\n"
     )
     (tmp_path / "glassbox.yaml").write_text(yaml_content)
     monkeypatch.chdir(tmp_path)
     config = GlassboxConfig()
     assert config.routing.enabled is True
     assert config.routing.interval == 64
-    assert config.output == "/var/log/glassbox/signals.jsonl"
+    assert config.output.path == "/var/log/glassbox/signals.jsonl"
 
 
 def test_precedence_kwargs_beat_yaml(tmp_path, monkeypatch):
