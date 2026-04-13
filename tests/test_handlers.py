@@ -86,17 +86,19 @@ class TestJsonlHandler:
 
 
 class TestLoggingHandler:
-    def test_logs_with_singular_values(self, caplog):
+    def test_logs_spectral_repr(self, caplog):
         handler = LoggingHandler()
         with caplog.at_level(logging.INFO, logger="glassbox.handlers"):
             handler.handle(_make_snapshot())
-        assert "singular values" in caplog.text
+        assert "[spectral]" in caplog.text
+        assert "sv1=" in caplog.text
 
-    def test_logs_without_singular_values(self, caplog):
+    def test_logs_selfattn_repr(self, caplog):
         handler = LoggingHandler()
         with caplog.at_level(logging.INFO, logger="glassbox.handlers"):
             handler.handle(_make_snapshot_selfattn())
-        assert "selfattn" in caplog.text
+        assert "[selfattn]" in caplog.text
+        assert "attn_diag_logmean=" in caplog.text
 
     def test_close_is_noop(self):
         handler = LoggingHandler()

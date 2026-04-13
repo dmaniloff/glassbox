@@ -49,6 +49,8 @@ class SnapshotHandler(Protocol):
 class JsonlHandler:
     """Writes snapshots as newline-delimited JSON to a file.
 
+    This handler is designed to do feature logging for training a detection model.
+
     The file is opened lazily on the first ``handle()`` call and flushed
     after every write so downstream consumers can tail the file.
     """
@@ -76,27 +78,7 @@ class LoggingHandler:
     """
 
     def handle(self, snapshot: SVDSnapshot) -> None:
-        if snapshot.singular_values:
-            k = len(snapshot.singular_values)
-            logger.info(
-                "[SVD] %s head=%d step=%d L=%d top-%d singular values: %s",
-                snapshot.layer,
-                snapshot.head,
-                snapshot.step,
-                snapshot.L,
-                k,
-                snapshot.singular_values,
-            )
-        else:
-            logger.info(
-                "[%s] %s head=%d step=%d L=%d features=%s",
-                snapshot.signal,
-                snapshot.layer,
-                snapshot.head,
-                snapshot.step,
-                snapshot.L,
-                snapshot.features.model_dump(exclude_none=True),
-            )
+        logger.info("%r", snapshot)
 
     def close(self) -> None:
         pass
@@ -104,6 +86,10 @@ class LoggingHandler:
 
 class OtelHandler:
     """Emits snapshots as OpenTelemetry spans with ``glassbox.*`` attributes.
+
+    This handler is designed to be used with a trained detection model.
+    The ``heads``, ``interval``, and signal selection should be configured
+    to match what your trained detection model expects.
 
     Piggybacks on whatever ``TracerProvider`` is globally configured (e.g.
     by vLLM's ``--otlp-traces-endpoint``).  If no provider is set, the
@@ -131,9 +117,6 @@ class OtelHandler:
     ├── glassbox.spectral (layer=1, head=0, sv_ratio=1.8)
     ├── glassbox.routing  (layer=0, head=0, curl_norm=0.3)
     └── ...
-
-    The ``heads``, ``interval``, and signal selection should be configured
-    to match what your trained detection model expects.
     """
 
     def __init__(self) -> None:
