@@ -203,6 +203,125 @@ class TestOtelHandler:
         handler.handle(_make_snapshot())  # should not raise
 
 
+# ── OtelHandler integration (real TracerProvider) ────────────────────────
+
+otel_sdk = pytest.importorskip("opentelemetry.sdk")
+
+
+@pytest.fixture()
+def otel_spans():
+    """Set up a real TracerProvider with InMemorySpanExporter.
+
+    Yields (make_handler, get_spans) — call make_handler() to create an
+    OtelHandler wired to the test provider, and get_spans() to retrieve
+    finished spans.
+    """
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    def make_handler():
+        handler = OtelHandler()
+        handler._tracer = provider.get_tracer("glassbox")
+        handler._trace_mod = __import__("opentelemetry").trace
+        return handler
+
+    yield make_handler, exporter.get_finished_spans
+    provider.shutdown()
+
+
+class TestOtelHandlerIntegration:
+    """End-to-end tests with a real TracerProvider and InMemorySpanExporter."""
+
+    def test_single_snapshot_creates_parent_and_child(self, otel_spans):
+        make_handler, get_spans = otel_spans
+        handler = make_handler()
+        handler.handle(_make_snapshot())
+        handler.close()
+
+        spans = get_spans()
+        assert len(spans) == 2
+
+        child, parent = spans  # child finishes first
+        assert parent.name == "glassbox.step"
+        assert child.name == "glassbox.spectral"
+
+        # Child is nested under parent
+        assert child.parent.span_id == parent.context.span_id
+
+        # Parent attributes
+        parent_attrs = dict(parent.attributes)
+        assert parent_attrs["glassbox.request_id"] == 0
+        assert parent_attrs["glassbox.step"] == 32
+
+        # Child attributes
+        child_attrs = dict(child.attributes)
+        assert child_attrs["glassbox.signal"] == "spectral"
+        assert child_attrs["glassbox.layer"] == "model.layers.0.self_attn"
+        assert child_attrs["glassbox.head"] == 0
+        assert child_attrs["glassbox.L"] == 128
+        assert child_attrs["glassbox.sv1"] == 10.0
+        assert child_attrs["glassbox.sv_ratio"] == pytest.approx(2.0)
+
+    def test_same_step_shares_parent(self, otel_spans):
+        make_handler, get_spans = otel_spans
+        handler = make_handler()
+        handler.handle(_make_snapshot(layer="model.layers.0.self_attn", layer_idx=0))
+        handler.handle(_make_snapshot(layer="model.layers.1.self_attn", layer_idx=1))
+        handler.close()
+
+        spans = get_spans()
+        assert len(spans) == 3  # 2 children + 1 parent
+
+        parent = [s for s in spans if s.name == "glassbox.step"]
+        children = [s for s in spans if s.name == "glassbox.spectral"]
+        assert len(parent) == 1
+        assert len(children) == 2
+
+        # Both children share the same parent
+        assert children[0].parent.span_id == parent[0].context.span_id
+        assert children[1].parent.span_id == parent[0].context.span_id
+
+    def test_new_step_creates_new_parent(self, otel_spans):
+        make_handler, get_spans = otel_spans
+        handler = make_handler()
+        handler.handle(_make_snapshot(step=32))
+        handler.handle(_make_snapshot(step=64))
+        handler.close()
+
+        spans = get_spans()
+        parents = [s for s in spans if s.name == "glassbox.step"]
+        children = [s for s in spans if s.name == "glassbox.spectral"]
+        assert len(parents) == 2
+        assert len(children) == 2
+
+        # Each child has a different parent
+        assert children[0].parent.span_id != children[1].parent.span_id
+
+        # Parent step attributes are correct
+        parent_steps = {dict(p.attributes)["glassbox.step"] for p in parents}
+        assert parent_steps == {32, 64}
+
+    def test_selfattn_snapshot_attributes(self, otel_spans):
+        make_handler, get_spans = otel_spans
+        handler = make_handler()
+        handler.handle(_make_snapshot_selfattn())
+        handler.close()
+
+        spans = get_spans()
+        child = [s for s in spans if s.name == "glassbox.selfattn"][0]
+        attrs = dict(child.attributes)
+        assert attrs["glassbox.signal"] == "selfattn"
+        assert attrs["glassbox.tier"] == "materialized"
+        assert attrs["glassbox.attn_diag_logmean"] == pytest.approx(-3.2)
+
+
 # ── create_handlers_from_config ──────────────────────────────────────────
 
 
