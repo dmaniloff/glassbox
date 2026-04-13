@@ -111,7 +111,11 @@ def _parse_signals(ctx, param, value):
     "--output",
     type=click.Path(),
     default=None,
-    help="JSONL output file path. [default: from config (log to stderr)]",
+    help=(
+        "JSONL output file path "
+        "(for debugging/archival; typical runner use is --otel). "
+        "[default: log to stderr]"
+    ),
 )
 @click.option(
     "--otel/--no-otel",
