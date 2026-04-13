@@ -17,6 +17,7 @@ import logging
 
 import click
 import vllm
+import yaml
 
 # Import triggers @register_backend(AttentionBackendEnum.CUSTOM)
 import glassbox.backends.svd_backend as svd_mod
@@ -200,8 +201,6 @@ def main(
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
-        import yaml
-
         with open(config_file) as f:
             yaml_data = yaml.safe_load(f) or {}
         for key, val in yaml_data.items():

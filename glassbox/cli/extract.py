@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import click
+import yaml
 
 from glassbox.config import SIGNAL_NAMES, SVD_SIGNALS, THRESHOLD_SIGNALS
 from glassbox.results import (
@@ -569,8 +570,6 @@ def main(
 
     # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
     if config_file:
-        import yaml
-
         with open(config_file) as f:
             yaml_data = yaml.safe_load(f) or {}
         for key, val in yaml_data.items():
