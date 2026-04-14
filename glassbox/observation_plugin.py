@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from glassbox.verdict import VerdictStore
+
 logger = logging.getLogger(__name__)
 
 # Conditional import — the RFC may not be merged yet.
@@ -70,8 +72,6 @@ class GlassboxObservationPlugin(ObservationPlugin):
         return True
 
     def on_request_start(self, request_id: str, prompt: str | None = None) -> None:
-        from glassbox.verdict import VerdictStore
-
         VerdictStore.map_request_id(request_id, self._next_glassbox_id)
         self._next_glassbox_id += 1
 
@@ -110,8 +110,6 @@ class GlassboxObservationPlugin(ObservationPlugin):
         return results
 
     def on_request_complete(self, request_id: str) -> None:
-        from glassbox.verdict import VerdictStore
-
         VerdictStore.clear_by_vllm_id(request_id)
 
     def reload_config(self, config_data: dict[str, Any]) -> None:
