@@ -7,15 +7,17 @@ import logging
 import numpy as np
 import pytest
 
-from glassbox.handlers import ClassifierHandler
-from glassbox.observation_plugin import (
+joblib = pytest.importorskip("joblib")
+
+from glassbox.handlers import ClassifierHandler  # noqa: E402
+from glassbox.observation_plugin import (  # noqa: E402
     _HAS_OBSERVATION_API,
     GlassboxObservationPlugin,
     ObservationAction,
     RequestContext,
 )
-from glassbox.results import LaplacianFeatures, SVDSnapshot
-from glassbox.verdict import VerdictStore
+from glassbox.results import LaplacianFeatures, SVDSnapshot  # noqa: E402
+from glassbox.verdict import VerdictStore  # noqa: E402
 
 
 class _FakeClassifier:
