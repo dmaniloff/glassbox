@@ -6,12 +6,13 @@ import pytest
 
 from glassbox.config import GlassboxConfig
 from glassbox.handlers import (
+    ClassifierHandler,
     JsonlHandler,
     LoggingHandler,
     OtelHandler,
     create_handlers_from_config,
 )
-from glassbox.results import SelfAttnFeatures, SpectralFeatures, SVDSnapshot
+from glassbox.results import LaplacianFeatures, SelfAttnFeatures, SpectralFeatures, SVDSnapshot
 
 # ── Test helpers ─────────────────────────────────────────────────────────
 
@@ -322,6 +323,166 @@ class TestOtelHandlerIntegration:
         assert attrs["glassbox.attn_diag_logmean"] == pytest.approx(-3.2)
 
 
+# ── ClassifierHandler ────────────────────────────────────────────────────
+
+
+class _FakeClassifier:
+    """Module-level fake so it can be pickled by joblib."""
+
+    def __init__(self, prob: float = 0.8):
+        self._prob = prob
+
+    def predict_proba(self, X):
+        import numpy as np
+
+        n = X.shape[0]
+        return np.array([[1 - self._prob, self._prob]] * n)
+
+
+def _make_snapshot_laplacian(
+    layer_idx: int = 0, head: int = 0, request_id: int = 0, step: int = 1, eigvals=None
+) -> SVDSnapshot:
+    if eigvals is None:
+        eigvals = [0.9, 0.7, 0.5]
+    return SVDSnapshot(
+        signal="laplacian",
+        request_id=request_id,
+        layer=f"model.layers.{layer_idx}.self_attn",
+        layer_idx=layer_idx,
+        head=head,
+        step=step,
+        L=128,
+        features=LaplacianFeatures(eigvals=eigvals),
+    )
+
+
+@pytest.fixture()
+def classifier_model(tmp_path):
+    """Create a fake trained model for ClassifierHandler tests."""
+    import joblib
+
+    feat_cols = []
+    for li in range(2):
+        for ei in range(3):
+            feat_cols.append(f"laplacian_lap_eigval_{ei}_L{li}_H0")
+
+    model_dict = {
+        "model": _FakeClassifier(prob=0.8),
+        "pca": None,
+        "feature_columns": feat_cols,
+        "signal": "laplacian",
+        "threshold": 0.5,
+        "train_auroc": 0.9,
+        "test_auroc": 0.85,
+        "metadata": {},
+    }
+
+    path = tmp_path / "model.joblib"
+    joblib.dump(model_dict, str(path))
+    return str(path), feat_cols
+
+
+class TestClassifierHandler:
+    def test_buffers_and_classifies_on_step_boundary(self, classifier_model, caplog):
+        model_path, _ = classifier_model
+        handler = ClassifierHandler(model_path, threshold=0.5)
+
+        # Send snapshots for step 1 (2 layers)
+        handler.handle(_make_snapshot_laplacian(layer_idx=0, step=1))
+        handler.handle(_make_snapshot_laplacian(layer_idx=1, step=1))
+
+        # Step 2 triggers classification of step 1
+        with caplog.at_level(logging.WARNING, logger="glassbox.handlers"):
+            handler.handle(_make_snapshot_laplacian(layer_idx=0, step=2))
+
+        assert "Hallucination detected" in caplog.text
+        assert "p=0.800" in caplog.text
+        assert "step=1" in caplog.text
+
+        handler.close()
+
+    def test_close_flushes_remaining_buffer(self, classifier_model, caplog):
+        model_path, _ = classifier_model
+        handler = ClassifierHandler(model_path, threshold=0.5)
+
+        handler.handle(_make_snapshot_laplacian(layer_idx=0, step=1))
+        handler.handle(_make_snapshot_laplacian(layer_idx=1, step=1))
+
+        with caplog.at_level(logging.WARNING, logger="glassbox.handlers"):
+            handler.close()
+
+        assert "Hallucination detected" in caplog.text
+
+    def test_threshold_gating(self, classifier_model, caplog):
+        model_path, _ = classifier_model
+        # Set threshold above the model's output (0.8)
+        handler = ClassifierHandler(model_path, threshold=0.9)
+
+        handler.handle(_make_snapshot_laplacian(layer_idx=0, step=1))
+        handler.handle(_make_snapshot_laplacian(layer_idx=1, step=1))
+
+        with caplog.at_level(logging.WARNING, logger="glassbox.handlers"):
+            handler.close()
+
+        assert "Hallucination detected" not in caplog.text
+
+    def test_signal_filtering(self, classifier_model, caplog):
+        model_path, _ = classifier_model
+        handler = ClassifierHandler(model_path, threshold=0.5, signal="laplacian")
+
+        # Send a spectral snapshot — should be ignored
+        handler.handle(_make_snapshot(signal="spectral", step=1))
+        # Send a laplacian snapshot
+        handler.handle(_make_snapshot_laplacian(layer_idx=0, step=1))
+        handler.handle(_make_snapshot_laplacian(layer_idx=1, step=1))
+
+        with caplog.at_level(logging.WARNING, logger="glassbox.handlers"):
+            handler.close()
+
+        # Should classify based on laplacian only
+        assert "Hallucination detected" in caplog.text
+
+    def test_feature_vector_assembly(self, classifier_model):
+        """Verify eigvals are placed at correct positions in the feature vector."""
+        model_path, feat_cols = classifier_model
+        handler = ClassifierHandler(model_path, threshold=0.5)
+
+        # Force model load
+        handler._load_model()
+
+        # Verify column index mapping
+        assert handler._col_index is not None
+        assert handler._n_features == 6  # 2 layers x 3 eigvals
+        # (layer=0, head=0, eigval=0) should be position 0
+        assert handler._col_index[(0, 0, 0)] == 0
+        # (layer=1, head=0, eigval=2) should be position 5
+        assert handler._col_index[(1, 0, 2)] == 5
+
+    def test_multiple_steps_classified_independently(self, classifier_model, caplog):
+        model_path, _ = classifier_model
+        handler = ClassifierHandler(model_path, threshold=0.5)
+
+        # Step 1
+        handler.handle(_make_snapshot_laplacian(layer_idx=0, step=1))
+        handler.handle(_make_snapshot_laplacian(layer_idx=1, step=1))
+        # Step 2 triggers step 1 classification
+        handler.handle(_make_snapshot_laplacian(layer_idx=0, step=2))
+        handler.handle(_make_snapshot_laplacian(layer_idx=1, step=2))
+
+        with caplog.at_level(logging.WARNING, logger="glassbox.handlers"):
+            handler.close()
+
+        # Both steps classified
+        assert caplog.text.count("Hallucination detected") == 2
+
+    def test_close_idempotent(self, classifier_model):
+        model_path, _ = classifier_model
+        handler = ClassifierHandler(model_path, threshold=0.5)
+        handler.handle(_make_snapshot_laplacian(step=1))
+        handler.close()
+        handler.close()  # should not raise
+
+
 # ── create_handlers_from_config ──────────────────────────────────────────
 
 
@@ -351,3 +512,18 @@ class TestCreateHandlersFromConfig:
         handlers = create_handlers_from_config(config)
         assert len(handlers) == 1
         assert isinstance(handlers[0], LoggingHandler)
+
+    def test_classifier_creates_classifier_handler(self, classifier_model):
+        model_path, _ = classifier_model
+        config = GlassboxConfig(
+            classifier={"enabled": True, "model_path": model_path, "threshold": 0.7}
+        )
+        handlers = create_handlers_from_config(config)
+        classifier_handlers = [h for h in handlers if isinstance(h, ClassifierHandler)]
+        assert len(classifier_handlers) == 1
+        assert classifier_handlers[0]._threshold == 0.7
+
+    def test_classifier_disabled_by_default(self):
+        config = GlassboxConfig()
+        handlers = create_handlers_from_config(config)
+        assert not any(isinstance(h, ClassifierHandler) for h in handlers)

@@ -94,6 +94,17 @@ class LaplacianConfig(BaseModel):
     causal: bool = True
 
 
+class ClassifierConfig(BaseModel):
+    """Inline classification — run a trained probe on extracted features."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    model_path: str | None = None
+    threshold: float = 0.5
+    signal: str = "laplacian"
+
+
 class OutputConfig(BaseModel):
     """Feature logging pipeline — write full snapshots for training/analysis."""
 
@@ -132,6 +143,7 @@ class GlassboxConfig(BaseSettings):
     laplacian: LaplacianConfig = LaplacianConfig()
     output: OutputConfig = OutputConfig()
     emit: EmitConfig = EmitConfig()
+    classifier: ClassifierConfig = ClassifierConfig()
 
     @classmethod
     def settings_customise_sources(
