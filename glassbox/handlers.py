@@ -302,8 +302,7 @@ class ClassifierHandler:
 
         if proba >= self._threshold:
             logger.warning(
-                "Hallucination detected: p=%.3f (threshold=%.3f) "
-                "request_id=%d step=%d action=%s",
+                "Hallucination detected: p=%.3f (threshold=%.3f) request_id=%d step=%d action=%s",
                 proba,
                 self._threshold,
                 req_id,

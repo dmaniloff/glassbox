@@ -19,7 +19,6 @@ from glassbox.handlers import (
     SnapshotHandler,
 )
 from glassbox.observation_plugin import GlassboxObservationPlugin
-from glassbox.verdict import Verdict, VerdictStore
 from glassbox.results import (
     LaplacianFeatures,
     RoutingFeatures,
@@ -28,6 +27,7 @@ from glassbox.results import (
     SVDSnapshot,
     TrackerFeatures,
 )
+from glassbox.verdict import Verdict, VerdictStore
 
 __all__ = [
     "GlassboxConfig",

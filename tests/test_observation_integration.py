@@ -1,4 +1,4 @@
-"""End-to-end integration test: snapshot → ClassifierHandler → VerdictStore → ObservationPlugin → ABORT."""
+"""End-to-end: snapshot → ClassifierHandler → VerdictStore → ObservationPlugin."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ import pytest
 
 from glassbox.handlers import ClassifierHandler
 from glassbox.observation_plugin import (
+    _HAS_OBSERVATION_API,
     GlassboxObservationPlugin,
     ObservationAction,
-    _HAS_OBSERVATION_API,
     RequestContext,
 )
 from glassbox.results import LaplacianFeatures, SVDSnapshot
@@ -41,11 +41,7 @@ def classifier_model(tmp_path):
     """Create a fake trained model."""
     import joblib
 
-    feat_cols = [
-        f"laplacian_lap_eigval_{ei}_L{li}_H0"
-        for li in range(2)
-        for ei in range(3)
-    ]
+    feat_cols = [f"laplacian_lap_eigval_{ei}_L{li}_H0" for li in range(2) for ei in range(3)]
     model_dict = {
         "model": _FakeClassifier(prob=0.85),
         "pca": None,
@@ -151,16 +147,18 @@ class TestFullFlow:
 
         # Trigger classification
         with caplog.at_level(logging.WARNING, logger="glassbox.handlers"):
-            handler.handle(SVDSnapshot(
-                signal="laplacian",
-                request_id=0,
-                layer="model.layers.0.self_attn",
-                layer_idx=0,
-                head=0,
-                step=2,
-                L=128,
-                features=LaplacianFeatures(eigvals=[0.9, 0.7, 0.5]),
-            ))
+            handler.handle(
+                SVDSnapshot(
+                    signal="laplacian",
+                    request_id=0,
+                    layer="model.layers.0.self_attn",
+                    layer_idx=0,
+                    head=0,
+                    step=2,
+                    L=128,
+                    features=LaplacianFeatures(eigvals=[0.9, 0.7, 0.5]),
+                )
+            )
 
         # Warning is still logged
         assert "Hallucination detected" in caplog.text
@@ -192,20 +190,20 @@ class TestFullFlow:
         plugin = GlassboxObservationPlugin()
         plugin.on_request_start("vllm-req-0")
 
-        handler = ClassifierHandler(
-            model_path=path, threshold=0.5, action="abort"
-        )
+        handler = ClassifierHandler(model_path=path, threshold=0.5, action="abort")
 
-        handler.handle(SVDSnapshot(
-            signal="laplacian",
-            request_id=0,
-            layer="model.layers.0.self_attn",
-            layer_idx=0,
-            head=0,
-            step=1,
-            L=128,
-            features=LaplacianFeatures(eigvals=[0.9, 0.7, 0.5]),
-        ))
+        handler.handle(
+            SVDSnapshot(
+                signal="laplacian",
+                request_id=0,
+                layer="model.layers.0.self_attn",
+                layer_idx=0,
+                head=0,
+                step=1,
+                L=128,
+                features=LaplacianFeatures(eigvals=[0.9, 0.7, 0.5]),
+            )
+        )
         # Trigger via close
         handler.close()
 

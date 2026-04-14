@@ -5,11 +5,10 @@ from __future__ import annotations
 import pytest
 
 from glassbox.observation_plugin import (
+    _HAS_OBSERVATION_API,
     GlassboxObservationPlugin,
     ObservationAction,
-    ObservationResult,
     RequestContext,
-    _HAS_OBSERVATION_API,
 )
 from glassbox.verdict import VerdictStore
 
