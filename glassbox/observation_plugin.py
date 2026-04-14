@@ -80,8 +80,6 @@ class GlassboxObservationPlugin(ObservationPlugin):
         batch_hidden_states: dict[int, Any],
         request_contexts: list,
     ) -> list:
-        from glassbox.verdict import VerdictStore
-
         results = []
         for ctx in request_contexts:
             verdict = VerdictStore.consume(ctx.request_id)
