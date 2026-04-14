@@ -182,6 +182,139 @@ class OtelHandler:
         self._end_active_span()
 
 
+class ClassifierHandler:
+    """Runs a trained probe on extracted features and emits warnings.
+
+    Buffers snapshots for a ``(request_id, step)`` group.  When the group
+    changes (next step or next request), assembles a feature vector from
+    the buffer, runs the classifier, and logs a warning if the predicted
+    probability exceeds the configured threshold.
+
+    The model is loaded lazily on the first ``handle()`` call so that
+    importing ``glassbox`` doesn't require ``joblib``/``sklearn``.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        threshold: float = 0.5,
+        signal: str = "laplacian",
+    ) -> None:
+        self._model_path = model_path
+        self._threshold = threshold
+        self._signal = signal
+
+        # Loaded lazily
+        self._model_dict: dict | None = None
+        self._col_index: dict[tuple[int, int, int], int] | None = None  # (layer, head, eigval) -> pos
+        self._n_features: int = 0
+
+        # Step-boundary buffer
+        self._active_key: tuple[int, int] | None = None
+        self._buffer: dict[tuple[int, int], list[float]] = {}  # (layer_idx, head) -> eigvals
+
+    def _load_model(self) -> None:
+        try:
+            import joblib
+        except ImportError:
+            logger.warning(
+                "joblib not installed; ClassifierHandler disabled. "
+                "Install with: pip install 'glassbox[train]'"
+            )
+            self._model_dict = {}
+            return
+
+        self._model_dict = joblib.load(self._model_path)
+        feat_cols = self._model_dict["feature_columns"]
+        self._n_features = len(feat_cols)
+
+        # Parse feature column names into (layer, head, eigval_idx) -> vector position
+        import re
+
+        self._col_index = {}
+        pattern = re.compile(r"^\w+_\w+eigval_(\d+)_L(\d+)_H(\d+)$")
+        for pos, col in enumerate(feat_cols):
+            m = pattern.match(col)
+            if m:
+                eigval_idx, layer_idx, head = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                self._col_index[(layer_idx, head, eigval_idx)] = pos
+
+    def handle(self, snapshot: SVDSnapshot) -> None:
+        if snapshot.signal != self._signal:
+            return
+
+        if self._model_dict is None:
+            self._load_model()
+        if not self._model_dict:  # load failed
+            return
+
+        key = (snapshot.request_id, snapshot.step)
+
+        # Step boundary → classify previous buffer
+        if self._active_key is not None and self._active_key != key:
+            self._classify_and_emit()
+
+        self._active_key = key
+
+        # Buffer eigvals for this (layer, head)
+        feat = snapshot.features
+        if hasattr(feat, "eigvals"):
+            self._buffer[(snapshot.layer_idx, snapshot.head)] = feat.eigvals
+
+    def _classify_and_emit(self) -> None:
+        if not self._buffer or self._col_index is None:
+            self._buffer = {}
+            return
+
+        import numpy as np
+
+        # Assemble feature vector
+        vec = np.full(self._n_features, np.nan)
+        for (layer_idx, head), eigvals in self._buffer.items():
+            for ei, val in enumerate(eigvals):
+                pos = self._col_index.get((layer_idx, head, ei))
+                if pos is not None:
+                    vec[pos] = val
+
+        self._buffer = {}
+
+        # Skip if too many NaNs (> 50%)
+        nan_frac = np.isnan(vec).mean()
+        if nan_frac > 0.5:
+            logger.debug(
+                "ClassifierHandler: skipping classification, %.0f%% features missing",
+                nan_frac * 100,
+            )
+            return
+
+        # Impute remaining NaNs with 0 (safe for PCA-reduced models)
+        vec = np.nan_to_num(vec, nan=0.0)
+
+        model_dict = self._model_dict
+        X = vec.reshape(1, -1)
+
+        # Apply PCA if the model was trained with it
+        if model_dict.get("pca") is not None:
+            X = model_dict["pca"].transform(X)
+
+        proba = model_dict["model"].predict_proba(X)[0, 1]
+
+        req_id, step = self._active_key
+        if proba >= self._threshold:
+            logger.warning(
+                "Hallucination detected: p=%.3f (threshold=%.3f) "
+                "request_id=%d step=%d",
+                proba,
+                self._threshold,
+                req_id,
+                step,
+            )
+
+    def close(self) -> None:
+        if self._buffer:
+            self._classify_and_emit()
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -201,6 +334,14 @@ def create_handlers_from_config(config: GlassboxConfig) -> list[SnapshotHandler]
         handlers.append(JsonlHandler(config.output.path))
     if config.emit.otel:
         handlers.append(OtelHandler())
+    if config.classifier.enabled and config.classifier.model_path:
+        handlers.append(
+            ClassifierHandler(
+                model_path=config.classifier.model_path,
+                threshold=config.classifier.threshold,
+                signal=config.classifier.signal,
+            )
+        )
     if not handlers:
         handlers.append(LoggingHandler())
     return handlers

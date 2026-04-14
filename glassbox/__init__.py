@@ -12,6 +12,7 @@ entry point when the package is installed.  Launch vLLM with
 
 from glassbox.config import GlassboxConfig
 from glassbox.handlers import (
+    ClassifierHandler,
     JsonlHandler,
     LoggingHandler,
     OtelHandler,
@@ -35,6 +36,7 @@ __all__ = [
     "SelfAttnFeatures",
     "LaplacianFeatures",
     "SnapshotHandler",
+    "ClassifierHandler",
     "JsonlHandler",
     "LoggingHandler",
     "OtelHandler",

@@ -178,6 +178,23 @@ class SelfAttnFeatures(BaseModel):
     )
 
 
+def parse_feature_column(col: str) -> tuple[str, int, int, int] | None:
+    """Parse a Parquet feature column name into its components.
+
+    Column format: ``{signal}_{prefix}{stem}_{eigval_idx}_L{layer}_H{head}``
+    e.g. ``laplacian_lap_eigval_3_L2_H0``
+
+    Returns ``(signal, eigval_idx, layer_idx, head)`` or ``None`` if the
+    column name doesn't match the expected pattern.
+    """
+    import re
+
+    m = re.match(r"^(\w+?)_\w+?eigval_(\d+)_L(\d+)_H(\d+)$", col)
+    if m is None:
+        return None
+    return m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
+
+
 class LaplacianFeatures(BaseModel):
     """Laplacian eigenvalue features from attention graphs.
 
