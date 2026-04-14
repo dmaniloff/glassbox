@@ -14,7 +14,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import IO, TYPE_CHECKING, Protocol, runtime_checkable
+
+import numpy as np
+
+from glassbox.verdict import VerdictStore
 
 if TYPE_CHECKING:
     from glassbox.config import GlassboxConfig
@@ -230,8 +235,6 @@ class ClassifierHandler:
         feat_cols = self._model_dict["feature_columns"]
         self._n_features = len(feat_cols)
 
-        import re
-
         self._col_index = {}
         pattern = re.compile(r"^\w+_\w+eigval_(\d+)_L(\d+)_H(\d+)$")
         for pos, col in enumerate(feat_cols):
@@ -265,8 +268,6 @@ class ClassifierHandler:
             self._buffer = {}
             return
 
-        import numpy as np
-
         vec = np.full(self._n_features, np.nan)
         for (layer_idx, head), eigvals in self._buffer.items():
             for ei, val in enumerate(eigvals):
@@ -295,9 +296,6 @@ class ClassifierHandler:
         proba = model_dict["model"].predict_proba(X)[0, 1]
 
         req_id, step = self._active_key
-
-        # Report verdict to VerdictStore for ObservationPlugin
-        from glassbox.verdict import VerdictStore
 
         verdict_action = self._action if proba >= self._threshold else "continue"
         VerdictStore.report(req_id, proba, verdict_action)
