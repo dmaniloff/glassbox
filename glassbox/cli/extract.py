@@ -493,7 +493,7 @@ def main(
     svd_features_path = outdir_path / "svd_features.jsonl"
 
     # Write config metadata (num_layers added after LLM creation below)
-    config = {
+    extract_metadata = {
         "model": model,
         "dataset": dataset_name,
         "max_samples": max_samples,
@@ -545,8 +545,8 @@ def main(
 
     # Save num_layers from model config so parquet can be regenerated without HF download
     num_layers = llm.llm_engine.model_config.hf_config.num_hidden_layers
-    config["num_layers"] = num_layers
-    (outdir_path / "config.json").write_text(json.dumps(config, indent=2))
+    extract_metadata["num_layers"] = num_layers
+    (outdir_path / "config.json").write_text(json.dumps(extract_metadata, indent=2))
 
     samples_path = outdir_path / "samples.jsonl"
     samples_f = open(samples_path, "w")
