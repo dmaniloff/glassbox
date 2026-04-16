@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Literal
 
+import click
 from pydantic import BaseModel, ConfigDict
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
 SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
@@ -13,6 +14,22 @@ SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
 THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian"}
+
+
+def parse_signal_names(ctx, param, value):
+    """Click callback: parse --signal values (repeatable or comma-separated)."""
+    if not value:
+        return ("spectral",)
+    result = []
+    for v in value:
+        for part in v.split(","):
+            part = part.strip()
+            if part not in SIGNAL_NAMES:
+                raise click.BadParameter(
+                    f"Unknown signal {part!r}. Choose from: {', '.join(SIGNAL_NAMES)}"
+                )
+            result.append(part)
+    return tuple(result)
 
 
 class SpectralConfig(BaseModel):
@@ -113,10 +130,8 @@ class EmitConfig(BaseModel):
 class GlassboxConfig(BaseSettings):
     """Root configuration for the Glassbox observability framework.
 
-    Precedence (highest wins):
-      1. Programmatic kwargs
-      2. YAML config file (glassbox.yaml)
-      3. Field defaults
+    Precedence (highest → lowest):
+      Programmatic kwargs > glassbox.yaml in cwd > field defaults
     """
 
     model_config = SettingsConfigDict(
@@ -142,10 +157,62 @@ class GlassboxConfig(BaseSettings):
         dotenv_settings,
         file_secret_settings,
     ):
-        from pydantic_settings import YamlConfigSettingsSource
-
         # config sources and their precedence
         return (
             init_settings,  # 1. programmatic kwargs
             YamlConfigSettingsSource(settings_cls),  # 2. glassbox.yaml
         )
+
+    @classmethod
+    def from_cli_args(
+        cls,
+        *,
+        signals: tuple[str, ...] = ("spectral",),
+        interval: int | None = None,
+        rank: int | None = None,
+        method: str | None = None,
+        heads: tuple[int, ...] | list[int] = (),
+        threshold: int | None = None,
+        block_size: int | None = None,
+        output_path: str | None = None,
+        otel: bool | None = None,
+    ) -> GlassboxConfig:
+        """Build a GlassboxConfig from CLI-style arguments.
+
+        Precedence (highest → lowest):
+          keyword args here > glassbox.yaml in cwd > field defaults
+
+        Signals in the *signals* tuple are enabled; all others are
+        explicitly disabled.
+        """
+        overrides: dict = {}
+
+        if output_path is not None:
+            overrides["output"] = {"path": output_path}
+        if otel is not None:
+            overrides["emit"] = {"otel": otel}
+
+        signal_set = set(signals)
+
+        for sig_name in SIGNAL_NAMES:
+            sig_dict: dict = {"enabled": sig_name in signal_set}
+
+            if sig_name in signal_set:
+                if interval is not None:
+                    sig_dict["interval"] = interval
+                if heads:
+                    sig_dict["heads"] = list(heads)
+                if sig_name in SVD_SIGNALS:
+                    if rank is not None:
+                        sig_dict["rank"] = rank
+                    if method is not None:
+                        sig_dict["method"] = method
+                if sig_name in THRESHOLD_SIGNALS:
+                    if threshold is not None:
+                        sig_dict["threshold"] = threshold
+                    if block_size is not None:
+                        sig_dict["block_size"] = block_size
+
+            overrides[sig_name] = sig_dict
+
+        return cls(**overrides)

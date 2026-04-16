@@ -454,7 +454,7 @@ glassbox-run \
   --prompt "The future of artificial intelligence is"
 ```
 
-Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`, `--config`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`.
+Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`. Settings can also be loaded from a `glassbox.yaml` in the working directory.
 
 ### `glassbox-extract` — offline feature extraction
 
@@ -473,7 +473,7 @@ Runs two-phase prefill (question-only + full prompt+response) on labeled dataset
 - `svd_features.jsonl` — snapshot features
 - `features.parquet` — optional wide Parquet for downstream training (with `--parquet`)
 
-Output goes to `experiments/results/{timestamp}/` by default, or override with `--outdir`. Also supports `--otel` (for debugging long runs) and `--config` (YAML).
+Output goes to `experiments/results/{timestamp}/` by default, or override with `--outdir`. Also supports `--otel` (though the typical use case for extraction is JSONL or parquet).
 
 ## Benchmarks
 

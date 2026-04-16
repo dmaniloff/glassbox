@@ -26,9 +26,8 @@ from datetime import datetime
 from pathlib import Path
 
 import click
-import yaml
 
-from glassbox.config import SIGNAL_NAMES, SVD_SIGNALS, THRESHOLD_SIGNALS
+from glassbox.config import SIGNAL_NAMES, GlassboxConfig, parse_signal_names
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
     RoutingFeatures,
@@ -372,22 +371,6 @@ def _write_parquet(
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 
-def _parse_signals(ctx, param, value):
-    """Parse --signal values: supports repeatable and comma-separated."""
-    if not value:
-        return ()
-    result = []
-    for v in value:
-        for part in v.split(","):
-            part = part.strip()
-            if part not in SIGNAL_NAMES:
-                raise click.BadParameter(
-                    f"Unknown signal {part!r}. Choose from: {', '.join(SIGNAL_NAMES)}"
-                )
-            result.append(part)
-    return tuple(result)
-
-
 @click.command()
 @click.option("--model", default=DEFAULT_MODEL, show_default=True, help="HuggingFace model name.")
 @click.option(
@@ -432,7 +415,7 @@ def _parse_signals(ctx, param, value):
     "signals",
     multiple=True,
     default=None,
-    callback=_parse_signals,
+    callback=parse_signal_names,
     help=(f"Signals to enable. Repeatable or comma-separated. Choices: {', '.join(SIGNAL_NAMES)}."),
 )
 @click.option(
@@ -462,13 +445,6 @@ def _parse_signals(ctx, param, value):
         "(for debugging; typical extract use is JSONL). [default: False]"
     ),
 )
-@click.option(
-    "--config",
-    "config_file",
-    type=click.Path(exists=True),
-    default=None,
-    help="Path to YAML config file. [default: glassbox.yaml if present]",
-)
 def main(
     model: str,
     dataset_name: str,
@@ -482,13 +458,11 @@ def main(
     parquet: bool,
     outdir: str | None,
     otel: bool,
-    config_file: str | None,
 ) -> None:
     """Run prefill-only spectral feature extraction on a labeled dataset."""
     import vllm
 
     import glassbox.backends.svd_backend as svd_mod
-    from glassbox.config import GlassboxConfig
 
     if not signals:
         raise click.UsageError(
@@ -516,10 +490,10 @@ def main(
         outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
 
-    signal_set = set(signals)
+    svd_features_path = outdir_path / "svd_features.jsonl"
 
     # Write config metadata (num_layers added after LLM creation below)
-    config = {
+    extract_metadata = {
         "model": model,
         "dataset": dataset_name,
         "max_samples": max_samples,
@@ -531,8 +505,6 @@ def main(
         "max_tokens": max_tokens,
     }
 
-    svd_features_path = outdir_path / "svd_features.jsonl"
-
     log(f"Results directory: {outdir_path}")
     log(f"Model: {model}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
@@ -540,45 +512,18 @@ def main(
     log(f"Signals: {', '.join(signals)}")
     if heads:
         log(f"Heads: {list(heads)}")
-    if "routing" in signal_set:
-        log(f"Routing: enabled (threshold={threshold or 512})")
-    if "selfattn" in signal_set:
-        log(f"SelfAttn: enabled (threshold={threshold or 512})")
-    if "laplacian" in signal_set:
-        log(f"Laplacian: enabled (threshold={threshold or 512})")
 
-    # Configure glassbox backend
-    gb_kwargs: dict = {"output": {"path": str(svd_features_path)}}
-    if otel:
-        gb_kwargs["emit"] = {"otel": True}
-
-    for sig_name in SIGNAL_NAMES:
-        if sig_name not in signal_set:
-            gb_kwargs[sig_name] = {"enabled": False}
-            continue
-
-        sig_cfg: dict = {"enabled": True, "interval": 1}
-        if heads:
-            sig_cfg["heads"] = list(heads)
-        if sig_name in SVD_SIGNALS:
-            sig_cfg["rank"] = svd_rank
-            if method is not None:
-                sig_cfg["method"] = method
-        if sig_name in THRESHOLD_SIGNALS and threshold is not None:
-            sig_cfg["threshold"] = threshold
-        gb_kwargs[sig_name] = sig_cfg
-
-    # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
-    if config_file:
-        with open(config_file) as f:
-            yaml_data = yaml.safe_load(f) or {}
-        for key, val in yaml_data.items():
-            if key not in gb_kwargs:
-                gb_kwargs[key] = val
-            elif isinstance(gb_kwargs[key], dict) and isinstance(val, dict):
-                gb_kwargs[key] = {**val, **gb_kwargs[key]}
-
-    gb_config = GlassboxConfig(**gb_kwargs)
+    # Configure glassbox backend (interval=1 for prefill-only extraction)
+    gb_config = GlassboxConfig.from_cli_args(
+        signals=signals,
+        interval=1,
+        rank=svd_rank,
+        method=method,
+        heads=heads,
+        threshold=threshold,
+        output_path=str(svd_features_path),
+        otel=True if otel else None,
+    )
     svd_mod.SVDTritonAttentionImpl.set_config(gb_config)
 
     # Create vLLM engine
@@ -600,8 +545,8 @@ def main(
 
     # Save num_layers from model config so parquet can be regenerated without HF download
     num_layers = llm.llm_engine.model_config.hf_config.num_hidden_layers
-    config["num_layers"] = num_layers
-    (outdir_path / "config.json").write_text(json.dumps(config, indent=2))
+    extract_metadata["num_layers"] = num_layers
+    (outdir_path / "config.json").write_text(json.dumps(extract_metadata, indent=2))
 
     samples_path = outdir_path / "samples.jsonl"
     samples_f = open(samples_path, "w")
