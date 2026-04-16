@@ -179,9 +179,7 @@ def test_from_cli_args_interval():
 
 
 def test_from_cli_args_threshold_block_size():
-    config = GlassboxConfig.from_cli_args(
-        signals=("routing",), threshold=1024, block_size=512
-    )
+    config = GlassboxConfig.from_cli_args(signals=("routing",), threshold=1024, block_size=512)
     assert config.routing.threshold == 1024
     assert config.routing.block_size == 512
 
@@ -193,11 +191,13 @@ def test_from_cli_args_output_otel():
 
 
 def test_from_cli_args_yaml_auto_load(tmp_path, monkeypatch):
-    (tmp_path / "glassbox.yaml").write_text(textwrap.dedent("""\
+    (tmp_path / "glassbox.yaml").write_text(
+        textwrap.dedent("""\
         routing:
           enabled: true
           hodge_target_cv: 0.1
-    """))
+    """)
+    )
     monkeypatch.chdir(tmp_path)
     config = GlassboxConfig.from_cli_args(
         signals=("spectral", "routing"),
