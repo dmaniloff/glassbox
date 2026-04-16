@@ -24,7 +24,13 @@ def register_svd_backend():
     # Initialise config from glassbox.yaml (if present) and set up handlers.
     # This makes `vllm serve --attention-backend CUSTOM` work out of the box
     # without requiring the glassbox-run CLI wrapper.
+    #
+    # Skip if config was already set programmatically (e.g. by run_extraction
+    # or glassbox-run).  After fork, the subprocess inherits the explicit
+    # config; re-running set_config here would overwrite it with defaults.
     from glassbox.backends.svd_backend import SVDTritonAttentionImpl
-    from glassbox.config import GlassboxConfig
 
-    SVDTritonAttentionImpl.set_config(GlassboxConfig())
+    if not SVDTritonAttentionImpl._config_set_explicitly:
+        from glassbox.config import GlassboxConfig
+
+        SVDTritonAttentionImpl.set_config(GlassboxConfig())
