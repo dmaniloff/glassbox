@@ -464,6 +464,12 @@ def main(
 
     import glassbox.backends.svd_backend as svd_mod
 
+    if not signals:
+        raise click.UsageError(
+            "At least one signal must be specified. "
+            f"Use --signal with one or more of: {', '.join(SIGNAL_NAMES)}"
+        )
+
     # Load dataset(s)
     if dataset_name == "all":
         all_samples: list[dict] = []
