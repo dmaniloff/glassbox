@@ -31,6 +31,9 @@ glassbox-analyze = "glassbox.cli.analyze:main"
 [project.entry-points."vllm.general_plugins"]
 glassbox_svd = "glassbox.vllm_plugin:register_svd_backend"
 
+[project.entry-points."vllm.observation_plugins"]
+glassbox = "glassbox.observation_plugin:register_observation_plugin"
+
 [dependency-groups]
 dev = ["pytest", "requests"]
 

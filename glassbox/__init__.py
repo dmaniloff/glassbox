@@ -12,11 +12,13 @@ entry point when the package is installed.  Launch vLLM with
 
 from glassbox.config import GlassboxConfig
 from glassbox.handlers import (
+    ClassifierHandler,
     JsonlHandler,
     LoggingHandler,
     OtelHandler,
     SnapshotHandler,
 )
+from glassbox.observation_plugin import GlassboxObservationPlugin
 from glassbox.results import (
     LaplacianFeatures,
     RoutingFeatures,
@@ -25,6 +27,7 @@ from glassbox.results import (
     SVDSnapshot,
     TrackerFeatures,
 )
+from glassbox.verdict import Verdict, VerdictStore
 
 __all__ = [
     "GlassboxConfig",
@@ -35,7 +38,11 @@ __all__ = [
     "SelfAttnFeatures",
     "LaplacianFeatures",
     "SnapshotHandler",
+    "ClassifierHandler",
     "JsonlHandler",
     "LoggingHandler",
     "OtelHandler",
+    "GlassboxObservationPlugin",
+    "Verdict",
+    "VerdictStore",
 ]
