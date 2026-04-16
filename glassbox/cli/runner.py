@@ -5,9 +5,8 @@ Usage:
     glassbox-run [OPTIONS]
     glassbox-run --signal spectral,routing --rank 2 --heads 0,1,2
     glassbox-run --model facebook/opt-350m --method lanczos
-    glassbox-run --config glassbox.yaml
 
-Options can also be set via glassbox.yaml or legacy GLASSBOX_SVD_* env vars.
+Options can also be set via glassbox.yaml in the working directory.
 CLI args take highest precedence.
 """
 
@@ -17,37 +16,16 @@ import logging
 
 import click
 import vllm
-import yaml
 
 # Import triggers @register_backend(AttentionBackendEnum.CUSTOM)
 import glassbox.backends.svd_backend as svd_mod
-from glassbox.config import SIGNAL_NAMES, SVD_SIGNALS, THRESHOLD_SIGNALS, GlassboxConfig
+from glassbox.config import SIGNAL_NAMES, GlassboxConfig, parse_signal_names
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-def _parse_signals(ctx, param, value):
-    """Parse --signal values: supports repeatable and comma-separated.
-
-    Returns None when not explicitly provided (lets YAML/config defaults
-    control which signals are enabled).
-    """
-    if not value:
-        return None
-    result = []
-    for v in value:
-        for part in v.split(","):
-            part = part.strip()
-            if part not in SIGNAL_NAMES:
-                raise click.BadParameter(
-                    f"Unknown signal {part!r}. Choose from: {', '.join(SIGNAL_NAMES)}"
-                )
-            result.append(part)
-    return tuple(result)
 
 
 @click.command()
@@ -62,10 +40,10 @@ def _parse_signals(ctx, param, value):
     "signals",
     multiple=True,
     default=None,
-    callback=_parse_signals,
+    callback=parse_signal_names,
     help=(
         "Signals to enable. Repeatable or comma-separated. "
-        f"Choices: {', '.join(SIGNAL_NAMES)}. [default: spectral] "
+        f"Choices: {', '.join(SIGNAL_NAMES)}. "
         "Routing Hodge parameters (hodge_target_cv, etc.) are configurable via YAML only."
     ),
 )
@@ -124,13 +102,6 @@ def _parse_signals(ctx, param, value):
     help="Emit snapshots as OpenTelemetry spans. [default: from config (False)]",
 )
 @click.option(
-    "--config",
-    "config_file",
-    type=click.Path(exists=True),
-    default=None,
-    help="Path to YAML config file. [default: glassbox.yaml if present]",
-)
-@click.option(
     "--max-tokens",
     type=int,
     default=64,
@@ -145,14 +116,13 @@ def _parse_signals(ctx, param, value):
 )
 def main(
     model: str,
-    signals: tuple[str, ...] | None,
+    signals: tuple[str, ...],
     interval: int | None,
     rank: int | None,
     method: str | None,
     heads: tuple[int, ...],
     output: str | None,
     otel: bool | None,
-    config_file: str | None,
     threshold: int | None,
     block_size: int | None,
     max_tokens: int,
@@ -160,59 +130,20 @@ def main(
 ) -> None:
     """Launch vLLM with the custom SVD attention backend."""
 
-    # Build nested config overrides from CLI args
-    overrides: dict = {}
-
-    if output is not None:
-        overrides["output"] = {"path": output}
-    if otel is not None:
-        overrides["emit"] = {"otel": otel}
-
-    # When --signal is explicitly provided, set enabled for each signal.
-    # When not provided (None), don't override enabled — let YAML/config
-    # defaults decide. If neither --signal nor YAML is provided, the config
-    # defaults apply (spectral enabled, others disabled).
-    signal_set = set(signals) if signals is not None else None
-
-    for sig_name in SIGNAL_NAMES:
-        sig_dict: dict = {}
-        if signal_set is not None:
-            sig_dict["enabled"] = sig_name in signal_set
-
-        is_active = signal_set is None or sig_name in signal_set
-        if is_active:
-            if interval is not None:
-                sig_dict["interval"] = interval
-            if heads:
-                sig_dict["heads"] = list(heads)
-            if sig_name in SVD_SIGNALS:
-                if rank is not None:
-                    sig_dict["rank"] = rank
-                if method is not None:
-                    sig_dict["method"] = method
-            if sig_name in THRESHOLD_SIGNALS:
-                if threshold is not None:
-                    sig_dict["threshold"] = threshold
-                if block_size is not None:
-                    sig_dict["block_size"] = block_size
-
-        if sig_dict:
-            overrides[sig_name] = sig_dict
-
-    # Handle --config YAML file: read it and merge (CLI overrides beat YAML)
-    if config_file:
-        with open(config_file) as f:
-            yaml_data = yaml.safe_load(f) or {}
-        for key, val in yaml_data.items():
-            if key not in overrides:
-                overrides[key] = val
-            elif isinstance(overrides[key], dict) and isinstance(val, dict):
-                overrides[key] = {**val, **overrides[key]}
-
     # vLLM calls impl_cls(). There doesn't seem to be a way to inject extra
     # args through the vLLM call path. So we set the config as a class
     # variable on SVDTritonAttentionImpl before vLLM creates the engine.
-    config = GlassboxConfig(**overrides)
+    config = GlassboxConfig.from_cli_args(
+        signals=signals,
+        interval=interval,
+        rank=rank,
+        method=method,
+        heads=heads,
+        threshold=threshold,
+        block_size=block_size,
+        output_path=output,
+        otel=otel,
+    )
     svd_mod.SVDTritonAttentionImpl.set_config(config)
 
     logger.info("Creating vLLM engine with CUSTOM attention backend")
