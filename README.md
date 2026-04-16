@@ -473,7 +473,7 @@ Runs two-phase prefill (question-only + full prompt+response) on labeled dataset
 - `svd_features.jsonl` — snapshot features
 - `features.parquet` — optional wide Parquet for downstream training (with `--parquet`)
 
-Output goes to `experiments/results/{timestamp}/` by default, or override with `--outdir`. Also supports `--otel` (for debugging long runs).
+Output goes to `experiments/results/{timestamp}/` by default, or override with `--outdir`. Also supports `--otel` (though the typical use case for extraction is JSONL or parquet).
 
 ## Benchmarks
 
