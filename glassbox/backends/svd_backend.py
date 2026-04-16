@@ -121,6 +121,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     # Keeping one handler list on the class so every layer emits to the same sinks.
     _handlers: list = [LoggingHandler()]
 
+    # True after an explicit set_config() call.  The vLLM plugin checks this
+    # to avoid overwriting programmatic config with defaults in subprocesses.
+    _config_set_explicitly: bool = False
+
     @classmethod
     def set_config(cls, config: GlassboxConfig) -> None:
         """Set config and initialise handlers.
@@ -129,6 +133,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         to ``cls.config``.
         """
         cls.config = config
+        cls._config_set_explicitly = True
         for h in cls._handlers:
             h.close()
         cls._handlers = create_handlers_from_config(config)
