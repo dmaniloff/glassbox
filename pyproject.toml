@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "requests"]
 otel = [
     "opentelemetry-api>=1.27.0",
     "opentelemetry-sdk>=1.27.0",
@@ -32,10 +32,13 @@ glassbox-analyze = "glassbox.cli.analyze:main"
 glassbox_svd = "glassbox.vllm_plugin:register_svd_backend"
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "requests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests requiring GPU and model download (deselect with '-m \"not e2e\"')",
+]
 
 [tool.ruff]
 target-version = "py312"
