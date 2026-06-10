@@ -1,11 +1,11 @@
-"""Bipartite sweep conductance for the degree-normalized cross-operator M.
+"""Cheeger diagnostics for the degree-normalized cross-operator M.
 
-Computes the Cheeger conductance φ* via sweep cut over the Fiedler-like
-singular vectors (u₂, v₂) of M.  Two paths:
+Features: φ* (sweep-cut conductance), σ₂_asym (antisymmetric spectrum),
+commutator_norm (symmetric/antisymmetric entanglement).
 
-  - Materialized: ``bipartite_sweep_conductance(u2, v2, M)``
-  - Matrix-free:  ``bipartite_sweep_conductance_matrix_free(u2, v2, Q, K, ...)``
-    streams through M in row blocks, O(block_size × L) peak memory.
+Two paths:
+  - Materialized: dense tensor ops on L×L matrix M.
+  - Matrix-free:  blocked-streaming matvecs, O(Ld) memory.
 
 The spectral gap ``1 - σ₂`` only *bounds* conductance via the Cheeger inequality:
 
@@ -19,7 +19,18 @@ References:
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
+
+from glassbox.svd import (
+    matvec_commutator_blocked,
+    matvec_Masym_blocked,
+    randomized_svd,
+    svd_via_lanczos,
+)
+
+EPSILON = 1e-10
 
 
 @torch.no_grad()
@@ -343,3 +354,156 @@ def _pick_best_phi(phi1: float, phi2: float) -> float:
     else:
         result = max(0.0, min(phi1, phi2))
     return max(0.0, min(result, 1.0))
+
+
+# ---------------------------------------------------------------------------
+# Spectral diagnostics (moved from hodge.py)
+# ---------------------------------------------------------------------------
+
+
+def compute_sigma2_asym_matrix_free(
+    Q, K, d_k_inv_sqrt, scale, block_size=256, svd_method="randomized",
+    causal=False,
+):
+    """Second singular value of M_asym = (M - M^T) / 2, computed matrix-free."""
+    L = Q.shape[0]
+    device = Q.device
+
+    def matvec_asym(v):
+        return matvec_Masym_blocked(
+            Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal
+        )
+
+    def matvec_asym_t(v):
+        return -matvec_Masym_blocked(
+            Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal
+        )
+
+    k = min(2, L - 1)
+    if k < 2:
+        return 0.0
+
+    if svd_method == "lanczos":
+        _, S, _ = svd_via_lanczos(
+            matvec_asym, matvec_asym_t, L, k,
+            max(2 * k + 2, 20), str(device),
+        )
+    else:
+        _, S, _ = randomized_svd(
+            matvec_asym, matvec_asym_t, L, k, device=str(device)
+        )
+
+    S_sorted, _ = torch.sort(S, descending=True)
+    return S_sorted[1].item() if len(S_sorted) > 1 else 0.0
+
+
+def estimate_commutator_norm_matrix_free(
+    Q, K, d_k_inv_sqrt, scale, M_fro_norm, block_size=256,
+    n_hutchinson=10, seed=42, causal=False,
+):
+    """Estimate ||[M_sym, M_asym]||_F / ||M||_F via Hutchinson trace."""
+    L = Q.shape[0]
+    device = Q.device
+    dtype = Q.dtype
+
+    gen = torch.Generator(device=device).manual_seed(seed)
+
+    trace_est = torch.tensor(0.0, device=device, dtype=dtype)
+    for _ in range(n_hutchinson):
+        z = torch.where(
+            torch.rand(L, device=device, generator=gen) < 0.5,
+            torch.ones(L, device=device, dtype=dtype),
+            -torch.ones(L, device=device, dtype=dtype),
+        )
+        w = matvec_commutator_blocked(
+            Q, K, z, d_k_inv_sqrt, scale, block_size, causal=causal
+        )
+        trace_est = trace_est + w.dot(w)
+
+    trace_est = trace_est / n_hutchinson
+    comm_fro = torch.sqrt(trace_est.clamp(min=0.0))
+    return (comm_fro / (M_fro_norm + EPSILON)).item()
+
+
+# ---------------------------------------------------------------------------
+# Registry callables — conform to routing.py dispatcher protocol
+# ---------------------------------------------------------------------------
+
+
+def compute_cheeger_materialized(
+    shared_ctx: dict[str, Any], **kwargs,
+) -> dict[str, float]:
+    """Cheeger features from materialized M."""
+    M = shared_ctx["M"]
+    u2 = shared_ctx.get("u2")
+    v2 = shared_ctx.get("v2")
+    M_fro = shared_ctx["M_fro"]
+
+    phi_hat = bipartite_sweep_conductance(u2, v2, M) if u2 is not None else 0.0
+
+    M_asym = (M - M.T) / 2.0
+    sigma_asym = torch.linalg.svdvals(M_asym)
+    sigma2_asym = sigma_asym[1].item() if len(sigma_asym) > 1 else 0.0
+
+    M_sym = (M + M.T) / 2.0
+    comm = M_sym @ M_asym - M_asym @ M_sym
+    commutator_norm = (
+        torch.linalg.norm(comm, "fro").item() / (M_fro + EPSILON)
+    )
+
+    return {
+        "phi_hat": phi_hat,
+        "sigma2_asym": sigma2_asym,
+        "commutator_norm": commutator_norm,
+    }
+
+
+def compute_cheeger_matrix_free(
+    shared_ctx: dict[str, Any], **kwargs,
+) -> dict[str, float]:
+    """Cheeger features via matrix-free blocked streaming."""
+    u2 = shared_ctx.get("u2")
+    v2 = shared_ctx.get("v2")
+    Q = shared_ctx["Q"]
+    K = shared_ctx["K"]
+    d_k_inv_sqrt = shared_ctx["d_k_inv_sqrt"]
+    scale = shared_ctx["scale"]
+    M_fro = shared_ctx["M_fro"]
+    block_size = shared_ctx.get("block_size", 256)
+    causal = shared_ctx.get("causal", False)
+    svd_method = shared_ctx.get("svd_method", "randomized")
+    n_hutchinson = kwargs.get("n_hutchinson", 10)
+    seed = kwargs.get("seed", 42)
+
+    if u2 is not None:
+        phi_hat = bipartite_sweep_conductance_matrix_free(
+            u2, v2, Q, K, d_k_inv_sqrt, scale, block_size, causal=causal,
+        )
+    else:
+        phi_hat = 0.0
+
+    sigma2_asym = compute_sigma2_asym_matrix_free(
+        Q, K, d_k_inv_sqrt, scale, block_size, svd_method, causal=causal,
+    )
+
+    commutator_norm = estimate_commutator_norm_matrix_free(
+        Q, K, d_k_inv_sqrt, scale, M_fro, block_size, n_hutchinson, seed,
+        causal=causal,
+    )
+
+    return {
+        "phi_hat": phi_hat,
+        "sigma2_asym": sigma2_asym,
+        "commutator_norm": commutator_norm,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Self-registration (lazy — triggered by routing._ensure_registered)
+# ---------------------------------------------------------------------------
+
+def _register() -> None:
+    from glassbox.routing import register
+    register("cheeger", compute_cheeger_materialized, compute_cheeger_matrix_free)
+
+_register()
