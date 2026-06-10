@@ -39,15 +39,15 @@ from glassbox.attention_tracker import (
 )
 from glassbox.config import GlassboxConfig
 from glassbox.handlers import LoggingHandler, create_handlers_from_config
-from glassbox.hodge import (
-    compute_routing_features_materialized,
-    compute_routing_features_matrix_free,
-)
 from glassbox.laplacian_eigvals import (
     compute_laplacian_eigvals_materialized,
     compute_laplacian_eigvals_matrix_free,
 )
 from glassbox.results import SVDSnapshot
+from glassbox.routing import (
+    compute_routing_features_materialized,
+    compute_routing_features_matrix_free,
+)
 from glassbox.svd import (
     compute_degree_normalized_M,
     compute_dk_blocked,

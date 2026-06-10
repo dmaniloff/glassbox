@@ -22,15 +22,19 @@ from pathlib import Path
 import click
 import torch
 
+from glassbox.cheeger import (
+    compute_sigma2_asym_matrix_free,
+    estimate_commutator_norm_matrix_free,
+)
 from glassbox.hodge import (
     compute_G_materialized,
     compute_G_matrix_free,
-    compute_routing_features_materialized,
-    compute_routing_features_matrix_free,
-    compute_sigma2_asym_matrix_free,
-    estimate_commutator_norm_matrix_free,
     estimate_curl_materialized,
     estimate_curl_matrix_free,
+)
+from glassbox.routing import (
+    compute_routing_features_materialized,
+    compute_routing_features_matrix_free,
 )
 from glassbox.svd import (
     compute_degree_normalized_M,

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import torch
 
-from glassbox.hodge import (
+from glassbox.cheeger import (
     EPSILON,
     compute_sigma2_asym_matrix_free,
     estimate_commutator_norm_matrix_free,

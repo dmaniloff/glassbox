@@ -15,7 +15,7 @@ from glassbox.cheeger import (
     bipartite_sweep_conductance,
     bipartite_sweep_conductance_matrix_free,
 )
-from glassbox.hodge import (
+from glassbox.routing import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
 )
