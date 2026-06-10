@@ -171,6 +171,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if not (
             self.config.spectral.enabled
             or self.config.routing.enabled
+            or self.config.hodge.enabled
+            or self.config.cheeger.enabled
             or self.config.tracker.enabled
             or self.config.selfattn.enabled
             or self.config.laplacian.enabled
@@ -216,15 +218,28 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         spectral_due = (
             self.config.spectral.enabled and state.step % self.config.spectral.interval == 0
         )
-        routing_due = self.config.routing.enabled and state.step % self.config.routing.interval == 0
-        tracker_due = self.config.tracker.enabled and state.step % self.config.tracker.interval == 0
+        routing_due = (
+            self.config.routing.enabled and state.step % self.config.routing.interval == 0
+        )
+        hodge_due = (
+            self.config.hodge.enabled and state.step % self.config.hodge.interval == 0
+        )
+        cheeger_due = (
+            self.config.cheeger.enabled and state.step % self.config.cheeger.interval == 0
+        )
+        tracker_due = (
+            self.config.tracker.enabled and state.step % self.config.tracker.interval == 0
+        )
         selfattn_due = (
             self.config.selfattn.enabled and state.step % self.config.selfattn.interval == 0
         )
         laplacian_due = (
             self.config.laplacian.enabled and state.step % self.config.laplacian.interval == 0
         )
-        any_due = spectral_due or routing_due or tracker_due or selfattn_due or laplacian_due
+        any_due = (
+            spectral_due or routing_due or hodge_due or cheeger_due
+            or tracker_due or selfattn_due or laplacian_due
+        )
         if any_due:
             try:
                 self._run_svd(
@@ -235,6 +250,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                     attn_metadata,
                     run_spectral=spectral_due,
                     run_routing=routing_due,
+                    run_hodge=hodge_due,
+                    run_cheeger=cheeger_due,
                     run_tracker=tracker_due,
                     run_selfattn=selfattn_due,
                     run_laplacian=laplacian_due,
@@ -294,6 +311,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         attn_metadata: TritonAttentionMetadata,
         run_spectral: bool = True,
         run_routing: bool = False,
+        run_hodge: bool = False,
+        run_cheeger: bool = False,
         run_tracker: bool = False,
         run_selfattn: bool = False,
         run_laplacian: bool = False,
@@ -321,6 +340,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             heads.update(self.config.spectral.heads)
         if run_routing:
             heads.update(self.config.routing.heads)
+        if run_hodge:
+            heads.update(self.config.hodge.heads)
+        if run_cheeger:
+            heads.update(self.config.cheeger.heads)
         if run_tracker:
             heads.update(self.config.tracker.heads)
         if run_selfattn:
@@ -341,7 +364,26 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             if run_spectral and head_idx in self.config.spectral.heads:
                 self._run_svd_scores(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
             if run_routing and head_idx in self.config.routing.heads:
-                self._run_svd_routing(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+                self._run_svd_routing(
+                    layer_name, layer_idx, state, head_idx, Qh, Kh, L,
+                    signal_name="routing",
+                    signals=("hodge", "cheeger"),
+                    cfg=self.config.routing,
+                )
+            if run_hodge and head_idx in self.config.hodge.heads:
+                self._run_svd_routing(
+                    layer_name, layer_idx, state, head_idx, Qh, Kh, L,
+                    signal_name="hodge",
+                    signals=("hodge",),
+                    cfg=self.config.hodge,
+                )
+            if run_cheeger and head_idx in self.config.cheeger.heads:
+                self._run_svd_routing(
+                    layer_name, layer_idx, state, head_idx, Qh, Kh, L,
+                    signal_name="cheeger",
+                    signals=("cheeger",),
+                    cfg=self.config.cheeger,
+                )
             if run_tracker and head_idx in self.config.tracker.heads:
                 self._run_tracker(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
             if run_selfattn and head_idx in self.config.selfattn.heads:
@@ -389,14 +431,24 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         Qh: torch.Tensor,
         Kh: torch.Tensor,
         L: int,
+        signal_name: str = "routing",
+        signals: tuple[str, ...] = ("hodge", "cheeger"),
+        cfg=None,
     ) -> None:
         """SVD of the degree-normalized cross-operator M."""
-        cfg = self.config.routing
+        if cfg is None:
+            cfg = self.config.routing
         scale = 1.0 / math.sqrt(Qh.shape[1])
-        k = min(cfg.rank, L - 1)
+        rank = getattr(cfg, "rank", self.config.routing.rank)
+        k = min(rank, L - 1)
+        target_cv = getattr(cfg, "target_cv", getattr(cfg, "hodge_target_cv", 0.05))
+        curl_seed = getattr(cfg, "curl_seed", getattr(cfg, "hodge_curl_seed", 42))
+        confidence = getattr(cfg, "confidence", getattr(cfg, "hodge_confidence", 0.95))
+        pilot_size = getattr(cfg, "pilot_size", getattr(cfg, "hodge_pilot_size", 100))
+        min_samples = getattr(cfg, "min_samples", getattr(cfg, "hodge_min_samples", 200))
+        method = getattr(cfg, "method", self.config.routing.method)
 
         if L <= cfg.threshold:
-            # Materialized: dense tensor ops, much faster at small L
             scores = Qh @ Kh.T * scale
             if cfg.causal:
                 scores = scores.masked_fill(
@@ -409,13 +461,17 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             features = compute_routing_features_materialized(
                 M,
                 rank=k,
-                target_cv=cfg.hodge_target_cv,
-                seed=cfg.hodge_curl_seed,
+                signals=signals,
+                target_cv=target_cv,
+                seed=curl_seed,
             )
         else:
-            # Matrix-free: O(Ld) matvecs, avoids materializing L×L matrix
-            _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, cfg.block_size, causal=cfg.causal)
-            lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size, causal=cfg.causal)
+            _, d_k_inv_sqrt = compute_dk_blocked(
+                Qh, Kh, scale, cfg.block_size, causal=cfg.causal,
+            )
+            lse = compute_logsumexp_blocked(
+                Qh, Kh, scale, cfg.block_size, causal=cfg.causal,
+            )
             tier = "matrix_free"
             features = compute_routing_features_matrix_free(
                 Qh,
@@ -424,18 +480,19 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 scale,
                 lse,
                 rank=k,
-                svd_method=cfg.method,
+                signals=signals,
+                svd_method=method,
                 block_size=cfg.block_size,
-                target_cv=cfg.hodge_target_cv,
-                confidence=cfg.hodge_confidence,
-                pilot_size=cfg.hodge_pilot_size,
-                min_samples=cfg.hodge_min_samples,
-                seed=cfg.hodge_curl_seed,
+                target_cv=target_cv,
+                confidence=confidence,
+                pilot_size=pilot_size,
+                min_samples=min_samples,
+                seed=curl_seed,
                 causal=cfg.causal,
             )
 
         snapshot = SVDSnapshot(
-            signal="routing",
+            signal=signal_name,
             request_id=type(self).req_tracker.request_id,
             layer=layer_name,
             layer_idx=layer_idx,

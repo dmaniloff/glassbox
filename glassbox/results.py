@@ -265,7 +265,7 @@ class SVDSnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    # "spectral" | "routing" | "tracker" | "selfattn" | "laplacian"
+    # "spectral" | "routing" | "hodge" | "cheeger" | "tracker" | "selfattn" | "laplacian"
     signal: str
     request_id: int
     layer: str
@@ -276,7 +276,13 @@ class SVDSnapshot(BaseModel):
     singular_values: list[float] = []
     tier: str | None = None  # "materialized" | "matrix_free"
     features: (
-        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
+        SpectralFeatures
+        | RoutingFeatures
+        | HodgeFeatures
+        | CheegerFeatures
+        | TrackerFeatures
+        | SelfAttnFeatures
+        | LaplacianFeatures
     )
 
     def __repr__(self) -> str:
@@ -304,6 +310,10 @@ class SVDSnapshot(BaseModel):
         if isinstance(feat_raw, dict):
             if sig == "routing":
                 d["features"] = RoutingFeatures(**feat_raw)
+            elif sig == "hodge":
+                d["features"] = HodgeFeatures(**feat_raw)
+            elif sig == "cheeger":
+                d["features"] = CheegerFeatures(**feat_raw)
             elif sig == "tracker":
                 d["features"] = TrackerFeatures(**feat_raw)
             elif sig == "selfattn":
