@@ -16,6 +16,7 @@ datasets were created.
 Usage:
     glassbox-extract --signal spectral --dataset halueval_hallucination
     glassbox-extract --signal spectral,routing --dataset all
+    glassbox-extract --signal hodge,cheeger --dataset halueval_hallucination
     glassbox-extract --signal selfattn --dataset halueval_hallucination --max-samples 50
 """
 
@@ -30,6 +31,8 @@ import click
 from glassbox.config import SIGNAL_NAMES, GlassboxConfig, parse_signal_names
 from glassbox.results import (
     SPECTRAL_FEATURE_NAMES,
+    CheegerFeatures,
+    HodgeFeatures,
     RoutingFeatures,
     SelfAttnFeatures,
     SVDSnapshot,
@@ -131,11 +134,21 @@ def _is_list_field(model: type, name: str) -> bool:
     return getattr(annotation, "__origin__", None) is list
 
 
-# Hodge feature names derived from RoutingFeatures model
-_HODGE_FEATURE_NAMES = [
+# Routing feature names (combined Hodge + Cheeger) from RoutingFeatures model
+_ROUTING_FEATURE_NAMES = [
     f"hodge_{f}"
     for f in RoutingFeatures.model_fields
     if f not in _SKIP_FEATURE_FIELDS and f not in SPECTRAL_FEATURE_NAMES
+]
+
+# Hodge-only feature names
+_HODGE_ONLY_FEATURE_NAMES = [
+    f"hodge_{f}" for f in HodgeFeatures.model_fields
+]
+
+# Cheeger-only feature names
+_CHEEGER_FEATURE_NAMES = [
+    f"cheeger_{f}" for f in CheegerFeatures.model_fields
 ]
 
 # Tracker feature names derived from TrackerFeatures model
@@ -171,6 +184,8 @@ def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
         non_spectral_prefix = "at_"
     elif snap.signal == "laplacian":
         non_spectral_prefix = "lap_"
+    elif snap.signal == "cheeger":
+        non_spectral_prefix = "cheeger_"
     else:
         non_spectral_prefix = "hodge_"
     for k, v in feat_dict.items():
@@ -207,7 +222,15 @@ def _build_feature_columns(
     if "spectral" in signals:
         signal_entries.append(("spectral", list(SPECTRAL_FEATURE_NAMES)))
     if "routing" in signals:
-        signal_entries.append(("routing", list(SPECTRAL_FEATURE_NAMES) + _HODGE_FEATURE_NAMES))
+        signal_entries.append(
+            ("routing", list(SPECTRAL_FEATURE_NAMES) + _ROUTING_FEATURE_NAMES)
+        )
+    if "hodge" in signals:
+        signal_entries.append(("hodge", _HODGE_ONLY_FEATURE_NAMES))
+    if "cheeger" in signals:
+        signal_entries.append(
+            ("cheeger", list(SPECTRAL_FEATURE_NAMES) + _CHEEGER_FEATURE_NAMES)
+        )
     if "tracker" in signals:
         signal_entries.append(("tracker", list(SPECTRAL_FEATURE_NAMES) + _AT_FEATURE_NAMES))
     if "selfattn" in signals:
