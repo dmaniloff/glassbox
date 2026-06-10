@@ -57,49 +57,113 @@ class SpectralFeatures(BaseModel):
         return values
 
 
-class RoutingFeatures(BaseModel):
-    """Features from SVD + Hodge decomposition of degree-normalized M.
+class HodgeFeatures(BaseModel):
+    """Features from Hodge decomposition of degree-normalized M."""
 
-    Single source of truth: singular_values are stored directly, and
-    spectral features (sv1, sv_ratio, sv_entropy) are derived from them
-    automatically on construction.
+    model_config = ConfigDict(frozen=True)
+
+    G: float | None = Field(
+        None, description="Total asymmetry: ||M_asym||_F / ||M||_F."
+    )
+    Gamma: float | None = Field(
+        None,
+        description="Gradient coefficient: potential-driven portion of asymmetry.",
+    )
+    C: float | None = Field(
+        None,
+        description=(
+            "Curl coefficient: circulatory portion of asymmetry (triangle-sampled)."
+        ),
+    )
+    curl_ratio: float | None = Field(
+        None, description="C / (G + eps). Share of asymmetry that is circulatory."
+    )
+
+
+class CheegerFeatures(BaseModel):
+    """Features from Cheeger diagnostics of degree-normalized M."""
+
+    model_config = ConfigDict(frozen=True)
+
+    phi_hat: float | None = Field(
+        None,
+        description="Cheeger conductance via bipartite sweep cut.",
+    )
+    sigma2_asym: float | None = Field(
+        None, description="Second singular value of M_asym."
+    )
+    commutator_norm: float | None = Field(
+        None,
+        description=(
+            "||[M_sym, M_asym]||_F / ||M||_F. "
+            "Entanglement of symmetric and antisymmetric parts."
+        ),
+    )
+
+
+class RoutingFeatures(BaseModel):
+    """Combined Hodge + Cheeger features from degree-normalized M.
+
+    Used when both hodge and cheeger signals are active (or the
+    ``routing`` alias is used). Singular values and derived spectral
+    features are populated automatically on construction.
     """
 
     model_config = ConfigDict(frozen=True)
 
     # Raw singular values
-    singular_values: list[float] = Field(description="Singular values of M (descending).")
+    singular_values: list[float] = Field(
+        description="Singular values of M (descending)."
+    )
 
     # Spectral (derived from singular_values)
-    sv1: float | None = Field(None, description="Leading singular value of M.")
-    sv_ratio: float | None = Field(None, description="sigma1/sigma2 ratio.")
+    sv1: float | None = Field(
+        None, description="Leading singular value of M."
+    )
+    sv_ratio: float | None = Field(
+        None, description="sigma1/sigma2 ratio."
+    )
     sv_entropy: float | None = Field(
         None, description="Entropy of normalized singular value distribution."
     )
 
-    # Hodge decomposition
+    # Shared spectral
+    sigma2: float | None = Field(
+        None, description="Second singular value of M."
+    )
+
+    # Cheeger diagnostics
     phi_hat: float | None = Field(
         None,
         description="Cheeger conductance via bipartite sweep cut.",
     )
-    sigma2: float | None = Field(None, description="Second singular value of M.")
-    G: float | None = Field(None, description="Total asymmetry: ||M_asym||_F / ||M||_F.")
-    Gamma: float | None = Field(
-        None, description="Gradient coefficient: potential-driven portion of asymmetry."
+    sigma2_asym: float | None = Field(
+        None, description="Second singular value of M_asym."
     )
-    C: float | None = Field(
-        None,
-        description="Curl coefficient: circulatory portion of asymmetry (triangle-sampled).",
-    )
-    curl_ratio: float | None = Field(
-        None, description="C / (G + eps). Share of asymmetry that is circulatory."
-    )
-    sigma2_asym: float | None = Field(None, description="Second singular value of M_asym.")
     commutator_norm: float | None = Field(
         None,
         description=(
-            "||[M_sym, M_asym]||_F / ||M||_F. Entanglement of symmetric and antisymmetric parts."
+            "||[M_sym, M_asym]||_F / ||M||_F. "
+            "Entanglement of symmetric and antisymmetric parts."
         ),
+    )
+
+    # Hodge decomposition
+    G: float | None = Field(
+        None, description="Total asymmetry: ||M_asym||_F / ||M||_F."
+    )
+    Gamma: float | None = Field(
+        None,
+        description="Gradient coefficient: potential-driven portion of asymmetry.",
+    )
+    C: float | None = Field(
+        None,
+        description=(
+            "Curl coefficient: circulatory portion of asymmetry (triangle-sampled)."
+        ),
+    )
+    curl_ratio: float | None = Field(
+        None, description="C / (G + eps). Share of asymmetry that is circulatory."
     )
 
     @model_validator(mode="before")

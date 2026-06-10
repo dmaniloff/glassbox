@@ -7,13 +7,17 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
-SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
+SIGNAL_NAMES: list[str] = [
+    "spectral", "routing", "hodge", "cheeger", "tracker", "selfattn", "laplacian",
+]
 
 # Signals that use SVD rank/method
-SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
+SVD_SIGNALS: set[str] = {"spectral", "routing", "hodge", "cheeger", "tracker"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
-THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian"}
+THRESHOLD_SIGNALS: set[str] = {
+    "routing", "hodge", "cheeger", "tracker", "selfattn", "laplacian",
+}
 
 
 def parse_signal_names(ctx, param, value):
@@ -66,6 +70,39 @@ class RoutingConfig(BaseModel):
     hodge_confidence: float = 0.95
     hodge_pilot_size: int = 100
     hodge_min_samples: int = 200
+
+
+class HodgeConfig(BaseModel):
+    """Hodge decomposition features (G, Gamma, C, curl_ratio) of M."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    interval: int = 32
+    heads: list[int] = [0]
+    threshold: int = 512
+    block_size: int = 256
+    causal: bool = True
+    target_cv: float = 0.05
+    curl_seed: int = 42
+    confidence: float = 0.95
+    pilot_size: int = 100
+    min_samples: int = 200
+
+
+class CheegerConfig(BaseModel):
+    """Cheeger diagnostics (phi_hat, sigma2_asym, commutator_norm) of M."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    interval: int = 32
+    rank: int = 4
+    method: Literal["randomized", "lanczos"] = "randomized"
+    heads: list[int] = [0]
+    threshold: int = 512
+    block_size: int = 256
+    causal: bool = True
 
 
 class TrackerConfig(BaseModel):
@@ -142,6 +179,8 @@ class GlassboxConfig(BaseSettings):
 
     spectral: SpectralConfig = SpectralConfig()
     routing: RoutingConfig = RoutingConfig()
+    hodge: HodgeConfig = HodgeConfig()
+    cheeger: CheegerConfig = CheegerConfig()
     tracker: TrackerConfig = TrackerConfig()
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()
@@ -193,6 +232,10 @@ class GlassboxConfig(BaseSettings):
             overrides["emit"] = {"otel": otel}
 
         signal_set = set(signals)
+
+        # "routing" is an alias that enables both hodge and cheeger
+        if "routing" in signal_set:
+            signal_set.update(("hodge", "cheeger"))
 
         for sig_name in SIGNAL_NAMES:
             sig_dict: dict = {"enabled": sig_name in signal_set}
