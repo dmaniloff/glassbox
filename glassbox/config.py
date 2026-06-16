@@ -148,6 +148,7 @@ class GlassboxConfig(BaseSettings):
     output: OutputConfig = OutputConfig()
     emit: EmitConfig = EmitConfig()
     emit_witness: bool = False
+    q_buffer_max_tokens: int = 0
 
     @classmethod
     def settings_customise_sources(
@@ -177,6 +178,7 @@ class GlassboxConfig(BaseSettings):
         block_size: int | None = None,
         output_path: str | None = None,
         otel: bool | None = None,
+        q_buffer_max_tokens: int | None = None,
     ) -> GlassboxConfig:
         """Build a GlassboxConfig from CLI-style arguments.
 
@@ -192,6 +194,8 @@ class GlassboxConfig(BaseSettings):
             overrides["output"] = {"path": output_path}
         if otel is not None:
             overrides["emit"] = {"otel": otel}
+        if q_buffer_max_tokens is not None:
+            overrides["q_buffer_max_tokens"] = q_buffer_max_tokens
 
         signal_set = set(signals)
 
