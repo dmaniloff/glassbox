@@ -14,7 +14,6 @@ Configuration via GlassboxConfig (see glassbox/config.py):
 from __future__ import annotations
 
 import logging
-import math
 import re
 from dataclasses import dataclass, field
 
@@ -29,31 +28,10 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
 )
 
-from glassbox.attention_diagonal import (
-    compute_attention_diagonal_features_materialized,
-    compute_attention_diagonal_features_matrix_free,
-)
-from glassbox.attention_tracker import (
-    compute_attention_tracker_features_materialized,
-    compute_attention_tracker_features_matrix_free,
-)
-from glassbox.config import GlassboxConfig
+from glassbox.config import SIGNAL_NAMES, GlassboxConfig
+from glassbox.diagnostics import DIAGNOSTIC_REGISTRY
 from glassbox.handlers import LoggingHandler, create_handlers_from_config
-from glassbox.hodge import (
-    compute_routing_features_materialized,
-    compute_routing_features_matrix_free,
-)
-from glassbox.laplacian_eigvals import (
-    compute_laplacian_eigvals_materialized,
-    compute_laplacian_eigvals_matrix_free,
-)
 from glassbox.results import SVDSnapshot
-from glassbox.svd import (
-    compute_degree_normalized_M,
-    compute_dk_blocked,
-    compute_logsumexp_blocked,
-    compute_scores_matrix_features,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +99,9 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     # Keeping one handler list on the class so every layer emits to the same sinks.
     _handlers: list = [LoggingHandler()]
 
+    # Diagnostic instances, keyed by signal name. Built lazily or via set_config().
+    _diagnostics: dict = {}
+
     # True after an explicit set_config() call.  The vLLM plugin checks this
     # to avoid overwriting programmatic config with defaults in subprocesses.
     _config_set_explicitly: bool = False
@@ -137,6 +118,16 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         for h in cls._handlers:
             h.close()
         cls._handlers = create_handlers_from_config(config)
+        cls._build_diagnostics()
+
+    @classmethod
+    def _build_diagnostics(cls) -> None:
+        """Instantiate Diagnostic objects from config for each signal."""
+        cls._diagnostics = {}
+        for sig_name, diag_cls in DIAGNOSTIC_REGISTRY.items():
+            sig_cfg = getattr(cls.config, sig_name)
+            params = sig_cfg.model_dump(exclude={"enabled", "interval", "heads"})
+            cls._diagnostics[sig_name] = diag_cls(**params)
 
     def forward(
         self,
@@ -212,20 +203,14 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         state.q_buffer.append(query[q_start:q_end].detach().clone())
         state.step += 1
 
-        # 4. Check per-signal intervals and run SVD
-        spectral_due = (
-            self.config.spectral.enabled and state.step % self.config.spectral.interval == 0
-        )
-        routing_due = self.config.routing.enabled and state.step % self.config.routing.interval == 0
-        tracker_due = self.config.tracker.enabled and state.step % self.config.tracker.interval == 0
-        selfattn_due = (
-            self.config.selfattn.enabled and state.step % self.config.selfattn.interval == 0
-        )
-        laplacian_due = (
-            self.config.laplacian.enabled and state.step % self.config.laplacian.interval == 0
-        )
-        any_due = spectral_due or routing_due or tracker_due or selfattn_due or laplacian_due
-        if any_due:
+        # 4. Check per-signal intervals and run diagnostics
+        due_signals: set[str] = set()
+        for sig_name in SIGNAL_NAMES:
+            sig_cfg = getattr(self.config, sig_name)
+            if sig_cfg.enabled and state.step % sig_cfg.interval == 0:
+                due_signals.add(sig_name)
+
+        if due_signals:
             try:
                 self._run_svd(
                     layer_name,
@@ -233,11 +218,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                     state,
                     kv_cache,
                     attn_metadata,
-                    run_spectral=spectral_due,
-                    run_routing=routing_due,
-                    run_tracker=tracker_due,
-                    run_selfattn=selfattn_due,
-                    run_laplacian=laplacian_due,
+                    due_signals,
                 )
             except Exception:
                 logger.exception("[SVD] error in layer %s at step %d", layer_name, state.step)
@@ -294,12 +275,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         state: PerLayerSVDState,
         kv_cache: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
-        run_spectral: bool = True,
-        run_routing: bool = False,
-        run_tracker: bool = False,
-        run_selfattn: bool = False,
-        run_laplacian: bool = False,
+        due_signals: set[str],
     ) -> None:
+        cls = type(self)
+        if not cls._diagnostics:
+            cls._build_diagnostics()
+
         # Stack accumulated Q: [L_q, num_heads, head_size]
         Q_all = torch.cat(state.q_buffer, dim=0)
         L_q = Q_all.shape[0]
@@ -313,289 +294,55 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # from the end.
         L = min(L_q, L_k)
         if L < 2:
-            return  # degenerate: single singular value
+            return
         Q_all = Q_all[:L]
         K_all = K_all[:L]
 
-        # Union of active heads for signals that are due
+        # Union of active heads for due signals
         heads: set[int] = set()
-        if run_spectral:
-            heads.update(self.config.spectral.heads)
-        if run_routing:
-            heads.update(self.config.routing.heads)
-        if run_tracker:
-            heads.update(self.config.tracker.heads)
-        if run_selfattn:
-            heads.update(self.config.selfattn.heads)
-        if run_laplacian:
-            heads.update(self.config.laplacian.heads)
+        for sig_name in due_signals:
+            heads.update(getattr(self.config, sig_name).heads)
 
         for head_idx in sorted(heads):
             if head_idx >= Q_all.shape[1]:
                 continue
 
-            # Handle GQA: map head_idx to KV head
             kv_head_idx = head_idx // self.num_queries_per_kv
+            Qh = Q_all[:, head_idx, :]
+            Kh = K_all[:, kv_head_idx, :]
 
-            Qh = Q_all[:, head_idx, :]  # [L, d]
-            Kh = K_all[:, kv_head_idx, :]  # [L, d]
+            for sig_name in due_signals:
+                sig_cfg = getattr(self.config, sig_name)
+                if head_idx not in sig_cfg.heads:
+                    continue
+                diag = cls._diagnostics.get(sig_name)
+                if diag is None:
+                    continue
 
-            if run_spectral and head_idx in self.config.spectral.heads:
-                self._run_svd_scores(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_routing and head_idx in self.config.routing.heads:
-                self._run_svd_routing(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_tracker and head_idx in self.config.tracker.heads:
-                self._run_tracker(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_selfattn and head_idx in self.config.selfattn.heads:
-                self._run_selfattn(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
-            if run_laplacian and head_idx in self.config.laplacian.heads:
-                self._run_laplacian(layer_name, layer_idx, state, head_idx, Qh, Kh, L)
+                result = diag.reduce(Qh, Kh, L)
+                features = result["features"]
 
-    def _run_svd_scores(
-        self,
-        layer_name: str,
-        layer_idx: int | None,
-        state: PerLayerSVDState,
-        head_idx: int,
-        Qh: torch.Tensor,
-        Kh: torch.Tensor,
-        L: int,
-    ) -> None:
-        """SVD of the scores matrix S = QK^T."""
-        cfg = self.config.spectral
-        features = compute_scores_matrix_features(
-            Qh,
-            Kh,
-            rank=cfg.rank,
-            method=cfg.method,
-        )
-        snapshot = SVDSnapshot(
-            signal="spectral",
-            request_id=type(self).req_tracker.request_id,
-            layer=layer_name,
-            layer_idx=layer_idx,
-            head=head_idx,
-            step=state.step,
-            L=L,
-            singular_values=features.singular_values,
-            features=features,
-        )
-        self._emit_result(snapshot)
+                witness = None
+                if self.config.emit_witness:
+                    try:
+                        witness = diag.witness(Qh, Kh, L).tolist()
+                    except NotImplementedError:
+                        pass
 
-    def _run_svd_routing(
-        self,
-        layer_name: str,
-        layer_idx: int | None,
-        state: PerLayerSVDState,
-        head_idx: int,
-        Qh: torch.Tensor,
-        Kh: torch.Tensor,
-        L: int,
-    ) -> None:
-        """SVD of the degree-normalized cross-operator M."""
-        cfg = self.config.routing
-        scale = 1.0 / math.sqrt(Qh.shape[1])
-        k = min(cfg.rank, L - 1)
-
-        if L <= cfg.threshold:
-            # Materialized: dense tensor ops, much faster at small L
-            scores = Qh @ Kh.T * scale
-            if cfg.causal:
-                scores = scores.masked_fill(
-                    ~torch.tril(torch.ones(L, L, dtype=torch.bool, device=scores.device)),
-                    float("-inf"),
+                snapshot = SVDSnapshot(
+                    signal=sig_name,
+                    request_id=cls.req_tracker.request_id,
+                    layer=layer_name,
+                    layer_idx=layer_idx,
+                    head=head_idx,
+                    step=state.step,
+                    L=L,
+                    singular_values=result.get("singular_values", []),
+                    tier=result.get("tier"),
+                    witness=witness,
+                    features=features,
                 )
-            A = torch.softmax(scores, dim=-1)
-            M, _, _ = compute_degree_normalized_M(A)
-            tier = "materialized"
-            features = compute_routing_features_materialized(
-                M,
-                rank=k,
-                target_cv=cfg.hodge_target_cv,
-                seed=cfg.hodge_curl_seed,
-            )
-        else:
-            # Matrix-free: O(Ld) matvecs, avoids materializing L×L matrix
-            _, d_k_inv_sqrt = compute_dk_blocked(Qh, Kh, scale, cfg.block_size, causal=cfg.causal)
-            lse = compute_logsumexp_blocked(Qh, Kh, scale, cfg.block_size, causal=cfg.causal)
-            tier = "matrix_free"
-            features = compute_routing_features_matrix_free(
-                Qh,
-                Kh,
-                d_k_inv_sqrt,
-                scale,
-                lse,
-                rank=k,
-                svd_method=cfg.method,
-                block_size=cfg.block_size,
-                target_cv=cfg.hodge_target_cv,
-                confidence=cfg.hodge_confidence,
-                pilot_size=cfg.hodge_pilot_size,
-                min_samples=cfg.hodge_min_samples,
-                seed=cfg.hodge_curl_seed,
-                causal=cfg.causal,
-            )
-
-        snapshot = SVDSnapshot(
-            signal="routing",
-            request_id=type(self).req_tracker.request_id,
-            layer=layer_name,
-            layer_idx=layer_idx,
-            head=head_idx,
-            step=state.step,
-            L=L,
-            singular_values=features.singular_values,
-            tier=tier,
-            features=features,
-        )
-        self._emit_result(snapshot)
-
-    def _run_tracker(
-        self,
-        layer_name: str,
-        layer_idx: int | None,
-        state: PerLayerSVDState,
-        head_idx: int,
-        Qh: torch.Tensor,
-        Kh: torch.Tensor,
-        L: int,
-    ) -> None:
-        """Features from raw post-softmax attention matrix A."""
-        cfg = self.config.tracker
-        scale = 1.0 / math.sqrt(Qh.shape[1])
-        k = min(cfg.rank, L - 1)
-
-        if L <= cfg.threshold:
-            scores = Qh @ Kh.T * scale
-            if cfg.causal:
-                scores = scores.masked_fill(
-                    ~torch.tril(torch.ones(L, L, dtype=torch.bool, device=scores.device)),
-                    float("-inf"),
-                )
-            A = torch.softmax(scores, dim=-1)
-            tier = "materialized"
-            features = compute_attention_tracker_features_materialized(A, rank=k)
-        else:
-            tier = "matrix_free"
-            features = compute_attention_tracker_features_matrix_free(
-                Qh,
-                Kh,
-                scale,
-                rank=k,
-                method=cfg.method,
-                block_size=cfg.block_size,
-                causal=cfg.causal,
-            )
-
-        snapshot = SVDSnapshot(
-            signal="tracker",
-            request_id=type(self).req_tracker.request_id,
-            layer=layer_name,
-            layer_idx=layer_idx,
-            head=head_idx,
-            step=state.step,
-            L=L,
-            singular_values=features.singular_values,
-            tier=tier,
-            features=features,
-        )
-        self._emit_result(snapshot)
-
-    def _run_selfattn(
-        self,
-        layer_name: str,
-        layer_idx: int | None,
-        state: PerLayerSVDState,
-        head_idx: int,
-        Qh: torch.Tensor,
-        Kh: torch.Tensor,
-        L: int,
-    ) -> None:
-        """Mean log self-attention weight from the diagonal of A."""
-        cfg = self.config.selfattn
-        scale = 1.0 / math.sqrt(Qh.shape[1])
-
-        if L <= cfg.threshold:
-            scores = Qh @ Kh.T * scale
-            if cfg.causal:
-                scores = scores.masked_fill(
-                    ~torch.tril(torch.ones(L, L, dtype=torch.bool, device=scores.device)),
-                    float("-inf"),
-                )
-            A = torch.softmax(scores, dim=-1)
-            tier = "materialized"
-            features = compute_attention_diagonal_features_materialized(A, top_k=cfg.top_k)
-        else:
-            tier = "matrix_free"
-            features = compute_attention_diagonal_features_matrix_free(
-                Qh,
-                Kh,
-                scale,
-                top_k=cfg.top_k,
-                block_size=cfg.block_size,
-                causal=cfg.causal,
-            )
-
-        snapshot = SVDSnapshot(
-            signal="selfattn",
-            request_id=type(self).req_tracker.request_id,
-            layer=layer_name,
-            layer_idx=layer_idx,
-            head=head_idx,
-            step=state.step,
-            L=L,
-            tier=tier,
-            features=features,
-        )
-        self._emit_result(snapshot)
-
-    def _run_laplacian(
-        self,
-        layer_name: str,
-        layer_idx: int | None,
-        state: PerLayerSVDState,
-        head_idx: int,
-        Qh: torch.Tensor,
-        Kh: torch.Tensor,
-        L: int,
-    ) -> None:
-        """Laplacian eigenvalue features from the attention graph."""
-        cfg = self.config.laplacian
-        scale = 1.0 / math.sqrt(Qh.shape[1])
-
-        if L <= cfg.threshold:
-            scores = Qh @ Kh.T * scale
-            if cfg.causal:
-                scores = scores.masked_fill(
-                    ~torch.tril(torch.ones(L, L, dtype=torch.bool, device=scores.device)),
-                    float("-inf"),
-                )
-            A = torch.softmax(scores, dim=-1)
-            tier = "materialized"
-            features = compute_laplacian_eigvals_materialized(A, top_k=cfg.top_k)
-        else:
-            tier = "matrix_free"
-            features = compute_laplacian_eigvals_matrix_free(
-                Qh,
-                Kh,
-                scale,
-                top_k=cfg.top_k,
-                block_size=cfg.block_size,
-                causal=cfg.causal,
-            )
-
-        snapshot = SVDSnapshot(
-            signal="laplacian",
-            request_id=type(self).req_tracker.request_id,
-            layer=layer_name,
-            layer_idx=layer_idx,
-            head=head_idx,
-            step=state.step,
-            L=L,
-            tier=tier,
-            features=features,
-        )
-        self._emit_result(snapshot)
+                self._emit_result(snapshot)
 
     def _emit_result(self, snapshot: SVDSnapshot) -> None:
         """Dispatch snapshot to all registered handlers."""
