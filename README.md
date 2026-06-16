@@ -54,12 +54,58 @@ The package registers itself through vLLM's plugin entrypoint and exposes a `CUS
 At runtime, the backend:
 
 1. Calls the normal Triton attention implementation unchanged.
-2. Captures and accumulates `Q` slices across prefill and decode for the active sequence.
+2. Captures and accumulates `Q` slices across prefill and decode for the active sequence, subject to the configured buffer policy.
 3. Extracts `K` from vLLM's paged KV cache when a snapshot is due.
-4. Runs matrix-free SVD and optional routing analysis.
-5. Emits JSONL rows with feature snapshots.
+4. Dispatches to `Diagnostic.reduce()` for each enabled signal, optionally calling `Diagnostic.accumulate()` to merge local results into a running global state.
+5. Emits snapshots via the handler pipeline (JSONL, OTel, or custom).
 
 This lets you observe attention structure during real generation rather than in a separate offline re-run.
+
+## Streaming Diagnostics
+
+For long or unbounded sequences, retaining the full Q buffer is impractical (O(L·H·d) per layer). Glassbox supports windowed Q-buffer management via two policies, controlled by `q_buffer_max_tokens` and `q_buffer_mode`:
+
+### Sliding window (default)
+
+```yaml
+q_buffer_max_tokens: 512
+q_buffer_mode: sliding
+```
+
+The buffer keeps the last `W` tokens. Each decode step appends one token and trims the oldest. Diagnostics fire per their configured `interval`, so consecutive observations overlap by `W - interval` tokens. This is the natural mode for continuous monitoring.
+
+### Tumbling window
+
+```yaml
+q_buffer_max_tokens: 512
+q_buffer_mode: tumbling
+```
+
+The buffer accumulates until it reaches `W` tokens, then fires all enabled signals and flushes. The window size is the cadence — per-signal `interval` is ignored. Consecutive windows are non-overlapping, which gives **window independence**: each `reduce()` call sees a disjoint block of the sequence.
+
+This matters for streaming accumulation proofs. Many merge strategies (running means, sketches, decomposition additivity) require that local statistics come from independent blocks. Tumbling mode provides that guarantee at the backend level.
+
+### The Diagnostic protocol
+
+Each signal implements the `Diagnostic` protocol (`glassbox/diagnostic.py`):
+
+| Method | Purpose |
+|--------|---------|
+| `reduce(Qh, Kh, L)` | Compute local scalar features from the current window |
+| `witness(Qh, Kh, L)` | Per-token localization vector (optional, `emit_witness=True`) |
+| `accumulate(local, state)` | Merge a local `reduce()` result into a running global state |
+
+`reduce()` is always correct for the window it sees — the SVD, Hodge decomposition, or Laplacian eigenvalues of the windowed attention submatrix are exact. The question is whether accumulated global statistics are meaningful, which depends on the accumulation strategy.
+
+Currently `accumulate()` returns the latest local result (no merge). The actual merge logic — proving that specific local→global strategies are correct for each signal — is the contribution of companion streaming papers. The backend provides the windowing modes and accumulation plumbing those papers need.
+
+### When to use which mode
+
+| Scenario | Mode | Why |
+|----------|------|-----|
+| Online monitoring, sliding-window anomaly detection | `sliding` | Overlapping windows give smoother signal, per-signal intervals allow different cadences |
+| Training streaming accumulators, local→global correctness proofs | `tumbling` | Non-overlapping windows give independence, simplifies merge math |
+| Unbounded (full sequence) | Either with `q_buffer_max_tokens=0` | Buffer grows with sequence length, statistics are global |
 
 ## How We Avoid Materializing The Full `L x L` Matrix
 
@@ -110,7 +156,7 @@ In practice:
 - if `L <= threshold`, use a materialized path
 - if `L > threshold`, use blocked matrix-free operators
 
-That behavior is implemented in `_run_svd_routing()` in `glassbox/backends/svd_backend.py`.
+That behavior is implemented in `RoutingDiagnostic.reduce()` in `glassbox/diagnostics/routing.py`.
 
 ### 5. On-demand entry lookup for curl estimates
 
@@ -384,6 +430,11 @@ output:
 
 emit:
   otel: false
+
+# Q-buffer windowing (streaming diagnostics)
+q_buffer_max_tokens: 0      # 0 = unbounded (full sequence)
+q_buffer_mode: sliding       # "sliding" or "tumbling"
+emit_witness: false          # attach per-token localization vectors
 ```
 
 Important knobs:
@@ -411,6 +462,9 @@ Important knobs:
 | `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `output.path` | JSONL output path (feature logging pipeline) |
 | `emit.otel` | Emit snapshots as OpenTelemetry spans (inference pipeline) |
+| `q_buffer_max_tokens` | Max Q-buffer tokens per layer (0 = unbounded). Bounds memory to O(W·H·d) per layer |
+| `q_buffer_mode` | `sliding` (overlapping, trim oldest) or `tumbling` (non-overlapping, flush after fire) |
+| `emit_witness` | Attach per-token localization vectors to snapshots (O(L) per snapshot when on) |
 
 ## Running Glassbox
 
@@ -454,7 +508,7 @@ glassbox-run \
   --prompt "The future of artificial intelligence is"
 ```
 
-Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`. Settings can also be loaded from a `glassbox.yaml` in the working directory.
+Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`, `--q-buffer-max-tokens`, `--q-buffer-mode`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`. Settings can also be loaded from a `glassbox.yaml` in the working directory.
 
 ### `glassbox-extract` — offline feature extraction
 

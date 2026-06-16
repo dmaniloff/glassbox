@@ -140,7 +140,16 @@ class GlassboxConfig(BaseSettings):
     output: OutputConfig = OutputConfig()
     emit: EmitConfig = EmitConfig()
     emit_witness: bool = False
+
+    # Q-buffer windowing — bounds memory and enables streaming diagnostics.
+    # 0 = unbounded (full sequence), > 0 = max tokens retained per layer.
     q_buffer_max_tokens: int = 0
+
+    # "sliding": overlapping windows, trim oldest on every step, fire per
+    #   signal interval.  Window overlap = W - interval.
+    # "tumbling": non-overlapping windows — accumulate W tokens, fire all
+    #   enabled signals, flush.  Window independence simplifies accumulation
+    #   proofs for streaming local→global merges.
     q_buffer_mode: Literal["sliding", "tumbling"] = "sliding"
 
     @classmethod
