@@ -348,33 +348,97 @@ def lanczos(operator, dim, k, iters, device, dtype=None):
     return evals, ritz_vectors
 
 
-def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str, dtype=None):
-    """Top-k singular triplets via Lanczos on M^T M.
+def _golub_kahan_bidiag(matvec, matvec_t, dim, iters, device, dtype=None):
+    """Golub-Kahan-Lanczos bidiagonalization.
 
-    U recovery is batched: a single matvec(V) call replaces k individual calls.
+    Builds orthonormal bases P (left) and Q (right) and a lower-bidiagonal
+    matrix B such that M @ Q = P @ B, without ever forming M^T M.  Each step
+    costs one matvec + one matvec_t, but singular values of B approximate
+    those of M directly — no condition-number squaring.
+
+    Returns (P, Q, B) where B is (p_cols x m) with p_cols = m or m+1.
+    """
+    native_dtype = dtype or torch.float32
+
+    # Bases stored in float32 for recurrence stability; downcast for matvec calls
+    P = torch.empty(dim, iters + 1, device=device, dtype=torch.float32)
+    Q = torch.empty(dim, iters, device=device, dtype=torch.float32)
+    alphas = torch.empty(iters, device=device, dtype=torch.float32)
+    betas_arr = torch.empty(iters, device=device, dtype=torch.float32)
+
+    p = torch.randn(dim, device=device, dtype=torch.float32)
+    P[:, 0] = p / torch.linalg.norm(p)
+
+    m = 0
+    p_cols = 1
+    for j in range(iters):
+        r = matvec_t(P[:, j].to(native_dtype)).float()
+        if j > 0:
+            r = r - betas_arr[j - 1] * Q[:, j - 1]
+
+        # CGS reorthogonalization
+        if j > 0:
+            coeffs = Q[:, :j].T @ r
+            r = r - Q[:, :j] @ coeffs
+
+        alpha = torch.linalg.norm(r).item()
+        if alpha < 1e-8:
+            m = j
+            break
+        alphas[j] = alpha
+        Q[:, j] = r / alpha
+
+        s = matvec(Q[:, j].to(native_dtype)).float()
+        s = s - alpha * P[:, j]
+
+        coeffs = P[:, : j + 1].T @ s
+        s = s - P[:, : j + 1] @ coeffs
+
+        beta = torch.linalg.norm(s).item()
+        betas_arr[j] = beta
+        m = j + 1
+
+        if beta < 1e-8:
+            p_cols = m
+            break
+        P[:, j + 1] = s / beta
+        p_cols = m + 1
+
+    # Lower-bidiagonal B: (p_cols x m)
+    # B[j,j] = alpha_j, B[j+1,j] = beta_j
+    B = torch.zeros(p_cols, m, device=device, dtype=torch.float32)
+    if m > 0:
+        B.diagonal().copy_(alphas[:m])
+        n_sub = len(B.diagonal(-1))
+        if n_sub > 0:
+            B.diagonal(-1).copy_(betas_arr[:n_sub])
+
+    return P[:, :p_cols], Q[:, :m], B
+
+
+def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str, dtype=None):
+    """Top-k singular triplets via Golub-Kahan-Lanczos bidiagonalization.
+
+    Works directly with M and M^T — no condition-number squaring from forming
+    M^T M.  Each iteration costs one matvec + one matvec_t (same budget as
+    before), but singular values of the bidiagonal approximate those of M
+    directly.
     """
     if k <= 0:
         empty = torch.empty(dim, 0, device=device)
         return empty, torch.empty(0, device=device), empty.clone()
 
-    evals, ritz = lanczos(
-        operator=lambda v: matvec_t(matvec(v)),
-        dim=dim,
-        k=max(2 * k, k + 2),
-        iters=iters,
-        device=device,
-        dtype=dtype,
-    )
-    # torch.linalg.eigh returns ascending; take largest-k.
-    idx = torch.argsort(evals, descending=True)[:k]
-    lam = evals[idx].clamp(min=0.0)
-    S = torch.sqrt(lam)
-    V = ritz[:, idx]
+    P, Q_basis, B = _golub_kahan_bidiag(matvec, matvec_t, dim, iters, device, dtype)
 
-    # Batched U recovery: single matvec call for all k columns
-    MV = matvec(V)
-    inv_S = torch.where(S > 1e-12, 1.0 / S, torch.zeros_like(S))
-    U = MV * inv_S.unsqueeze(0).to(MV.dtype)
+    # SVD of small bidiagonal B
+    U_hat, S_all, Vt_hat = torch.linalg.svd(B, full_matrices=False)
+
+    # Take top-k; bases are float32, cast result to native dtype
+    native_dtype = dtype or torch.float32
+    k = min(k, S_all.shape[0])
+    S = S_all[:k]
+    U = (P @ U_hat[:, :k]).to(native_dtype)
+    V = (Q_basis @ Vt_hat[:k, :].T).to(native_dtype)
 
     return U, S, V
 

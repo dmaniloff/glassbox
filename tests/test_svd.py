@@ -432,17 +432,15 @@ class TestDtypePropagation:
         def mv_t(u):
             return matvec_ST(Q, K, u)
 
-        U, S, V = svd_via_lanczos(mv, mv_t, L_DTYPE, k=4, iters=40, device="cpu", dtype=dtype)
+        U, S, V = svd_via_lanczos(mv, mv_t, L_DTYPE, k=4, iters=15, device="cpu", dtype=dtype)
         assert U.dtype == dtype, f"U dtype {U.dtype} != {dtype}"
         assert V.dtype == dtype, f"V dtype {V.dtype} != {dtype}"
         assert S.dtype == torch.float32, f"S should be float32, got {S.dtype}"
 
-        # Lanczos via M^T M squares the condition number (issue #33),
-        # so only check the leading singular value tightly.
-        S_ref = _ref_svdvals(Q, K, 1)
+        S_ref = _ref_svdvals(Q, K, 4)
         S_sorted, _ = torch.sort(S, descending=True)
         atol = DTYPE_SV_ATOL[dtype]
-        torch.testing.assert_close(S_sorted[:1], S_ref, atol=atol, rtol=0.15)
+        torch.testing.assert_close(S_sorted, S_ref, atol=atol, rtol=0.15)
 
     def test_svd_methods_agree_dtype(self, qk_dtype):
         Q, K, dtype = qk_dtype
@@ -454,14 +452,12 @@ class TestDtypePropagation:
             return matvec_ST(Q, K, u)
 
         _, S_rand, _ = randomized_svd(mv, mv_t, L_DTYPE, k=4, device="cpu", dtype=dtype)
-        _, S_lanc, _ = svd_via_lanczos(mv, mv_t, L_DTYPE, k=4, iters=40, device="cpu", dtype=dtype)
+        _, S_lanc, _ = svd_via_lanczos(mv, mv_t, L_DTYPE, k=4, iters=15, device="cpu", dtype=dtype)
 
-        # Only compare leading singular value — Lanczos via M^T M degrades
-        # trailing values due to condition-number squaring (issue #33).
         S_rand_sorted, _ = torch.sort(S_rand, descending=True)
         S_lanc_sorted, _ = torch.sort(S_lanc, descending=True)
         atol = DTYPE_SV_ATOL[dtype]
-        torch.testing.assert_close(S_rand_sorted[:1], S_lanc_sorted[:1], atol=atol, rtol=0.15)
+        torch.testing.assert_close(S_rand_sorted, S_lanc_sorted, atol=atol, rtol=0.15)
 
     @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
     def test_compute_scores_matrix_features_half(self, dtype):
