@@ -21,6 +21,11 @@ from glassbox.svd import (
     svd_via_lanczos,
 )
 
+ALL_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+HALF_DTYPES = [torch.float16, torch.bfloat16]
+DTYPE_SV_ATOL = {torch.float32: 1e-3, torch.float16: 0.15, torch.bfloat16: 0.15}
+DTYPE_IDS = {torch.float32: "fp32", torch.float16: "fp16", torch.bfloat16: "bf16"}
+
 L = 8
 D = 2
 
@@ -282,3 +287,191 @@ def test_compute_scores_matrix_features_lanczos_vs_randomized():
                 f"{method_name} sv mismatch: got {sv_approx}, expected {sv_true} "
                 f"(rel_err={rel_err:.3f})"
             )
+
+
+# --- Dtype propagation tests (fp32 / fp16 / bf16) ---
+
+L_DTYPE = 32
+D_DTYPE = 8
+
+
+@pytest.fixture(params=ALL_DTYPES, ids=lambda d: DTYPE_IDS[d])
+def qk_dtype(request):
+    dtype = request.param
+    torch.manual_seed(42)
+    Q = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+    K = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+    return Q, K, dtype
+
+
+def _ref_svdvals(Q, K, k):
+    """Ground-truth singular values via dense float32 SVD."""
+    S = Q.float() @ K.float().T
+    return torch.linalg.svdvals(S)[:k]
+
+
+class TestDtypePropagation:
+    def test_randomized_svd_dtype(self, qk_dtype):
+        Q, K, dtype = qk_dtype
+
+        def mv(v):
+            return matvec_S(Q, K, v)
+
+        def mv_t(u):
+            return matvec_ST(Q, K, u)
+
+        U, S, V = randomized_svd(mv, mv_t, L_DTYPE, k=4, device="cpu", dtype=dtype)
+        assert U.dtype == dtype, f"U dtype {U.dtype} != {dtype}"
+        assert V.dtype == dtype, f"V dtype {V.dtype} != {dtype}"
+        assert S.dtype == torch.float32, f"S should be float32, got {S.dtype}"
+        assert S.shape[0] == 4
+
+        S_ref = _ref_svdvals(Q, K, 4)
+        S_sorted, _ = torch.sort(S, descending=True)
+        atol = DTYPE_SV_ATOL[dtype]
+        torch.testing.assert_close(S_sorted, S_ref, atol=atol, rtol=0.15)
+
+    def test_lanczos_svd_dtype(self, qk_dtype):
+        Q, K, dtype = qk_dtype
+
+        def mv(v):
+            return matvec_S(Q, K, v)
+
+        def mv_t(u):
+            return matvec_ST(Q, K, u)
+
+        U, S, V = svd_via_lanczos(mv, mv_t, L_DTYPE, k=4, iters=40, device="cpu", dtype=dtype)
+        assert U.dtype == dtype, f"U dtype {U.dtype} != {dtype}"
+        assert V.dtype == dtype, f"V dtype {V.dtype} != {dtype}"
+        assert S.dtype == torch.float32, f"S should be float32, got {S.dtype}"
+
+        # Lanczos via M^T M squares the condition number (issue #33),
+        # so only check the leading singular value tightly.
+        S_ref = _ref_svdvals(Q, K, 1)
+        S_sorted, _ = torch.sort(S, descending=True)
+        atol = DTYPE_SV_ATOL[dtype]
+        torch.testing.assert_close(S_sorted[:1], S_ref, atol=atol, rtol=0.15)
+
+    def test_svd_methods_agree_dtype(self, qk_dtype):
+        Q, K, dtype = qk_dtype
+
+        def mv(v):
+            return matvec_S(Q, K, v)
+
+        def mv_t(u):
+            return matvec_ST(Q, K, u)
+
+        _, S_rand, _ = randomized_svd(mv, mv_t, L_DTYPE, k=4, device="cpu", dtype=dtype)
+        _, S_lanc, _ = svd_via_lanczos(mv, mv_t, L_DTYPE, k=4, iters=40, device="cpu", dtype=dtype)
+
+        # Only compare leading singular value — Lanczos via M^T M degrades
+        # trailing values due to condition-number squaring (issue #33).
+        S_rand_sorted, _ = torch.sort(S_rand, descending=True)
+        S_lanc_sorted, _ = torch.sort(S_lanc, descending=True)
+        atol = DTYPE_SV_ATOL[dtype]
+        torch.testing.assert_close(S_rand_sorted[:1], S_lanc_sorted[:1], atol=atol, rtol=0.15)
+
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_compute_scores_matrix_features_half(self, dtype):
+        torch.manual_seed(42)
+        Q = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+        K = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+
+        features = compute_scores_matrix_features(Q, K, rank=4)
+        assert len(features.singular_values) == 4
+        assert all(sv > 0 for sv in features.singular_values)
+
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_blocked_matvec_preserves_dtype(self, dtype):
+        torch.manual_seed(42)
+        Q = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+        K = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+        v = torch.randn(L_DTYPE, dtype=dtype)
+        scale = 1.0 / math.sqrt(D_DTYPE)
+
+        result_a = apply_A_blocked(Q, K, v, scale, block_size=8)
+        result_at = apply_AT_blocked(Q, K, v, scale, block_size=8)
+        assert result_a.dtype == dtype, f"apply_A_blocked returned {result_a.dtype}"
+        assert result_at.dtype == dtype, f"apply_AT_blocked returned {result_at.dtype}"
+
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_degree_normalized_matvecs_half(self, dtype):
+        """matvec_M_blocked, matvec_MT_blocked, compute_M_fro_norm_blocked with half."""
+        torch.manual_seed(42)
+        Q = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+        K = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+        scale = 1.0 / math.sqrt(D_DTYPE)
+        _, d_k_inv_sqrt = compute_dk_blocked(Q, K, scale, block_size=8)
+        v = torch.randn(L_DTYPE, dtype=dtype)
+
+        mv = matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size=8)
+        mvt = matvec_MT_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size=8)
+        fro = compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=8)
+        assert mv.dtype == dtype
+        assert mvt.dtype == dtype
+        assert fro.dtype == dtype
+        assert fro.item() > 0
+
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_compare_svd_results_half(self, dtype):
+        """compare_svd_results should not crash with half-precision inputs."""
+        torch.manual_seed(42)
+        Q = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+        K = torch.randn(L_DTYPE, D_DTYPE).to(dtype)
+
+        def mv(v):
+            return matvec_S(Q, K, v)
+
+        def mv_t(u):
+            return matvec_ST(Q, K, u)
+
+        U1, S1, V1 = randomized_svd(mv, mv_t, L_DTYPE, k=2, device="cpu", dtype=dtype)
+        U2, S2, V2 = randomized_svd(mv, mv_t, L_DTYPE, k=2, device="cpu", dtype=dtype)
+        result = compare_svd_results(mv, mv_t, U1, S1, V1, U2, S2, V2, trials=4)
+        assert "sv_rel_max" in result
+        assert result["sv_rel_max"] < 0.5
+
+    def test_randomized_svd_no_power_iterations(self):
+        """q=0 skips the QR re-orthogonalization loop entirely."""
+        torch.manual_seed(42)
+        Q = torch.randn(L_DTYPE, D_DTYPE, dtype=torch.float16)
+        K = torch.randn(L_DTYPE, D_DTYPE, dtype=torch.float16)
+
+        def mv(v):
+            return matvec_S(Q, K, v)
+
+        def mv_t(u):
+            return matvec_ST(Q, K, u)
+
+        U, S, V = randomized_svd(mv, mv_t, L_DTYPE, k=2, q=0, device="cpu", dtype=torch.float16)
+        assert U.dtype == torch.float16
+        assert S.shape[0] == 2
+
+    @pytest.mark.parametrize("L_small", [2, 3])
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_small_sequence_half(self, L_small, dtype):
+        """Small L with half precision: k gets clamped, should not crash."""
+        torch.manual_seed(42)
+        Q = torch.randn(L_small, D_DTYPE).to(dtype)
+        K = torch.randn(L_small, D_DTYPE).to(dtype)
+
+        features = compute_scores_matrix_features(Q, K, rank=4)
+        assert len(features.singular_values) > 0
+        assert all(sv > 0 for sv in features.singular_values)
+
+    def test_dtype_none_backward_compat(self):
+        """dtype=None produces float32 outputs, matching pre-fix behavior."""
+        torch.manual_seed(42)
+        Q = torch.randn(L_DTYPE, D_DTYPE)
+        K = torch.randn(L_DTYPE, D_DTYPE)
+
+        def mv(v):
+            return matvec_S(Q, K, v)
+
+        def mv_t(u):
+            return matvec_ST(Q, K, u)
+
+        U, S, V = randomized_svd(mv, mv_t, L_DTYPE, k=2, device="cpu", dtype=None)
+        assert U.dtype == torch.float32
+        assert V.dtype == torch.float32
+        assert S.dtype == torch.float32

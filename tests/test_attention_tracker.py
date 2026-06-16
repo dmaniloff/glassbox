@@ -6,6 +6,7 @@ and verifies the d_k_inv_sqrt=ones trick that reuses M-family matvecs for A.
 
 import math
 
+import pytest
 import torch
 
 from glassbox.attention_tracker import (
@@ -183,3 +184,28 @@ class TestOnesTrick:
         fro_mf = compute_M_fro_norm_blocked(Q, K, ones, scale, block_size=16).item()
         fro_mat = torch.linalg.norm(A, "fro").item()
         assert abs(fro_mf - fro_mat) < 1e-4, f"||A||_F mismatch: mf={fro_mf}, mat={fro_mat}"
+
+
+# ---------------------------------------------------------------------------
+# 6. Half-precision dtype propagation (fp16 / bf16)
+# ---------------------------------------------------------------------------
+
+HALF_DTYPES = [torch.float16, torch.bfloat16]
+DTYPE_IDS = {torch.float16: "fp16", torch.bfloat16: "bf16"}
+
+
+class TestHalfPrecisionDtype:
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_matrix_free_features_half(self, dtype):
+        """compute_attention_tracker_features_matrix_free with half Q/K."""
+        torch.manual_seed(42)
+        Q = torch.randn(16, 4).to(dtype)
+        K = torch.randn(16, 4).to(dtype)
+        scale = 1.0 / math.sqrt(4)
+        f = compute_attention_tracker_features_matrix_free(Q, K, scale, rank=2)
+        assert isinstance(f, TrackerFeatures)
+        assert len(f.singular_values) == 2
+        assert all(sv > 0 for sv in f.singular_values)
+        assert math.isfinite(f.sigma2)
+        assert math.isfinite(f.sigma2_asym)
+        assert math.isfinite(f.commutator_norm)
