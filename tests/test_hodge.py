@@ -849,7 +849,14 @@ class TestHalfPrecisionDtype:
         """compute_routing_features_matrix_free should not crash with half Q/K."""
         Q, K, scale, d_k_mf, lse = _make_M_half(16, 4, dtype)
         f = compute_routing_features_matrix_free(
-            Q, K, d_k_mf, scale, lse, rank=2, min_samples=200, seed=42,
+            Q,
+            K,
+            d_k_mf,
+            scale,
+            lse,
+            rank=2,
+            min_samples=200,
+            seed=42,
         )
         assert f.sigma2 is not None
         assert f.G is not None
@@ -879,7 +886,13 @@ class TestHalfPrecisionDtype:
         Q, K, scale, d_k_mf, lse = _make_M_half(16, 4, dtype)
         fro = compute_M_fro_norm_blocked(Q, K, d_k_mf, scale)
         C = estimate_curl_matrix_free(
-            Q, K, lse, d_k_mf, scale, fro.item(), seed=42,
+            Q,
+            K,
+            lse,
+            d_k_mf,
+            scale,
+            fro.item(),
+            seed=42,
         )
         assert math.isfinite(C)
 
@@ -889,6 +902,12 @@ class TestHalfPrecisionDtype:
         Q, K, scale, d_k_mf, _ = _make_M_half(16, 4, dtype)
         fro = compute_M_fro_norm_blocked(Q, K, d_k_mf, scale)
         cn = estimate_commutator_norm_matrix_free(
-            Q, K, d_k_mf, scale, fro.item(), n_hutchinson=5, seed=42,
+            Q,
+            K,
+            d_k_mf,
+            scale,
+            fro.item(),
+            n_hutchinson=5,
+            seed=42,
         )
         assert math.isfinite(cn)

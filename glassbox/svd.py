@@ -243,15 +243,11 @@ def matvec_commutator_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, caus
     sym_x = (Ax + MTx) / 2.0
 
     # Pass 2: M_sym(asym_x) = (M @ asym_x + M^T @ asym_x) / 2
-    A_asym, AT_asym = _apply_A_and_AT_blocked(
-        Q, K, dk * asym_x, asym_x, scale, block_size, causal
-    )
+    A_asym, AT_asym = _apply_A_and_AT_blocked(Q, K, dk * asym_x, asym_x, scale, block_size, causal)
     sym_of_asym = (A_asym + dk * AT_asym) / 2.0
 
     # Pass 3: M_asym(sym_x) = (M @ sym_x - M^T @ sym_x) / 2
-    A_sym, AT_sym = _apply_A_and_AT_blocked(
-        Q, K, dk * sym_x, sym_x, scale, block_size, causal
-    )
+    A_sym, AT_sym = _apply_A_and_AT_blocked(Q, K, dk * sym_x, sym_x, scale, block_size, causal)
     asym_of_sym = (A_sym - dk * AT_sym) / 2.0
 
     result = sym_of_asym - asym_of_sym
@@ -336,8 +332,8 @@ def lanczos(operator, dim, k, iters, device, dtype=None):
     T = torch.zeros(m, m, device=device, dtype=torch.float32)
     T.diagonal().copy_(alphas[:m])
     if m > 1:
-        T.diagonal(1).copy_(betas_arr[:m - 1])
-        T.diagonal(-1).copy_(betas_arr[:m - 1])
+        T.diagonal(1).copy_(betas_arr[: m - 1])
+        T.diagonal(-1).copy_(betas_arr[: m - 1])
 
     evals, evecs = torch.linalg.eigh(T)
     ritz_vectors = V[:, :m] @ evecs.to(V.dtype)
