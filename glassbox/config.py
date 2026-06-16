@@ -147,6 +147,7 @@ class GlassboxConfig(BaseSettings):
     laplacian: LaplacianConfig = LaplacianConfig()
     output: OutputConfig = OutputConfig()
     emit: EmitConfig = EmitConfig()
+    emit_witness: bool = False
 
     @classmethod
     def settings_customise_sources(

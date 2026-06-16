@@ -211,6 +211,7 @@ class SVDSnapshot(BaseModel):
     L: int
     singular_values: list[float] = []
     tier: str | None = None  # "materialized" | "matrix_free"
+    witness: list[float] | None = None
     features: (
         SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
     )
