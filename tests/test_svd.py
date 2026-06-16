@@ -12,6 +12,7 @@ from glassbox.svd import (
     compute_M_fro_norm_blocked,
     compute_scores_matrix_features,
     get_M_entries_batch,
+    hermitian_lanczos,
     matvec_M_blocked,
     matvec_MT_blocked,
     matvec_S,
@@ -668,3 +669,221 @@ class TestSmallSequenceLength:
         U, S, V = svd_via_lanczos(mv, mv_t, 2, k=1, iters=10, device="cpu")
         assert S.shape == (1,)
         assert S[0] > 0
+
+
+# ---------------------------------------------------------------------------
+# hermitian_lanczos tests
+# ---------------------------------------------------------------------------
+
+N_HERM = 16
+K_HERM = 4
+ITERS_HERM = 30
+
+COMPLEX_DTYPES = [torch.complex64, torch.complex128]
+ALL_HERMITIAN_DTYPES = [
+    torch.float32,
+    torch.float16,
+    torch.bfloat16,
+    torch.complex64,
+    torch.complex128,
+]
+HERMITIAN_EIGVAL_ATOL = {
+    torch.float32: 1e-3,
+    torch.float16: 0.15,
+    torch.bfloat16: 0.15,
+    torch.complex64: 1e-3,
+    torch.complex128: 1e-6,
+}
+HERMITIAN_DTYPE_IDS = {
+    torch.float32: "fp32",
+    torch.float16: "fp16",
+    torch.bfloat16: "bf16",
+    torch.complex64: "c64",
+    torch.complex128: "c128",
+}
+
+
+def _random_hermitian(n, dtype, device="cpu", seed=42):
+    torch.manual_seed(seed)
+    R = torch.randn(n, n, dtype=dtype, device=device)
+    return (R + R.conj().T) / 2
+
+
+def _ref_eigh(H, k, which, real_dtype=torch.float32):
+    evals, _ = torch.linalg.eigh(H.to(torch.complex128 if H.is_complex() else torch.float64))
+    if which == "smallest":
+        return evals[:k].to(real_dtype)
+    return evals[-k:].flip(0).to(real_dtype)
+
+
+class TestHermitianLanczos:
+    def test_real_largest_vs_eigh(self):
+        H = _random_hermitian(N_HERM, torch.float32)
+        ref = _ref_eigh(H, K_HERM, "largest")
+        evals, evecs = hermitian_lanczos(
+            lambda v: H @ v, N_HERM, K_HERM, ITERS_HERM, "cpu", which="largest"
+        )
+        torch.testing.assert_close(evals, ref, atol=1e-3, rtol=0.01)
+        assert evecs.shape == (N_HERM, K_HERM)
+
+    def test_real_smallest_vs_eigh(self):
+        H = _random_hermitian(N_HERM, torch.float32)
+        ref = _ref_eigh(H, K_HERM, "smallest")
+        evals, evecs = hermitian_lanczos(
+            lambda v: H @ v, N_HERM, K_HERM, ITERS_HERM, "cpu", which="smallest"
+        )
+        torch.testing.assert_close(evals, ref, atol=1e-3, rtol=0.01)
+        assert evecs.shape == (N_HERM, K_HERM)
+
+    def test_complex64_largest(self):
+        H = _random_hermitian(N_HERM, torch.complex64)
+        ref = _ref_eigh(H, K_HERM, "largest")
+        evals, evecs = hermitian_lanczos(
+            lambda v: H @ v,
+            N_HERM,
+            K_HERM,
+            ITERS_HERM,
+            "cpu",
+            which="largest",
+            dtype=torch.complex64,
+        )
+        torch.testing.assert_close(evals, ref, atol=1e-3, rtol=0.01)
+        assert evecs.dtype == torch.complex64
+
+    def test_complex64_smallest(self):
+        H = _random_hermitian(N_HERM, torch.complex64)
+        ref = _ref_eigh(H, K_HERM, "smallest")
+        evals, evecs = hermitian_lanczos(
+            lambda v: H @ v,
+            N_HERM,
+            K_HERM,
+            ITERS_HERM,
+            "cpu",
+            which="smallest",
+            dtype=torch.complex64,
+        )
+        torch.testing.assert_close(evals, ref, atol=1e-3, rtol=0.01)
+
+    def test_complex128(self):
+        H = _random_hermitian(N_HERM, torch.complex128)
+        ref_lg = _ref_eigh(H, K_HERM, "largest", real_dtype=torch.float64)
+        ref_sm = _ref_eigh(H, K_HERM, "smallest", real_dtype=torch.float64)
+        evals_lg, _ = hermitian_lanczos(
+            lambda v: H @ v,
+            N_HERM,
+            K_HERM,
+            ITERS_HERM,
+            "cpu",
+            which="largest",
+            dtype=torch.complex128,
+        )
+        evals_sm, _ = hermitian_lanczos(
+            lambda v: H @ v,
+            N_HERM,
+            K_HERM,
+            ITERS_HERM,
+            "cpu",
+            which="smallest",
+            dtype=torch.complex128,
+        )
+        torch.testing.assert_close(evals_lg, ref_lg, atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(evals_sm, ref_sm, atol=1e-6, rtol=1e-5)
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [torch.float16, torch.bfloat16],
+        ids=lambda d: HERMITIAN_DTYPE_IDS[d],
+    )
+    def test_fp16_bf16_stability(self, dtype):
+        H_fp32 = _random_hermitian(N_HERM, torch.float32)
+        ref = _ref_eigh(H_fp32, K_HERM, "largest")
+        H_half = H_fp32.to(dtype)
+        evals, evecs = hermitian_lanczos(
+            lambda v: H_half @ v,
+            N_HERM,
+            K_HERM,
+            ITERS_HERM,
+            "cpu",
+            which="largest",
+            dtype=dtype,
+        )
+        assert evecs.dtype == dtype
+        torch.testing.assert_close(evals, ref, atol=0.15, rtol=0.15)
+
+    def test_k_zero(self):
+        evals, evecs = hermitian_lanczos(
+            lambda v: v,
+            8,
+            0,
+            10,
+            "cpu",
+        )
+        assert evals.shape == (0,)
+        assert evecs.shape == (8, 0)
+
+    def test_which_invalid(self):
+        with pytest.raises(ValueError, match="smallest.*largest"):
+            hermitian_lanczos(lambda v: v, 8, 4, 10, "cpu", which="middle")
+
+    def test_eigenvectors_orthonormal(self):
+        H = _random_hermitian(N_HERM, torch.complex64)
+        _, evecs = hermitian_lanczos(
+            lambda v: H @ v,
+            N_HERM,
+            K_HERM,
+            ITERS_HERM,
+            "cpu",
+            dtype=torch.complex64,
+        )
+        gram = evecs.conj().T @ evecs
+        eye = torch.eye(K_HERM, dtype=gram.dtype)
+        torch.testing.assert_close(gram, eye, atol=1e-4, rtol=0)
+
+    def test_residual(self):
+        H = _random_hermitian(N_HERM, torch.float32)
+        evals, evecs = hermitian_lanczos(
+            lambda v: H @ v,
+            N_HERM,
+            K_HERM,
+            ITERS_HERM,
+            "cpu",
+        )
+        for i in range(K_HERM):
+            v = evecs[:, i]
+            residual = torch.linalg.norm(H @ v - evals[i] * v)
+            assert residual < 1e-3, f"Residual {residual} too large for eigenpair {i}"
+
+    def test_early_termination(self):
+        v = torch.randn(N_HERM)
+        v = v / torch.linalg.norm(v)
+        H = 3.0 * v.outer(v)
+        evals, evecs = hermitian_lanczos(
+            lambda x: H @ x,
+            N_HERM,
+            1,
+            ITERS_HERM,
+            "cpu",
+            which="largest",
+        )
+        torch.testing.assert_close(evals[0], torch.tensor(3.0), atol=1e-4, rtol=0)
+
+    @pytest.mark.parametrize(
+        "dtype",
+        ALL_HERMITIAN_DTYPES,
+        ids=lambda d: HERMITIAN_DTYPE_IDS[d],
+    )
+    def test_dtype_propagation(self, dtype):
+        H = _random_hermitian(N_HERM, dtype)
+        evals, evecs = hermitian_lanczos(
+            lambda v: H @ v,
+            N_HERM,
+            K_HERM,
+            ITERS_HERM,
+            "cpu",
+            dtype=dtype,
+        )
+        assert evecs.dtype == dtype
+        if dtype in (torch.complex128, torch.float64):
+            assert evals.dtype == torch.float64
+        else:
+            assert evals.dtype == torch.float32
