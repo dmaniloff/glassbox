@@ -149,6 +149,7 @@ class GlassboxConfig(BaseSettings):
     emit: EmitConfig = EmitConfig()
     emit_witness: bool = False
     q_buffer_max_tokens: int = 0
+    q_buffer_mode: Literal["sliding", "tumbling"] = "sliding"
 
     @classmethod
     def settings_customise_sources(
@@ -179,6 +180,7 @@ class GlassboxConfig(BaseSettings):
         output_path: str | None = None,
         otel: bool | None = None,
         q_buffer_max_tokens: int | None = None,
+        q_buffer_mode: str | None = None,
     ) -> GlassboxConfig:
         """Build a GlassboxConfig from CLI-style arguments.
 
@@ -196,6 +198,8 @@ class GlassboxConfig(BaseSettings):
             overrides["emit"] = {"otel": otel}
         if q_buffer_max_tokens is not None:
             overrides["q_buffer_max_tokens"] = q_buffer_max_tokens
+        if q_buffer_mode is not None:
+            overrides["q_buffer_mode"] = q_buffer_mode
 
         signal_set = set(signals)
 
