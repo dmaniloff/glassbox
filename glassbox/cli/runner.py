@@ -108,6 +108,12 @@ logger = logging.getLogger(__name__)
     help="Max Q-buffer tokens per layer (0 = unbounded). [default: from config (0)]",
 )
 @click.option(
+    "--q-buffer-mode",
+    type=click.Choice(["sliding", "tumbling"]),
+    default=None,
+    help="Buffer policy: sliding (overlap) or tumbling (non-overlapping, flush after fire).",
+)
+@click.option(
     "--max-tokens",
     type=int,
     default=64,
@@ -132,6 +138,7 @@ def main(
     threshold: int | None,
     block_size: int | None,
     q_buffer_max_tokens: int | None,
+    q_buffer_mode: str | None,
     max_tokens: int,
     prompt: str,
 ) -> None:
@@ -151,6 +158,7 @@ def main(
         output_path=output,
         otel=otel,
         q_buffer_max_tokens=q_buffer_max_tokens,
+        q_buffer_mode=q_buffer_mode,
     )
     svd_mod.SVDTritonAttentionImpl.set_config(config)
 

@@ -65,17 +65,31 @@ class TestConfig:
         cfg = GlassboxConfig()
         assert cfg.q_buffer_max_tokens == 0
 
+    def test_default_mode_sliding(self):
+        cfg = GlassboxConfig()
+        assert cfg.q_buffer_mode == "sliding"
+
     def test_from_cli_args(self):
         cfg = GlassboxConfig.from_cli_args(q_buffer_max_tokens=512)
         assert cfg.q_buffer_max_tokens == 512
 
+    def test_from_cli_args_tumbling(self):
+        cfg = GlassboxConfig.from_cli_args(q_buffer_max_tokens=512, q_buffer_mode="tumbling")
+        assert cfg.q_buffer_max_tokens == 512
+        assert cfg.q_buffer_mode == "tumbling"
+
     def test_from_cli_args_none_uses_default(self):
         cfg = GlassboxConfig.from_cli_args()
         assert cfg.q_buffer_max_tokens == 0
+        assert cfg.q_buffer_mode == "sliding"
 
     def test_programmatic(self):
         cfg = GlassboxConfig(q_buffer_max_tokens=1024)
         assert cfg.q_buffer_max_tokens == 1024
+
+    def test_programmatic_tumbling(self):
+        cfg = GlassboxConfig(q_buffer_max_tokens=256, q_buffer_mode="tumbling")
+        assert cfg.q_buffer_mode == "tumbling"
 
 
 class TestKAlignment:
@@ -112,3 +126,53 @@ class TestKAlignment:
         K = torch.randn(L, 4, 64)
         assert Q[-L:].data_ptr() == Q.data_ptr()
         assert K[-L:].data_ptr() == K.data_ptr()
+
+
+class TestTumblingMode:
+    """Simulate tumbling window semantics without importing vLLM."""
+
+    @staticmethod
+    def _simulate_tumbling(n_steps: int, W: int) -> list[int]:
+        """Return the steps at which diagnostics fire in tumbling mode.
+
+        Each step appends 1 token. When buffer reaches W, fire and flush.
+        """
+        buf_tokens = 0
+        fire_steps: list[int] = []
+        for step in range(1, n_steps + 1):
+            buf_tokens += 1
+            if buf_tokens >= W:
+                fire_steps.append(step)
+                buf_tokens = 0
+        return fire_steps
+
+    def test_fires_at_window_boundaries(self):
+        fires = self._simulate_tumbling(20, W=5)
+        assert fires == [5, 10, 15, 20]
+
+    def test_non_overlapping(self):
+        fires = self._simulate_tumbling(30, W=10)
+        for i in range(1, len(fires)):
+            assert fires[i] - fires[i - 1] == 10
+
+    def test_no_partial_window_at_end(self):
+        fires = self._simulate_tumbling(13, W=5)
+        assert fires == [5, 10]
+
+    def test_window_1_fires_every_step(self):
+        fires = self._simulate_tumbling(5, W=1)
+        assert fires == [1, 2, 3, 4, 5]
+
+    def test_buffer_empty_after_flush(self):
+        """After firing, buffer should be empty (0 tokens)."""
+        buf: list[torch.Tensor] = []
+        W = 4
+        flush_counts = []
+        for _ in range(12):
+            buf.append(torch.randn(1, 4, 64))
+            total = sum(t.shape[0] for t in buf)
+            if total >= W:
+                flush_counts.append(total)
+                buf = []
+        assert flush_counts == [4, 4, 4]
+        assert buf == []
