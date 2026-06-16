@@ -475,3 +475,109 @@ class TestDtypePropagation:
         assert U.dtype == torch.float32
         assert V.dtype == torch.float32
         assert S.dtype == torch.float32
+
+
+# ---------------------------------------------------------------------------
+# Small sequence length (L=0, L=1, L=2) — issue #32
+# ---------------------------------------------------------------------------
+
+
+class TestSmallSequenceLength:
+    """SVD entry points must not crash for degenerate L values."""
+
+    @pytest.mark.parametrize("seq_len", [0, 1], ids=["L=0", "L=1"])
+    def test_randomized_svd_k_zero(self, seq_len):
+        def mv(v):
+            return v
+
+        def mv_t(u):
+            return u
+
+        U, S, V = randomized_svd(mv, mv_t, seq_len, k=0, device="cpu")
+        assert U.shape == (seq_len, 0)
+        assert S.shape == (0,)
+        assert V.shape == (seq_len, 0)
+
+    @pytest.mark.parametrize("seq_len", [0, 1], ids=["L=0", "L=1"])
+    def test_svd_via_lanczos_k_zero(self, seq_len):
+        def mv(v):
+            return v
+
+        def mv_t(u):
+            return u
+
+        U, S, V = svd_via_lanczos(mv, mv_t, seq_len, k=0, iters=10, device="cpu")
+        assert U.shape == (seq_len, 0)
+        assert S.shape == (0,)
+        assert V.shape == (seq_len, 0)
+
+    def test_lanczos_dim_zero(self):
+        from glassbox.svd import lanczos
+
+        evals, vecs = lanczos(lambda v: v, dim=0, k=1, iters=10, device="cpu")
+        assert evals.shape == (0,)
+        assert vecs.shape == (0, 0)
+
+    def test_compute_scores_matrix_features_L1(self):
+        Q = torch.randn(1, 4)
+        K = torch.randn(1, 4)
+        feats = compute_scores_matrix_features(Q, K, rank=2)
+        assert feats.singular_values == []
+        assert feats.sv1 is None
+
+    def test_compute_scores_matrix_features_L0(self):
+        Q = torch.randn(0, 4)
+        K = torch.randn(0, 4)
+        feats = compute_scores_matrix_features(Q, K, rank=2)
+        assert feats.singular_values == []
+
+    def test_compare_svd_results_k_zero(self):
+        empty_U = torch.empty(4, 0)
+        empty_S = torch.empty(0)
+        empty_V = torch.empty(4, 0)
+        result = compare_svd_results(
+            lambda v: v,
+            lambda u: u,
+            empty_U,
+            empty_S,
+            empty_V,
+            empty_U,
+            empty_S,
+            empty_V,
+        )
+        assert result["k"] == 0
+        assert result["sv_abs_max"] == 0.0
+
+    def test_randomized_svd_L2_k1(self):
+        """L=2 is the smallest non-degenerate case — should produce 1 SV."""
+        torch.manual_seed(42)
+        Q = torch.randn(2, 4)
+        K = torch.randn(2, 4)
+
+        def mv(v):
+            return matvec_S(Q, K, v)
+
+        def mv_t(u):
+            return matvec_ST(Q, K, u)
+
+        U, S, V = randomized_svd(mv, mv_t, 2, k=1, device="cpu")
+        assert S.shape == (1,)
+        assert S[0] > 0
+        assert U.shape == (2, 1)
+        assert V.shape == (2, 1)
+
+    def test_svd_via_lanczos_L2_k1(self):
+        """L=2 should work with Lanczos too."""
+        torch.manual_seed(42)
+        Q = torch.randn(2, 4)
+        K = torch.randn(2, 4)
+
+        def mv(v):
+            return matvec_S(Q, K, v)
+
+        def mv_t(u):
+            return matvec_ST(Q, K, u)
+
+        U, S, V = svd_via_lanczos(mv, mv_t, 2, k=1, iters=10, device="cpu")
+        assert S.shape == (1,)
+        assert S[0] > 0

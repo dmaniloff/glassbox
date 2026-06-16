@@ -261,6 +261,10 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda", dtype=None
     All operator calls are batched: matvec/matvec_t receive (dim, k+p) matrices
     and return (dim, k+p) results, enabling BLAS-3 throughput.
     """
+    if k <= 0:
+        empty = torch.empty(dim, 0, device=device)
+        return empty, torch.empty(0, device=device), empty.clone()
+
     p = min(p, max(dim - k, 0))
     n = k + p
 
@@ -294,6 +298,9 @@ def lanczos(operator, dim, k, iters, device, dtype=None):
     k: (unused, kept for interface compat) number of Lanczos vectors.
     iters: total Lanczos steps.
     """
+    if dim <= 0:
+        return torch.empty(0, device=device), torch.empty(dim, 0, device=device)
+
     native_dtype = dtype or torch.float32
 
     V = torch.empty(dim, iters + 1, device=device, dtype=native_dtype)
@@ -361,6 +368,10 @@ def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str,
 
     U recovery is batched: a single matvec(V) call replaces k individual calls.
     """
+    if k <= 0:
+        empty = torch.empty(dim, 0, device=device)
+        return empty, torch.empty(0, device=device), empty.clone()
+
     evals, ritz = lanczos(
         operator=lambda v: matvec_t(matvec(v)),
         dim=dim,
@@ -387,6 +398,22 @@ def compare_svd_results(matvec, matvec_t, U1, S1, V1, U2, S2, V2, trials: int = 
     """Compare two (U,S,V) factorizations via batched operator calls."""
     device = S1.device
     k = min(S1.numel(), S2.numel())
+
+    if k == 0:
+        return {
+            "k": 0,
+            "sv_abs_max": 0.0,
+            "sv_rel_max": 0.0,
+            "ang_U_max_deg": 0.0,
+            "ang_V_max_deg": 0.0,
+            "mv_res_max": 0.0,
+            "mtu_res_max": 0.0,
+            "recon_M_minus_USVt_mean": 0.0,
+            "recon_M_minus_USVt_max": 0.0,
+            "recon_method_diff_mean": 0.0,
+            "recon_method_diff_max": 0.0,
+        }
+
     S1 = S1[:k]
     S2 = S2[:k]
     U1 = U1[:, :k]
@@ -460,6 +487,9 @@ def compute_scores_matrix_features(
     L = Q.shape[0]
     device = Q.device
     k = min(rank, L - 1)
+
+    if k <= 0:
+        return SpectralFeatures(singular_values=[])
 
     def mv(v):
         return matvec_S(Q, K, v)
