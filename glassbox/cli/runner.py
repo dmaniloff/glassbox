@@ -102,6 +102,12 @@ logger = logging.getLogger(__name__)
     help="Emit snapshots as OpenTelemetry spans. [default: from config (False)]",
 )
 @click.option(
+    "--q-buffer-max-tokens",
+    type=int,
+    default=None,
+    help="Max Q-buffer tokens per layer (0 = unbounded). [default: from config (0)]",
+)
+@click.option(
     "--max-tokens",
     type=int,
     default=64,
@@ -125,6 +131,7 @@ def main(
     otel: bool | None,
     threshold: int | None,
     block_size: int | None,
+    q_buffer_max_tokens: int | None,
     max_tokens: int,
     prompt: str,
 ) -> None:
@@ -143,6 +150,7 @@ def main(
         block_size=block_size,
         output_path=output,
         otel=otel,
+        q_buffer_max_tokens=q_buffer_max_tokens,
     )
     svd_mod.SVDTritonAttentionImpl.set_config(config)
 
