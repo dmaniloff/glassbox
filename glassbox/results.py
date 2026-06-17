@@ -203,12 +203,14 @@ class CheegerFeatures(BaseModel):
     Tier 1 (always-on): cheeger_lower, cheeger_upper from sigma2 alone.
     Tier 2 (gap-guarded): phi_hat from Fiedler sweep, tighter upper bound.
     Tier 3 (fallback): improved_upper via higher-order Cheeger (KLGT bound).
+
+    In light mode, only tier 1 is populated (phi_star is None).
     """
 
     model_config = ConfigDict(frozen=True)
 
-    phi_star: float = Field(description="Bipartite sweep conductance (min over Fiedler sweep).")
-    sigma2: float | None = Field(None, description="Second singular value of M (or eigenvalue of M_sym).")
+    phi_star: float | None = Field(None, description="Bipartite sweep conductance (None in light mode).")
+    sigma2: float | None = Field(None, description="Second largest eigenvalue of M_sym = (M+M^T)/2.")
     cheeger_lower: float | None = Field(None, description="Tier 1 lower: (1 - sigma2) / 2.")
     cheeger_upper: float | None = Field(None, description="Tier 1 upper: sqrt(2 * (1 - sigma2)).")
     phi_hat: float | None = Field(None, description="Tier 2: sweep conductance when gap-healthy.")
@@ -216,6 +218,12 @@ class CheegerFeatures(BaseModel):
     bracket_width: float | None = Field(None, description="cheeger_upper - cheeger_lower (confidence signal).")
     spectral_gap: float | None = Field(None, description="lambda2 - lambda3 from M_sym eigenproblem.")
     recomputed: bool = Field(False, description="Whether a full recompute was triggered this window.")
+
+    # Dual Cheeger (Bauer-Jost 2013): bipartiteness diagnostic
+    lambda_min: float | None = Field(None, description="Smallest eigenvalue of M_sym.")
+    dual_gap: float | None = Field(None, description="1 + lambda_min (bipartiteness spectral gap).")
+    dual_cheeger_lower: float | None = Field(None, description="dual_gap / 2 (lower bound on beta).")
+    dual_cheeger_upper: float | None = Field(None, description="sqrt(2 * dual_gap) (upper bound on beta).")
 
 
 class SVDSnapshot(BaseModel):

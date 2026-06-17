@@ -28,14 +28,29 @@ from glassbox.results import CheegerFeatures
 from glassbox.svd import (
     compute_dk_blocked,
     compute_degree_normalized_M,
+    hermitian_lanczos,
     matvec_M_blocked,
+    matvec_Msym_blocked,
     matvec_MT_blocked,
     randomized_svd,
     svd_via_lanczos,
 )
 
 
-def compute_improved_cheeger_upper(eigenvalues: torch.Tensor, k: int = 4) -> float | None:
+def _dual_cheeger_fields(lambda_min: float) -> dict:
+    """Compute dual Cheeger (Bauer-Jost 2013) fields from lambda_min of M_sym."""
+    dual_gap = max(1.0 + lambda_min, 0.0)
+    return {
+        "lambda_min": lambda_min,
+        "dual_gap": dual_gap,
+        "dual_cheeger_lower": dual_gap / 2.0,
+        "dual_cheeger_upper": math.sqrt(max(2.0 * dual_gap, 0.0)),
+    }
+
+
+def compute_improved_cheeger_upper(
+    eigenvalues: torch.Tensor, k: int = 4, adaptive: bool = False,
+) -> float | None:
     """Kwok-Lau-Lee-Gharan-Trevisan improved Cheeger upper bound.
 
     Uses higher-order eigenvalues to give a tighter upper bound than
@@ -43,9 +58,13 @@ def compute_improved_cheeger_upper(eigenvalues: torch.Tensor, k: int = 4) -> flo
         phi* <= O(k) * mu2 / sqrt(mu_{k+1})
     where mu_i = 1 - lambda_i are the normalized Laplacian gaps.
 
+    When adaptive=True, selects k in [2, len(eigenvalues)-1] that
+    minimizes the bound, instead of using the fixed k.
+
     Args:
         eigenvalues: Eigenvalues of M_sym sorted descending (largest first).
-        k: Order of the higher-order Cheeger bound.
+        k: Order of the higher-order Cheeger bound (max_k when adaptive).
+        adaptive: If True, search over all k for tightest bound.
 
     Returns:
         Improved upper bound, or None if insufficient eigenvalues.
@@ -53,6 +72,19 @@ def compute_improved_cheeger_upper(eigenvalues: torch.Tensor, k: int = 4) -> flo
     if len(eigenvalues) < 3:
         return None
     mu2 = max(1.0 - float(eigenvalues[1]), 0.0)
+    if mu2 < 1e-12:
+        return 0.0
+
+    if adaptive:
+        best_bound = float("inf")
+        for trial_k in range(2, len(eigenvalues)):
+            idx_kp1 = min(trial_k, len(eigenvalues) - 1)
+            mu_kp1 = max(1.0 - float(eigenvalues[idx_kp1]), 1e-12)
+            bound = float(trial_k) * mu2 / (mu_kp1 ** 0.5)
+            if bound < best_bound:
+                best_bound = bound
+        return best_bound if best_bound < float("inf") else None
+
     idx_kp1 = min(k, len(eigenvalues) - 1)
     mu_kp1 = max(1.0 - float(eigenvalues[idx_kp1]), 1e-12)
     return float(k) * mu2 / (mu_kp1 ** 0.5)
@@ -405,19 +437,37 @@ def _sweep_one_orientation(
 
 def compute_cheeger_features_materialized(M: torch.Tensor, rank: int = 2) -> CheegerFeatures:
     """Compute CheegerFeatures from a materialized M matrix."""
+    if M.shape[0] < 2:
+        return CheegerFeatures()
     U_mat, sigma, Vt = torch.linalg.svd(M, full_matrices=False)
     k = min(rank, len(sigma))
-    sigma2 = sigma[1].item() if k > 1 else 0.0
     u2 = U_mat[:, 1] if k > 1 else torch.zeros(M.shape[0], device=M.device)
     v2 = Vt[1, :] if k > 1 else torch.zeros(M.shape[1], device=M.device)
 
     result = bipartite_sweep_conductance(u2, v2, M)
-    gap = 1.0 - sigma2
+
+    # Cheeger bracket requires eigenvalues of M_sym, NOT singular values of M.
+    # σ₂(M) ≥ λ₂(M_sym) in general, so using σ₂ would make the upper bound
+    # too tight and potentially violate the Cheeger guarantee.
+    M_sym = (M + M.T) / 2
+    eigvals_msym = torch.linalg.eigvalsh(M_sym)
+    lambda2_msym = float(eigvals_msym[-2]) if len(eigvals_msym) > 1 else 0.0
+    lambda_min = float(eigvals_msym[0])
+    mu2 = max(1.0 - lambda2_msym, 0.0)
+    dual = _dual_cheeger_fields(lambda_min)
+
+    improved_upper = compute_improved_cheeger_upper(
+        eigvals_msym.flip(0), adaptive=True,
+    )
+
     return CheegerFeatures(
         phi_star=result.phi_star,
-        sigma2=sigma2,
-        cheeger_lower=gap / 2.0,
-        cheeger_upper=math.sqrt(max(2.0 * gap, 0.0)),
+        sigma2=lambda2_msym,
+        cheeger_lower=mu2 / 2.0,
+        cheeger_upper=math.sqrt(max(2.0 * mu2, 0.0)),
+        improved_upper=improved_upper,
+        bracket_width=math.sqrt(max(2.0 * mu2, 0.0)) - mu2 / 2.0,
+        **dual,
     )
 
 
@@ -434,6 +484,8 @@ def compute_cheeger_features_matrix_free(
     """Compute CheegerFeatures via matrix-free SVD + vectorized sweep."""
     L = Q.shape[0]
     device = Q.device
+    if L < 2:
+        return CheegerFeatures()
     k = min(max(rank, 2), L - 1)
 
     def matvec(v):
@@ -450,7 +502,6 @@ def compute_cheeger_features_matrix_free(
         U_svd, S, V_svd = randomized_svd(matvec, matvec_t, L, k, device=str(device))
 
     S_sorted, sort_idx = torch.sort(S, descending=True)
-    sigma2 = S_sorted[1].item() if len(S_sorted) > 1 else 0.0
     idx2 = sort_idx[1] if len(sort_idx) > 1 else 0
     u2 = U_svd[:, idx2]
     v2 = V_svd[:, idx2]
@@ -458,12 +509,30 @@ def compute_cheeger_features_matrix_free(
     result = bipartite_sweep_conductance_matrix_free(
         u2, v2, Q, K, d_k_inv_sqrt, scale, block_size, causal=causal
     )
-    gap = 1.0 - sigma2
+
+    # Cheeger bracket requires eigenvalues of M_sym, NOT singular values of M.
+    def msym_mv(v):
+        return matvec_Msym_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal)
+
+    evals_top, _ = hermitian_lanczos(
+        msym_mv, L, 2, max(10, k * 3), str(device), which="largest", dtype=Q.dtype,
+    )
+    lambda2_msym = float(evals_top[1]) if len(evals_top) > 1 else 0.0
+    mu2 = max(1.0 - lambda2_msym, 0.0)
+
+    evals_min, _ = hermitian_lanczos(
+        msym_mv, L, 1, 5, str(device), which="smallest", dtype=Q.dtype,
+    )
+    lambda_min = float(evals_min[0])
+    dual = _dual_cheeger_fields(lambda_min)
+
     return CheegerFeatures(
         phi_star=result.phi_star,
-        sigma2=sigma2,
-        cheeger_lower=gap / 2.0,
-        cheeger_upper=math.sqrt(max(2.0 * gap, 0.0)),
+        sigma2=lambda2_msym,
+        cheeger_lower=mu2 / 2.0,
+        cheeger_upper=math.sqrt(max(2.0 * mu2, 0.0)),
+        bracket_width=math.sqrt(max(2.0 * mu2, 0.0)) - mu2 / 2.0,
+        **dual,
     )
 
 

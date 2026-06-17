@@ -17,6 +17,7 @@ At configurable intervals during inference, `glassbox` computes features from di
 3. **tracker** — Span-independent features from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))` — [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348)
 4. **selfattn** — Self-attention features from the diagonal of `A` — [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024)
 5. **laplacian** — Spectral features from the in-degree graph Laplacian `L = D_in - A` — [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals) (EMNLP 2025, [arXiv:2502.17598](https://arxiv.org/abs/2502.17598))
+6. **cheeger** — Bipartite sweep conductance from Fiedler vectors of `M`, with three configurable modes (batch, streaming, light) — Dahlem et al. (upcoming)
 
 For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
 
@@ -248,6 +249,62 @@ The two-tier approach reuses existing blocked-streaming infrastructure: `apply_A
 The paper also constructs a **multi-layer graph** where layers are connected by vertical edges weighted by the next layer's self-attention diagonal. This gives richer features but requires cross-layer aggregation; the current implementation covers the single-layer case. The multi-layer variant is planned as a post-processing step over emitted per-layer features.
 
 Implementation: `glassbox/laplacian_eigvals.py`. Reference: [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals).
+
+### 6. Cheeger signal — bipartite sweep conductance (post-softmax attention) — Dahlem et al. (upcoming)
+
+The Cheeger diagnostic measures how close the attention routing is to a bottleneck — a near-rank-1 regime where almost all attention mass flows through a single mode. It works on the same degree-normalized operator `M = D_Q^{-1/2} A D_K^{-1/2}` as the routing signal, but instead of reporting singular values directly, it computes the **Cheeger bracket**: a nested interval that bounds the true bipartite conductance `φ*`.
+
+**The bracket.** Let `λ₂` be the second-largest eigenvalue of the symmetric part `M_sym = (M + M^T)/2`, and `μ₂ = 1 − λ₂` the spectral gap. The classical bipartite Cheeger inequality gives:
+
+```
+μ₂/2  ≤  φ*  ≤  √(2μ₂)
+```
+
+The diagnostic emits this bracket at three tiers of increasing cost and tightness:
+
+| Tier | Requires | Produces | Cost |
+|------|----------|----------|------|
+| **1 (always-on)** | `λ₂(M_sym)` only | `cheeger_lower`, `cheeger_upper` from the classical inequality | One eigenproblem or Lanczos call (k=2) |
+| **2 (gap-guarded)** | Fiedler eigenvector + sweep | `phi_star` (exact sweep conductance), `phi_hat` (tight upper) | Full SVD + O(L) sweep |
+| **3 (fallback)** | Higher-order eigenvalues | `improved_upper` via KLGT bound: `O(k) · μ₂ / √μ_{k+1}` | Reuses Lanczos eigenvalues |
+
+**Why the upper bound matters.** The lower bound `μ₂/2 ≤ φ*` certifies that conductance is *large* — it rules a bottleneck *out*. The upper bound certifies conductance is *small* — it's the direction that fires an alarm. A closed aperture or injection sink is a low-conductance bottleneck, so the failure signal lives in the upper tail.
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `phi_star` | Bipartite sweep on Fiedler vector of `M` | Exact sweep conductance. `None` in light mode |
+| `sigma2` | `λ₂(M_sym)` | Second-largest eigenvalue of `M_sym` — spectral gap measure |
+| `cheeger_lower` | `(1 − σ₂) / 2` | Tier 1 lower bound on φ* |
+| `cheeger_upper` | `√(2(1 − σ₂))` | Tier 1 upper bound on φ* |
+| `phi_hat` | Sweep conductance when gap-healthy | Tier 2 tight upper (equals `phi_star` when available) |
+| `improved_upper` | `min_k k · μ₂ / √μ_{k+1}` (KLGT, adaptive) | Tier 3 fallback upper — adaptive k selection minimizes the bound |
+| `bracket_width` | `cheeger_upper − cheeger_lower` | Confidence signal — narrow = informative, wide = recompute needed |
+| `spectral_gap` | `λ₂ − λ₃` of `M_sym` | Gap health for Davis-Kahan stability of the Fiedler vector |
+| `recomputed` | boolean | Whether a full recompute was triggered this window |
+| `lambda_min` | `λ_min(M_sym)` | Smallest eigenvalue of `M_sym` — drives bipartiteness diagnostic |
+| `dual_gap` | `1 + λ_min` | Bipartiteness spectral gap (Bauer-Jost 2013). 0 = perfectly bipartite |
+| `dual_cheeger_lower` | `dual_gap / 2` | Lower bound on dual Cheeger constant β |
+| `dual_cheeger_upper` | `√(2 · dual_gap)` | Upper bound on dual Cheeger constant β |
+
+**Three modes.** The `mode` config parameter selects the cost/accuracy tradeoff:
+
+- **`batch`** (default) — Full SVD + sweep every window. Produces `phi_star`, `sigma2`, and the full bracket. The most accurate option; use for offline analysis or when interval spacing amortizes the cost.
+- **`streaming`** — Bordered Rayleigh-Ritz (BRR) amortization between full Lanczos recomputes. Carries a Ritz basis across decode steps and triggers full recompute on spectral-gap collapse, degree-shift, or geometric stride. Best for unbounded autoregressive decode where the window grows per token.
+- **`light`** — Quick `σ₂` estimation → tier-1 gap-free bounds only. No sweep cut, no `phi_star`. Cheapest option for high-frequency spectral health monitoring.
+
+**Streaming controller parameters** (only used when `mode="streaming"`):
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `gap_threshold` | 0.05 | `λ₂ − λ₃` floor — trigger full recompute when gap narrows below this |
+| `degree_shift_threshold` | 0.1 | Mean degree-ratio shift between consecutive windows — trigger on structural change |
+| `geometric_base` | 2.0 | Geometric stride multiplier — forces periodic recompute even if triggers don't fire |
+| `ritz_rank` | 3 | Number of Ritz vectors carried forward in BRR |
+| `n_explore` | 2 | Random exploration vectors added to BRR basis each step |
+| `lanczos_iters` | 20 | Krylov iterations for full Lanczos recompute |
+| `improved_cheeger_k` | 4 | Max eigenvalues for KLGT bound — adaptive k selection picks the tightest |
+
+Implementation: `glassbox/cheeger.py` (sweep + bounds), `glassbox/diagnostics/cheeger.py` (three-mode controller), `glassbox/svd.py` (`bordered_rayleigh_ritz`, `hermitian_lanczos`).
 
 ### More features coming soon
 

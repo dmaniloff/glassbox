@@ -116,7 +116,19 @@ class LaplacianConfig(BaseModel):
 
 
 class CheegerConfig(BaseModel):
-    """Cheeger sweep conductance from bipartite Fiedler vectors of M."""
+    """Cheeger sweep conductance from bipartite Fiedler vectors of M.
+
+    Three modes:
+      batch (default): Full SVD + sweep each window → accurate φ*, σ₂,
+          full bracket.  The actionable bottleneck signal.
+      streaming: Bordered Rayleigh-Ritz amortization between full
+          recomputes.  Carries Ritz basis across decode steps; triggers
+          full recompute on gap/degree-shift/geometric stride.  Best for
+          unbounded decode where the window grows per token.
+      light: Quick σ₂ estimation → gap-free bounds only (tier 1).
+          No sweep cut, no φ*.  Cheapest option for high-frequency
+          spectral health monitoring.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -129,14 +141,15 @@ class CheegerConfig(BaseModel):
     block_size: int = 256
     causal: bool = True
 
-    # Streaming controller (opt-in; False = batch-only, backward compat)
-    streaming: bool = False
+    mode: Literal["batch", "streaming", "light"] = "batch"
+
+    # Streaming controller parameters (only used when mode="streaming")
     ritz_rank: int = 3
     n_explore: int = 2
-    gap_threshold: float = 0.01
+    gap_threshold: float = 0.05
     degree_shift_threshold: float = 0.1
-    geometric_base: float = 1.5
-    lanczos_iters: int = 30
+    geometric_base: float = 2.0
+    lanczos_iters: int = 20
     improved_cheeger_k: int = 4
 
 
