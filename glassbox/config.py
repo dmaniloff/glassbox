@@ -129,6 +129,16 @@ class CheegerConfig(BaseModel):
     block_size: int = 256
     causal: bool = True
 
+    # Streaming controller (opt-in; False = batch-only, backward compat)
+    streaming: bool = False
+    ritz_rank: int = 3
+    n_explore: int = 2
+    gap_threshold: float = 0.01
+    degree_shift_threshold: float = 0.1
+    geometric_base: float = 1.5
+    lanczos_iters: int = 30
+    improved_cheeger_k: int = 4
+
 
 class OutputConfig(BaseModel):
     """Feature logging pipeline — write full snapshots for training/analysis."""

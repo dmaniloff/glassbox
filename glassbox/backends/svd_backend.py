@@ -350,7 +350,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 if diag is None:
                     continue
 
-                result = diag.reduce(Qh, Kh, L)
+                result = diag.reduce(Qh, Kh, L, prior_state=state.accum.get(sig_name))
+                result["step"] = state.step
                 features = result["features"]
 
                 state.accum[sig_name] = diag.accumulate(result, state.accum.get(sig_name))

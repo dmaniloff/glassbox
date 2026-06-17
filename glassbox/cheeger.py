@@ -35,6 +35,29 @@ from glassbox.svd import (
 )
 
 
+def compute_improved_cheeger_upper(eigenvalues: torch.Tensor, k: int = 4) -> float | None:
+    """Kwok-Lau-Lee-Gharan-Trevisan improved Cheeger upper bound.
+
+    Uses higher-order eigenvalues to give a tighter upper bound than
+    sqrt(2*mu2) when the spectral gap is small. The bound is:
+        phi* <= O(k) * mu2 / sqrt(mu_{k+1})
+    where mu_i = 1 - lambda_i are the normalized Laplacian gaps.
+
+    Args:
+        eigenvalues: Eigenvalues of M_sym sorted descending (largest first).
+        k: Order of the higher-order Cheeger bound.
+
+    Returns:
+        Improved upper bound, or None if insufficient eigenvalues.
+    """
+    if len(eigenvalues) < 3:
+        return None
+    mu2 = max(1.0 - float(eigenvalues[1]), 0.0)
+    idx_kp1 = min(k, len(eigenvalues) - 1)
+    mu_kp1 = max(1.0 - float(eigenvalues[idx_kp1]), 1e-12)
+    return float(k) * mu2 / (mu_kp1 ** 0.5)
+
+
 @dataclass
 class SweepResult:
     """Result of a bipartite sweep conductance computation."""

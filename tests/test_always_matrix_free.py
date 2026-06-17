@@ -37,14 +37,14 @@ class TestAlwaysMatrixFreeConfig:
 
     def test_from_cli_args_threshold_zero(self):
         cfg = GlassboxConfig.from_cli_args(
-            signals=("routing", "tracker", "selfattn", "laplacian"),
+            signals=("routing", "tracker", "selfattn", "laplacian", "cheeger"),
             threshold=0,
         )
         for sig in THRESHOLD_SIGNALS:
             assert getattr(cfg, sig).threshold == 0
 
     def test_threshold_signals_complete(self):
-        assert THRESHOLD_SIGNALS == {"routing", "tracker", "selfattn", "laplacian"}
+        assert THRESHOLD_SIGNALS == {"routing", "tracker", "selfattn", "laplacian", "cheeger"}
 
 
 class TestRoutingAlwaysMatrixFree:

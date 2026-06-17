@@ -197,19 +197,25 @@ class LaplacianFeatures(BaseModel):
 
 
 class CheegerFeatures(BaseModel):
-    """Features from bipartite sweep conductance of M.
+    """Three-tier Cheeger bracket from bipartite sweep conductance of M.
 
-    Computes the empirical Cheeger constant φ* via sweep cut over
-    the 2nd singular vectors [u₂; v₂] of M, plus the spectral
-    Cheeger inequality bracket.
+    Bracket: (1-sigma2)/2 <= phi* <= phi_hat <= sqrt(2*(1-sigma2))
+    Tier 1 (always-on): cheeger_lower, cheeger_upper from sigma2 alone.
+    Tier 2 (gap-guarded): phi_hat from Fiedler sweep, tighter upper bound.
+    Tier 3 (fallback): improved_upper via higher-order Cheeger (KLGT bound).
     """
 
     model_config = ConfigDict(frozen=True)
 
     phi_star: float = Field(description="Bipartite sweep conductance (min over Fiedler sweep).")
-    sigma2: float | None = Field(None, description="Second singular value of M.")
-    cheeger_lower: float | None = Field(None, description="Cheeger lower bound: (1 - sigma2) / 2.")
-    cheeger_upper: float | None = Field(None, description="Cheeger upper bound: sqrt(2 * (1 - sigma2)).")
+    sigma2: float | None = Field(None, description="Second singular value of M (or eigenvalue of M_sym).")
+    cheeger_lower: float | None = Field(None, description="Tier 1 lower: (1 - sigma2) / 2.")
+    cheeger_upper: float | None = Field(None, description="Tier 1 upper: sqrt(2 * (1 - sigma2)).")
+    phi_hat: float | None = Field(None, description="Tier 2: sweep conductance when gap-healthy.")
+    improved_upper: float | None = Field(None, description="Tier 3: KLGT bound O(k)*mu2/sqrt(mu_{k+1}).")
+    bracket_width: float | None = Field(None, description="cheeger_upper - cheeger_lower (confidence signal).")
+    spectral_gap: float | None = Field(None, description="lambda2 - lambda3 from M_sym eigenproblem.")
+    recomputed: bool = Field(False, description="Whether a full recompute was triggered this window.")
 
 
 class SVDSnapshot(BaseModel):
