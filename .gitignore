@@ -1,6 +1,7 @@
 TODO.org
 experiments/results/
 benchmarks/results/
+benchmarks/fixtures/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

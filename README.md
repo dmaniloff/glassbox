@@ -17,6 +17,7 @@ At configurable intervals during inference, `glassbox` computes features from di
 3. **tracker** — Span-independent features from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))` — [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348)
 4. **selfattn** — Self-attention features from the diagonal of `A` — [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024)
 5. **laplacian** — Spectral features from the in-degree graph Laplacian `L = D_in - A` — [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals) (EMNLP 2025, [arXiv:2502.17598](https://arxiv.org/abs/2502.17598))
+6. **cheeger** — Bipartite sweep conductance from Fiedler vectors of `M`, with three configurable modes (batch, streaming, light) — Dahlem et al. (upcoming)
 
 For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
 
@@ -54,12 +55,58 @@ The package registers itself through vLLM's plugin entrypoint and exposes a `CUS
 At runtime, the backend:
 
 1. Calls the normal Triton attention implementation unchanged.
-2. Captures and accumulates `Q` slices across prefill and decode for the active sequence.
+2. Captures and accumulates `Q` slices across prefill and decode for the active sequence, subject to the configured buffer policy.
 3. Extracts `K` from vLLM's paged KV cache when a snapshot is due.
-4. Runs matrix-free SVD and optional routing analysis.
-5. Emits JSONL rows with feature snapshots.
+4. Dispatches to `Diagnostic.reduce()` for each enabled signal, optionally calling `Diagnostic.accumulate()` to merge local results into a running global state.
+5. Emits snapshots via the handler pipeline (JSONL, OTel, or custom).
 
 This lets you observe attention structure during real generation rather than in a separate offline re-run.
+
+## Streaming Diagnostics
+
+For long or unbounded sequences, retaining the full Q buffer is impractical (O(L·H·d) per layer). Glassbox supports windowed Q-buffer management via two policies, controlled by `q_buffer_max_tokens` and `q_buffer_mode`:
+
+### Sliding window (default)
+
+```yaml
+q_buffer_max_tokens: 512
+q_buffer_mode: sliding
+```
+
+The buffer keeps the last `W` tokens. Each decode step appends one token and trims the oldest. Diagnostics fire per their configured `interval`, so consecutive observations overlap by `W - interval` tokens. This is the natural mode for continuous monitoring.
+
+### Tumbling window
+
+```yaml
+q_buffer_max_tokens: 512
+q_buffer_mode: tumbling
+```
+
+The buffer accumulates until it reaches `W` tokens, then fires all enabled signals and flushes. The window size is the cadence — per-signal `interval` is ignored. Consecutive windows are non-overlapping, which gives **window independence**: each `reduce()` call sees a disjoint block of the sequence.
+
+This matters for streaming accumulation proofs. Many merge strategies (running means, sketches, decomposition additivity) require that local statistics come from independent blocks. Tumbling mode provides that guarantee at the backend level.
+
+### The Diagnostic protocol
+
+Each signal implements the `Diagnostic` protocol (`glassbox/diagnostic.py`):
+
+| Method | Purpose |
+|--------|---------|
+| `reduce(Qh, Kh, L)` | Compute local scalar features from the current window |
+| `witness(Qh, Kh, L)` | Per-token localization vector (optional, `emit_witness=True`) |
+| `accumulate(local, state)` | Merge a local `reduce()` result into a running global state |
+
+`reduce()` is always correct for the window it sees — the SVD, Hodge decomposition, or Laplacian eigenvalues of the windowed attention submatrix are exact. The question is whether accumulated global statistics are meaningful, which depends on the accumulation strategy.
+
+Currently `accumulate()` returns the latest local result (no merge). The actual merge logic — proving that specific local→global strategies are correct for each signal — is the contribution of companion streaming papers. The backend provides the windowing modes and accumulation plumbing those papers need.
+
+### When to use which mode
+
+| Scenario | Mode | Why |
+|----------|------|-----|
+| Online monitoring, sliding-window anomaly detection | `sliding` | Overlapping windows give smoother signal, per-signal intervals allow different cadences |
+| Training streaming accumulators, local→global correctness proofs | `tumbling` | Non-overlapping windows give independence, simplifies merge math |
+| Unbounded (full sequence) | Either with `q_buffer_max_tokens=0` | Buffer grows with sequence length, statistics are global |
 
 ## How We Avoid Materializing The Full `L x L` Matrix
 
@@ -109,8 +156,11 @@ In practice:
 
 - if `L <= threshold`, use a materialized path
 - if `L > threshold`, use blocked matrix-free operators
+- if `threshold = 0`, **always** use the matrix-free path (no `L×L` allocation)
 
-That behavior is implemented in `_run_svd_routing()` in `glassbox/backends/svd_backend.py`.
+The `threshold` setting is a speed knob, not a correctness one — both tiers produce equivalent results within numerical tolerance. Set `threshold=0` when you need a hard guarantee that no full attention matrix is ever materialized (e.g., memory-constrained deployments or streaming with large windows).
+
+That behavior is implemented in each threshold-based diagnostic's `reduce()` method (routing, tracker, selfattn, laplacian).
 
 ### 5. On-demand entry lookup for curl estimates
 
@@ -199,6 +249,62 @@ The two-tier approach reuses existing blocked-streaming infrastructure: `apply_A
 The paper also constructs a **multi-layer graph** where layers are connected by vertical edges weighted by the next layer's self-attention diagonal. This gives richer features but requires cross-layer aggregation; the current implementation covers the single-layer case. The multi-layer variant is planned as a post-processing step over emitted per-layer features.
 
 Implementation: `glassbox/laplacian_eigvals.py`. Reference: [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals).
+
+### 6. Cheeger signal — bipartite sweep conductance (post-softmax attention) — Dahlem et al. (upcoming)
+
+The Cheeger diagnostic measures how close the attention routing is to a bottleneck — a near-rank-1 regime where almost all attention mass flows through a single mode. It works on the same degree-normalized operator `M = D_Q^{-1/2} A D_K^{-1/2}` as the routing signal, but instead of reporting singular values directly, it computes the **Cheeger bracket**: a nested interval that bounds the true bipartite conductance `φ*`.
+
+**The bracket.** Let `λ₂` be the second-largest eigenvalue of the symmetric part `M_sym = (M + M^T)/2`, and `μ₂ = 1 − λ₂` the spectral gap. The classical bipartite Cheeger inequality gives:
+
+```
+μ₂/2  ≤  φ*  ≤  √(2μ₂)
+```
+
+The diagnostic emits this bracket at three tiers of increasing cost and tightness:
+
+| Tier | Requires | Produces | Cost |
+|------|----------|----------|------|
+| **1 (always-on)** | `λ₂(M_sym)` only | `cheeger_lower`, `cheeger_upper` from the classical inequality | One eigenproblem or Lanczos call (k=2) |
+| **2 (gap-guarded)** | Fiedler eigenvector + sweep | `phi_star` (exact sweep conductance), `phi_hat` (tight upper) | Full SVD + O(L) sweep |
+| **3 (fallback)** | Higher-order eigenvalues | `improved_upper` via KLGT bound: `O(k) · μ₂ / √μ_{k+1}` | Reuses Lanczos eigenvalues |
+
+**Why the upper bound matters.** The lower bound `μ₂/2 ≤ φ*` certifies that conductance is *large* — it rules a bottleneck *out*. The upper bound certifies conductance is *small* — it's the direction that fires an alarm. A closed aperture or injection sink is a low-conductance bottleneck, so the failure signal lives in the upper tail.
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `phi_star` | Bipartite sweep on Fiedler vector of `M` | Exact sweep conductance. `None` in light mode |
+| `sigma2` | `λ₂(M_sym)` | Second-largest eigenvalue of `M_sym` — spectral gap measure |
+| `cheeger_lower` | `(1 − σ₂) / 2` | Tier 1 lower bound on φ* |
+| `cheeger_upper` | `√(2(1 − σ₂))` | Tier 1 upper bound on φ* |
+| `phi_hat` | Sweep conductance when gap-healthy | Tier 2 tight upper (equals `phi_star` when available) |
+| `improved_upper` | `min_k k · μ₂ / √μ_{k+1}` (KLGT, adaptive) | Tier 3 fallback upper — adaptive k selection minimizes the bound |
+| `bracket_width` | `cheeger_upper − cheeger_lower` | Confidence signal — narrow = informative, wide = recompute needed |
+| `spectral_gap` | `λ₂ − λ₃` of `M_sym` | Gap health for Davis-Kahan stability of the Fiedler vector |
+| `recomputed` | boolean | Whether a full recompute was triggered this window |
+| `lambda_min` | `λ_min(M_sym)` | Smallest eigenvalue of `M_sym` — drives bipartiteness diagnostic |
+| `dual_gap` | `1 + λ_min` | Bipartiteness spectral gap (Bauer-Jost 2013). 0 = perfectly bipartite |
+| `dual_cheeger_lower` | `dual_gap / 2` | Lower bound on dual Cheeger constant β |
+| `dual_cheeger_upper` | `√(2 · dual_gap)` | Upper bound on dual Cheeger constant β |
+
+**Three modes.** The `mode` config parameter selects the cost/accuracy tradeoff:
+
+- **`batch`** (default) — Full SVD + sweep every window. Produces `phi_star`, `sigma2`, and the full bracket. The most accurate option; use for offline analysis or when interval spacing amortizes the cost.
+- **`streaming`** — Bordered Rayleigh-Ritz (BRR) amortization between full Lanczos recomputes. Carries a Ritz basis across decode steps and triggers full recompute on spectral-gap collapse, degree-shift, or geometric stride. Best for unbounded autoregressive decode where the window grows per token.
+- **`light`** — Quick `σ₂` estimation → tier-1 gap-free bounds only. No sweep cut, no `phi_star`. Cheapest option for high-frequency spectral health monitoring.
+
+**Streaming controller parameters** (only used when `mode="streaming"`):
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `gap_threshold` | 0.05 | `λ₂ − λ₃` floor — trigger full recompute when gap narrows below this |
+| `degree_shift_threshold` | 0.1 | Mean degree-ratio shift between consecutive windows — trigger on structural change |
+| `geometric_base` | 2.0 | Geometric stride multiplier — forces periodic recompute even if triggers don't fire |
+| `ritz_rank` | 3 | Number of Ritz vectors carried forward in BRR |
+| `n_explore` | 2 | Random exploration vectors added to BRR basis each step |
+| `lanczos_iters` | 20 | Krylov iterations for full Lanczos recompute |
+| `improved_cheeger_k` | 4 | Max eigenvalues for KLGT bound — adaptive k selection picks the tightest |
+
+Implementation: `glassbox/cheeger.py` (sweep + bounds), `glassbox/diagnostics/cheeger.py` (three-mode controller), `glassbox/svd.py` (`bordered_rayleigh_ritz`, `hermitian_lanczos`).
 
 ### More features coming soon
 
@@ -384,6 +490,11 @@ output:
 
 emit:
   otel: false
+
+# Q-buffer windowing (streaming diagnostics)
+q_buffer_max_tokens: 0      # 0 = unbounded (full sequence)
+q_buffer_mode: sliding       # "sliding" or "tumbling"
+emit_witness: false          # attach per-token localization vectors
 ```
 
 Important knobs:
@@ -395,22 +506,25 @@ Important knobs:
 | `spectral.method` | `randomized` or `lanczos` |
 | `spectral.heads` | Heads to analyze |
 | `routing.enabled` | Turn on routing analysis |
-| `routing.threshold` | Sequence length cutoff for materialized vs matrix-free execution |
+| `routing.threshold` | Sequence length cutoff for materialized vs matrix-free (0 = always matrix-free) |
 | `routing.block_size` | Row-block size for blocked operators |
 | `tracker.enabled` | Turn on raw attention matrix analysis |
-| `tracker.threshold` | Sequence length cutoff for materialized vs matrix-free |
+| `tracker.threshold` | Sequence length cutoff for materialized vs matrix-free (0 = always matrix-free) |
 | `selfattn.enabled` | Turn on attention diagonal analysis |
 | `selfattn.interval` | Snapshot cadence for diagonal features |
 | `selfattn.heads` | Heads to analyze |
 | `selfattn.top_k` | Number of top diagonal values to keep (0 = omit eigvals) |
-| `selfattn.threshold` | Sequence length cutoff for materialized vs matrix-free |
+| `selfattn.threshold` | Sequence length cutoff for materialized vs matrix-free (0 = always matrix-free) |
 | `laplacian.enabled` | Turn on Laplacian eigenvalue analysis |
 | `laplacian.interval` | Snapshot cadence for Laplacian features |
 | `laplacian.heads` | Heads to analyze |
 | `laplacian.top_k` | Number of top eigenvalues to keep |
-| `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free |
+| `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free (0 = always matrix-free) |
 | `output.path` | JSONL output path (feature logging pipeline) |
 | `emit.otel` | Emit snapshots as OpenTelemetry spans (inference pipeline) |
+| `q_buffer_max_tokens` | Max Q-buffer tokens per layer (0 = unbounded). Bounds memory to O(W·H·d) per layer |
+| `q_buffer_mode` | `sliding` (overlapping, trim oldest) or `tumbling` (non-overlapping, flush after fire) |
+| `emit_witness` | Attach per-token localization vectors to snapshots (O(L) per snapshot when on) |
 
 ## Running Glassbox
 
@@ -454,7 +568,7 @@ glassbox-run \
   --prompt "The future of artificial intelligence is"
 ```
 
-Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`. Settings can also be loaded from a `glassbox.yaml` in the working directory.
+Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`, `--q-buffer-max-tokens`, `--q-buffer-mode`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`. Settings can also be loaded from a `glassbox.yaml` in the working directory.
 
 ### `glassbox-extract` — offline feature extraction
 

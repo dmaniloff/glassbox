@@ -315,6 +315,226 @@ def lanczos(operator, dim, k, iters, device):
     return evals, ritz_vectors
 
 
+def _working_dtype(native_dtype):
+    if native_dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return native_dtype
+
+
+def _real_dtype(working_dtype):
+    if working_dtype in (torch.complex128, torch.float64):
+        return torch.float64
+    return torch.float32
+
+
+def hermitian_lanczos(
+    matvec, dim, k, iters, device, which="largest", dtype=None, initial_vectors=None
+):
+    """Top/bottom-k eigenpairs of a Hermitian operator via Lanczos.
+
+    Supports real and complex dtypes.  Uses conjugated inner products
+    (torch.vdot) so it works correctly for complex-Hermitian H.
+
+    Args:
+        matvec: v -> H @ v, callable on 1-D tensors of length `dim`.
+        dim:    Dimension of the operator.
+        k:      Number of eigenvalues/eigenvectors to return.
+        iters:  Number of Lanczos iterations.
+        device: Torch device string.
+        which:  ``"largest"`` (default) or ``"smallest"``.
+        dtype:  Native dtype of the operator (None → float32).
+        initial_vectors: Optional (dim, p) tensor to seed the Krylov
+            subspace.  The first column (after QR) becomes the starting
+            vector, biasing convergence toward that direction.
+
+    Returns:
+        eigenvalues:  (k,) real tensor (float32 or float64).
+        eigenvectors: (dim, k) tensor in *dtype*.
+    """
+    if which not in ("smallest", "largest"):
+        raise ValueError(f"which must be 'smallest' or 'largest', got '{which}'")
+
+    native_dtype = dtype or torch.float32
+    work_dt = _working_dtype(native_dtype)
+    real_dt = _real_dtype(work_dt)
+
+    if k <= 0 or dim <= 0:
+        return torch.empty(0, device=device, dtype=real_dt), torch.empty(
+            dim, 0, device=device, dtype=native_dtype
+        )
+
+    k = min(k, dim)
+    iters = min(iters, dim)
+
+    V = torch.empty(dim, iters + 1, device=device, dtype=work_dt)
+    alphas = torch.empty(iters, device=device, dtype=real_dt)
+    betas_arr = torch.empty(iters, device=device, dtype=real_dt)
+
+    if initial_vectors is not None:
+        init = initial_vectors.to(work_dt)
+        if init.ndim == 1:
+            init = init.unsqueeze(1)
+        if init.shape[0] != dim:
+            raise ValueError(
+                f"initial_vectors dim {init.shape[0]} != operator dim {dim}"
+            )
+        Q_init, _ = torch.linalg.qr(init, mode="reduced")
+        V[:, 0] = Q_init[:, 0]
+    else:
+        q = torch.randn(dim, device=device, dtype=work_dt)
+        V[:, 0] = q / torch.linalg.norm(q)
+
+    beta = 0.0
+    m = 0
+
+    for j in range(iters):
+        z = matvec(V[:, j].to(native_dtype)).to(work_dt)
+
+        alpha = torch.vdot(V[:, j], z).real
+        alphas[j] = alpha
+
+        z = z - alpha * V[:, j]
+        if j > 0:
+            z = z - beta * V[:, j - 1]
+
+        # CGS reorthogonalization
+        coeffs = V[:, : j + 1].conj().T @ z
+        z = z - V[:, : j + 1] @ coeffs
+
+        beta = torch.linalg.norm(z).item()
+        if beta < 1e-8:
+            m = j + 1
+            break
+
+        betas_arr[j] = beta
+        V[:, j + 1] = z / beta
+        m = j + 1
+
+    if m == 0:
+        return torch.empty(0, device=device, dtype=real_dt), torch.empty(
+            dim, 0, device=device, dtype=native_dtype
+        )
+
+    T = torch.zeros(m, m, device=device, dtype=real_dt)
+    T.diagonal().copy_(alphas[:m])
+    if m > 1:
+        T.diagonal(1).copy_(betas_arr[: m - 1])
+        T.diagonal(-1).copy_(betas_arr[: m - 1])
+
+    evals, evecs = torch.linalg.eigh(T)
+
+    k = min(k, m)
+    if which == "smallest":
+        sel_evals = evals[:k]
+        sel_evecs = evecs[:, :k]
+    else:
+        sel_evals = evals[-k:].flip(0)
+        sel_evecs = evecs[:, -k:].flip(1)
+
+    ritz_vectors = (V[:, :m] @ sel_evecs.to(V.dtype)).to(native_dtype)
+    return sel_evals, ritz_vectors
+
+
+def bordered_rayleigh_ritz(
+    matvec,
+    dim_new,
+    basis_prev,
+    k,
+    n_explore=2,
+    device="cpu",
+    which="largest",
+    dtype=None,
+):
+    """Update eigenpairs via bordered Rayleigh-Ritz projection.
+
+    Projects a Hermitian operator onto the subspace spanned by the
+    (padded/truncated) prior Ritz basis plus random exploration vectors,
+    then solves the small projected eigenproblem.
+
+    Args:
+        matvec: v -> H_new @ v, Hermitian operator on vectors of length dim_new.
+        dim_new: Dimension of the new operator.
+        basis_prev: Previous Ritz basis, shape (dim_prev, r).
+        k: Number of eigenpairs to return.
+        n_explore: Number of random exploration vectors to augment the basis.
+        device: Torch device string.
+        which: ``"largest"`` or ``"smallest"``.
+        dtype: Native dtype (None -> float32).
+
+    Returns:
+        eigenvalues: (k,) real tensor.
+        eigenvectors: (dim_new, k) tensor.
+        all_projected_evals: all eigenvalues of the projected problem (for gap monitoring).
+    """
+    if which not in ("smallest", "largest"):
+        raise ValueError(f"which must be 'smallest' or 'largest', got '{which}'")
+
+    native_dtype = dtype or torch.float32
+    work_dt = _working_dtype(native_dtype)
+    real_dt = _real_dtype(work_dt)
+
+    if basis_prev.ndim == 1:
+        basis_prev = basis_prev.unsqueeze(1)
+
+    dim_prev, r = basis_prev.shape
+    basis_prev = basis_prev.to(device=device, dtype=work_dt)
+
+    # Adapt basis to new dimension
+    if dim_new > dim_prev:
+        V_adapted = torch.zeros(dim_new, r, device=device, dtype=work_dt)
+        V_adapted[:dim_prev] = basis_prev
+    elif dim_new < dim_prev:
+        V_adapted = basis_prev[:dim_new]
+    else:
+        V_adapted = basis_prev.clone()
+
+    # Add exploration vectors
+    if n_explore > 0:
+        V_explore = torch.randn(dim_new, n_explore, device=device, dtype=work_dt)
+        V_aug = torch.cat([V_adapted, V_explore], dim=1)
+    else:
+        V_aug = V_adapted
+
+    # QR orthonormalize — drop rank-deficient columns
+    V_orth, R = torch.linalg.qr(V_aug, mode="reduced")
+    diag_abs = R.diagonal().abs()
+    keep = diag_abs > 1e-10
+    if not keep.all():
+        V_orth = V_orth[:, keep]
+
+    m = V_orth.shape[1]
+    if m == 0:
+        return (
+            torch.empty(0, device=device, dtype=real_dt),
+            torch.empty(dim_new, 0, device=device, dtype=native_dtype),
+            torch.empty(0, device=device, dtype=real_dt),
+        )
+
+    k = min(k, m)
+
+    # Project the operator: T = V_orth^H @ H @ V_orth
+    W = torch.empty(dim_new, m, device=device, dtype=work_dt)
+    for j in range(m):
+        W[:, j] = matvec(V_orth[:, j].to(native_dtype)).to(work_dt)
+    T = V_orth.conj().T @ W
+
+    # Symmetrize (numerical cleanup)
+    T = (T + T.conj().T) / 2
+    T = T.to(real_dt) if not native_dtype.is_complex else T
+
+    evals_proj, evecs_proj = torch.linalg.eigh(T)
+
+    if which == "smallest":
+        sel_evals = evals_proj[:k]
+        sel_evecs = evecs_proj[:, :k]
+    else:
+        sel_evals = evals_proj[-k:].flip(0)
+        sel_evecs = evecs_proj[:, -k:].flip(1)
+
+    eigenvectors = (V_orth @ sel_evecs.to(V_orth.dtype)).to(native_dtype)
+    return sel_evals, eigenvectors, evals_proj
+
+
 def _principal_angles(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     """
     Principal angles between column spaces of A and B.

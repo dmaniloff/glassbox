@@ -196,12 +196,41 @@ class LaplacianFeatures(BaseModel):
     eigvals: list[float] = Field(description="Top-k Laplacian diagonal values, sorted descending.")
 
 
+class CheegerFeatures(BaseModel):
+    """Three-tier Cheeger bracket from bipartite sweep conductance of M.
+
+    Bracket: (1-sigma2)/2 <= phi* <= phi_hat <= sqrt(2*(1-sigma2))
+    Tier 1 (always-on): cheeger_lower, cheeger_upper from sigma2 alone.
+    Tier 2 (gap-guarded): phi_hat from Fiedler sweep, tighter upper bound.
+    Tier 3 (fallback): improved_upper via higher-order Cheeger (KLGT bound).
+
+    In light mode, only tier 1 is populated (phi_star is None).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    phi_star: float | None = Field(None, description="Bipartite sweep conductance (None in light mode).")
+    sigma2: float | None = Field(None, description="Second largest eigenvalue of M_sym = (M+M^T)/2.")
+    cheeger_lower: float | None = Field(None, description="Tier 1 lower: (1 - sigma2) / 2.")
+    cheeger_upper: float | None = Field(None, description="Tier 1 upper: sqrt(2 * (1 - sigma2)).")
+    phi_hat: float | None = Field(None, description="Tier 2: sweep conductance when gap-healthy.")
+    improved_upper: float | None = Field(None, description="Tier 3: KLGT bound O(k)*mu2/sqrt(mu_{k+1}).")
+    bracket_width: float | None = Field(None, description="cheeger_upper - cheeger_lower (confidence signal).")
+    spectral_gap: float | None = Field(None, description="lambda2 - lambda3 from M_sym eigenproblem.")
+    recomputed: bool = Field(False, description="Whether a full recompute was triggered this window.")
+
+    # Dual Cheeger (Bauer-Jost 2013): bipartiteness diagnostic
+    lambda_min: float | None = Field(None, description="Smallest eigenvalue of M_sym.")
+    dual_gap: float | None = Field(None, description="1 + lambda_min (bipartiteness spectral gap).")
+    dual_cheeger_lower: float | None = Field(None, description="dual_gap / 2 (lower bound on beta).")
+    dual_cheeger_upper: float | None = Field(None, description="sqrt(2 * dual_gap) (upper bound on beta).")
+
+
 class SVDSnapshot(BaseModel):
     """One SVD observation emitted per (request, layer, head, step)."""
 
     model_config = ConfigDict(frozen=True)
 
-    # "spectral" | "routing" | "tracker" | "selfattn" | "laplacian"
     signal: str
     request_id: int
     layer: str
@@ -211,8 +240,14 @@ class SVDSnapshot(BaseModel):
     L: int
     singular_values: list[float] = []
     tier: str | None = None  # "materialized" | "matrix_free"
+    witness: list[float] | None = None
     features: (
-        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
+        SpectralFeatures
+        | RoutingFeatures
+        | TrackerFeatures
+        | SelfAttnFeatures
+        | LaplacianFeatures
+        | CheegerFeatures
     )
 
     def __repr__(self) -> str:
@@ -246,6 +281,8 @@ class SVDSnapshot(BaseModel):
                 d["features"] = SelfAttnFeatures(**feat_raw)
             elif sig == "laplacian":
                 d["features"] = LaplacianFeatures(**feat_raw)
+            elif sig == "cheeger":
+                d["features"] = CheegerFeatures(**feat_raw)
             else:
                 d["features"] = SpectralFeatures(**feat_raw)
         return cls(**d)
