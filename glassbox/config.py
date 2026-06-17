@@ -7,13 +7,13 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
-SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
+SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian", "cheeger"]
 
 # Signals that use SVD rank/method
-SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
+SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker", "cheeger"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
-THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian"}
+THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian", "cheeger"}
 
 
 def parse_signal_names(ctx, param, value):
@@ -115,6 +115,21 @@ class LaplacianConfig(BaseModel):
     causal: bool = True
 
 
+class CheegerConfig(BaseModel):
+    """Cheeger sweep conductance from bipartite Fiedler vectors of M."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    interval: int = 32
+    rank: int = 2
+    method: Literal["randomized", "lanczos"] = "randomized"
+    heads: list[int] = [0]
+    threshold: int = 512
+    block_size: int = 256
+    causal: bool = True
+
+
 class OutputConfig(BaseModel):
     """Feature logging pipeline — write full snapshots for training/analysis."""
 
@@ -149,6 +164,7 @@ class GlassboxConfig(BaseSettings):
     tracker: TrackerConfig = TrackerConfig()
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()
+    cheeger: CheegerConfig = CheegerConfig()
     output: OutputConfig = OutputConfig()
     emit: EmitConfig = EmitConfig()
     emit_witness: bool = False

@@ -183,6 +183,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             or self.config.tracker.enabled
             or self.config.selfattn.enabled
             or self.config.laplacian.enabled
+            or self.config.cheeger.enabled
         ):
             return result
 

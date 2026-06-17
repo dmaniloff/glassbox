@@ -1,5 +1,6 @@
 """Concrete Diagnostic implementations for each signal."""
 
+from glassbox.diagnostics.cheeger import CheegerDiagnostic
 from glassbox.diagnostics.laplacian import LaplacianDiagnostic
 from glassbox.diagnostics.routing import RoutingDiagnostic
 from glassbox.diagnostics.selfattn import SelfAttnDiagnostic
@@ -12,6 +13,7 @@ DIAGNOSTIC_REGISTRY: dict[str, type] = {
     "tracker": TrackerDiagnostic,
     "selfattn": SelfAttnDiagnostic,
     "laplacian": LaplacianDiagnostic,
+    "cheeger": CheegerDiagnostic,
 }
 
 __all__ = [
@@ -21,4 +23,5 @@ __all__ = [
     "TrackerDiagnostic",
     "SelfAttnDiagnostic",
     "LaplacianDiagnostic",
+    "CheegerDiagnostic",
 ]

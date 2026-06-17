@@ -196,12 +196,27 @@ class LaplacianFeatures(BaseModel):
     eigvals: list[float] = Field(description="Top-k Laplacian diagonal values, sorted descending.")
 
 
+class CheegerFeatures(BaseModel):
+    """Features from bipartite sweep conductance of M.
+
+    Computes the empirical Cheeger constant φ* via sweep cut over
+    the 2nd singular vectors [u₂; v₂] of M, plus the spectral
+    Cheeger inequality bracket.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    phi_star: float = Field(description="Bipartite sweep conductance (min over Fiedler sweep).")
+    sigma2: float | None = Field(None, description="Second singular value of M.")
+    cheeger_lower: float | None = Field(None, description="Cheeger lower bound: (1 - sigma2) / 2.")
+    cheeger_upper: float | None = Field(None, description="Cheeger upper bound: sqrt(2 * (1 - sigma2)).")
+
+
 class SVDSnapshot(BaseModel):
     """One SVD observation emitted per (request, layer, head, step)."""
 
     model_config = ConfigDict(frozen=True)
 
-    # "spectral" | "routing" | "tracker" | "selfattn" | "laplacian"
     signal: str
     request_id: int
     layer: str
@@ -213,7 +228,12 @@ class SVDSnapshot(BaseModel):
     tier: str | None = None  # "materialized" | "matrix_free"
     witness: list[float] | None = None
     features: (
-        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
+        SpectralFeatures
+        | RoutingFeatures
+        | TrackerFeatures
+        | SelfAttnFeatures
+        | LaplacianFeatures
+        | CheegerFeatures
     )
 
     def __repr__(self) -> str:
@@ -247,6 +267,8 @@ class SVDSnapshot(BaseModel):
                 d["features"] = SelfAttnFeatures(**feat_raw)
             elif sig == "laplacian":
                 d["features"] = LaplacianFeatures(**feat_raw)
+            elif sig == "cheeger":
+                d["features"] = CheegerFeatures(**feat_raw)
             else:
                 d["features"] = SpectralFeatures(**feat_raw)
         return cls(**d)

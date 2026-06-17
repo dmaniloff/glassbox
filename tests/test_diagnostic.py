@@ -7,6 +7,7 @@ from glassbox.config import GlassboxConfig
 from glassbox.diagnostic import Diagnostic
 from glassbox.diagnostics import (
     DIAGNOSTIC_REGISTRY,
+    CheegerDiagnostic,
     LaplacianDiagnostic,
     RoutingDiagnostic,
     SelfAttnDiagnostic,
@@ -35,6 +36,7 @@ class TestRegistry:
             "tracker",
             "selfattn",
             "laplacian",
+            "cheeger",
         }
 
     def test_protocol_conformance(self):
@@ -163,6 +165,54 @@ class TestSVDSnapshotWitness:
         )
         assert snap.witness == witness
         assert len(snap.witness) == 16
+
+
+class TestCheegerDiagnostic:
+    def test_reduce_materialized(self, qk):
+        Q, K = qk
+        diag = CheegerDiagnostic(rank=2, threshold=1024)
+        result = diag.reduce(Q, K, L)
+        assert "features" in result
+        assert result["tier"] == "materialized"
+        assert 0.0 <= result["features"].phi_star <= 1.0
+
+    def test_reduce_matrix_free(self, qk):
+        Q, K = qk
+        diag = CheegerDiagnostic(rank=2, threshold=4, block_size=4)
+        result = diag.reduce(Q, K, L)
+        assert "features" in result
+        assert result["tier"] == "matrix_free"
+        assert 0.0 <= result["features"].phi_star <= 1.0
+
+    def test_witness_materialized(self, qk):
+        Q, K = qk
+        diag = CheegerDiagnostic(rank=2, threshold=1024)
+        w = diag.witness(Q, K, L)
+        assert w.shape == (L,)
+        assert set(w.tolist()).issubset({-1, 1})
+
+    def test_witness_matrix_free(self, qk):
+        Q, K = qk
+        diag = CheegerDiagnostic(rank=2, threshold=4, block_size=4)
+        w = diag.witness(Q, K, L)
+        assert w.shape == (L,)
+        assert set(w.tolist()).issubset({-1, 1})
+
+    def test_signal_name(self):
+        assert CheegerDiagnostic.signal_name == "cheeger"
+
+    def test_accumulate_returns_local(self):
+        diag = CheegerDiagnostic()
+        local = {"features": "test"}
+        assert diag.accumulate(local, None) is local
+        assert diag.accumulate(local, {"old": True}) is local
+
+    def test_cheeger_bounds(self, qk):
+        Q, K = qk
+        diag = CheegerDiagnostic(rank=2, threshold=1024)
+        result = diag.reduce(Q, K, L)
+        f = result["features"]
+        assert f.cheeger_lower - 1e-6 <= f.phi_star <= f.cheeger_upper + 1e-6
 
 
 class TestEmitWitnessConfig:
