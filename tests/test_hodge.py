@@ -9,6 +9,7 @@ import math
 from itertools import combinations
 
 import torch
+from conftest import make_M
 
 from glassbox.hodge import (
     adaptive_curl_samples,
@@ -23,7 +24,6 @@ from glassbox.hodge import (
     sample_triangles,
 )
 from glassbox.svd import (
-    compute_degree_normalized_M,
     compute_dk_blocked,
     compute_logsumexp_blocked,
     compute_M_fro_norm_blocked,
@@ -36,17 +36,6 @@ from glassbox.svd import (
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_M(L, D, seed=42):
-    """Generate Q, K, scale, A, M and related quantities."""
-    torch.manual_seed(seed)
-    Q = torch.randn(L, D)
-    K = torch.randn(L, D)
-    scale = 1.0 / math.sqrt(D)
-    A = torch.softmax(Q @ K.T * scale, dim=-1)
-    M, _, d_k_inv_sqrt = compute_degree_normalized_M(A)
-    return Q, K, scale, A, M, d_k_inv_sqrt
 
 
 def _build_B1(n):
@@ -165,7 +154,7 @@ class TestAdaptiveSampling:
         assert adaptive_curl_samples(3) == 0
 
     def test_pilot_mode_matrix_free(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(20, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(20, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         m = adaptive_curl_samples(
@@ -200,7 +189,7 @@ class TestAdaptiveSampling:
 
 class TestCurl:
     def test_matrix_free_matches_materialized(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         M_fro = torch.linalg.norm(M, "fro").item()
@@ -229,7 +218,7 @@ class TestCurl:
         assert C < 0.05, f"Symmetric M should have C~0, got {C}"
 
     def test_scales_with_antisymmetry(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(12, 4, seed=77)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(12, 4, seed=77)
         M_sym = (M + M.T) / 2.0
         M_asym = (M - M.T) / 2.0
         curls = []
@@ -249,7 +238,7 @@ class TestCurl:
 
 class TestAsymmetryG:
     def test_matrix_free_matches_materialized(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         G_ref, fro_ref = compute_G_materialized(M)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         G_mf, fro_mf = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=4)
@@ -270,7 +259,7 @@ class TestAsymmetryG:
 
     def test_algebraic_identity(self):
         """||M_asym||²_F = (||M||²_F - <M,M^T>_F) / 2"""
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4)
         M_asym = (M - M.T) / 2.0
         lhs = torch.linalg.norm(M_asym, "fro").square()
         M_fro_sq = torch.linalg.norm(M, "fro").square()
@@ -286,7 +275,7 @@ class TestAsymmetryG:
 
 class TestPythagorean:
     def test_basic(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(20, 4, seed=99)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(20, 4, seed=99)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=200)
@@ -296,7 +285,7 @@ class TestPythagorean:
     def test_multiple_seeds(self):
         for seed in range(10):
             for L in [8, 12, 16, 20]:
-                Q, K, scale, A, M, d_k_inv_sqrt = _make_M(L, 4, seed=seed)
+                Q, K, scale, A, M, d_k_inv_sqrt = make_M(L, 4, seed=seed)
                 _, d_k_mf = compute_dk_blocked(Q, K, scale)
                 lse = compute_logsumexp_blocked(Q, K, scale)
                 f = compute_routing_features_matrix_free(
@@ -307,7 +296,7 @@ class TestPythagorean:
 
     def test_gamma_nonneg(self):
         for seed in range(5):
-            Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4, seed=seed)
+            Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
             lse = compute_logsumexp_blocked(Q, K, scale)
             f = compute_routing_features_matrix_free(
@@ -317,7 +306,7 @@ class TestPythagorean:
 
     def test_curl_bounded_by_G(self):
         for seed in range(5):
-            Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4, seed=seed)
+            Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
             lse = compute_logsumexp_blocked(Q, K, scale)
             f = compute_routing_features_matrix_free(
@@ -327,7 +316,7 @@ class TestPythagorean:
 
     def test_exact_at_exhaustive_n(self):
         # n=5: C(5,3)=10 < floor=200, all triangles enumerated
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(5, 4, seed=42)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(5, 4, seed=42)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
@@ -342,7 +331,7 @@ class TestPythagorean:
 
 class TestSpectral:
     def test_sigma2_matches_full_svd(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         sigma_ref = torch.linalg.svdvals(M)
         s2_ref = sigma_ref[1].item()
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
@@ -352,7 +341,7 @@ class TestSpectral:
 
     def test_phi_hat_range(self):
         for seed in range(5):
-            Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4, seed=seed)
+            Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
             lse = compute_logsumexp_blocked(Q, K, scale)
             f = compute_routing_features_matrix_free(
@@ -368,7 +357,7 @@ class TestSpectral:
 
 class TestSigma2Asym:
     def test_matches_materialized(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         M_asym = (M - M.T) / 2.0
         sigma_ref = torch.linalg.svdvals(M_asym)
         s2_ref = sigma_ref[1].item() if len(sigma_ref) > 1 else 0.0
@@ -388,7 +377,7 @@ class TestSigma2Asym:
 
     def test_antisymmetric_property(self):
         """<M_asym·v, w> = -<v, M_asym·w> for random v, w."""
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         torch.manual_seed(0)
         v = torch.randn(10)
@@ -401,7 +390,7 @@ class TestSigma2Asym:
 
     def test_multiple_seeds(self):
         for seed in range(5):
-            Q, K, scale, A, M, d_k_inv_sqrt = _make_M(12, 4, seed=seed)
+            Q, K, scale, A, M, d_k_inv_sqrt = make_M(12, 4, seed=seed)
             M_asym = (M - M.T) / 2.0
             sigma_ref = torch.linalg.svdvals(M_asym)
             s2_ref = sigma_ref[1].item() if len(sigma_ref) > 1 else 0.0
@@ -417,7 +406,7 @@ class TestSigma2Asym:
 
 class TestCommutatorNorm:
     def test_matches_materialized(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         M_sym = (M + M.T) / 2.0
         M_asym = (M - M.T) / 2.0
         comm = M_sym @ M_asym - M_asym @ M_sym
@@ -455,14 +444,14 @@ class TestCommutatorNorm:
 
     def test_nonneg(self):
         for seed in range(5):
-            Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4, seed=seed)
+            Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
             M_fro = compute_M_fro_norm_blocked(Q, K, d_k_mf, scale).item()
             cn = estimate_commutator_norm_matrix_free(Q, K, d_k_mf, scale, M_fro)
             assert cn >= 0.0
 
     def test_matvec_correctness(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4)
         M_sym = (M + M.T) / 2.0
         M_asym = (M - M.T) / 2.0
         comm = M_sym @ M_asym - M_asym @ M_sym
@@ -481,7 +470,7 @@ class TestCommutatorNorm:
 
 class TestMatvecHelpers:
     def test_Masym_matches_materialized(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         M_asym = (M - M.T) / 2.0
         torch.manual_seed(0)
@@ -492,7 +481,7 @@ class TestMatvecHelpers:
         assert rel < 1e-4
 
     def test_Msym_matches_materialized(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         M_sym = (M + M.T) / 2.0
         torch.manual_seed(0)
@@ -503,7 +492,7 @@ class TestMatvecHelpers:
         assert rel < 1e-4
 
     def test_Masym_antisymmetry(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         torch.manual_seed(0)
         v = torch.randn(10)
@@ -514,7 +503,7 @@ class TestMatvecHelpers:
         assert abs(Av.dot(w).item() + v.dot(Aw).item()) < 1e-4
 
     def test_Msym_symmetry(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         torch.manual_seed(0)
         v = torch.randn(10)
@@ -525,7 +514,7 @@ class TestMatvecHelpers:
         assert abs(Sv.dot(w).item() - v.dot(Sw).item()) < 1e-4
 
     def test_decomposition_M_eq_Msym_plus_Masym(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(10, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(10, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         torch.manual_seed(0)
         v = torch.randn(10)
@@ -544,7 +533,7 @@ class TestRoutingFeatures:
     def test_returns_typed_features(self):
         from glassbox.results import RoutingFeatures
 
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=50)
@@ -563,7 +552,7 @@ class TestRoutingFeatures:
         assert f.sv_ratio is not None
 
     def test_value_ranges(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=50)
@@ -577,7 +566,7 @@ class TestRoutingFeatures:
         assert len(f.singular_values) > 0
 
     def test_singular_values_descending(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=50)
@@ -617,7 +606,7 @@ class TestExactHodgeCrossValidation:
         ordering but differ in magnitude.  The Pythagorean identity holds for
         C_rms by construction.
         """
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(5, 4, seed=42)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(5, 4, seed=42)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
@@ -635,7 +624,7 @@ class TestExactHodgeCrossValidation:
         identical (RMS of circulations vs norm of curl flow). We verify
         they are correlated: both should be nonzero for asymmetric M, and
         the Pythagorean identity should hold for the RMS-based estimate."""
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(8, 4, seed=77)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(8, 4, seed=77)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
@@ -650,14 +639,14 @@ class TestExactHodgeCrossValidation:
 
     def test_hodge_orthogonality(self):
         """f_grad ⊥ f_curl (Hodge orthogonality)."""
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(5, 4, seed=42)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(5, 4, seed=42)
         _, _, _, f_grad, f_curl = self._exact_hodge_coefficients(M)
         inner = f_grad.dot(f_curl).item()
         assert abs(inner) < 1e-8, f"<f_grad, f_curl> = {inner}"
 
     def test_hodge_completeness(self):
         """||f_grad||² + ||f_curl||² = ||f||² (no harmonic on K_n)."""
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(5, 4, seed=42)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(5, 4, seed=42)
         n = M.shape[0]
         M_f64 = M.to(torch.float64)
         B1, edges = _build_B1(n)
@@ -681,7 +670,7 @@ class TestExactHodgeCrossValidation:
 class TestEdgeCases:
     def test_very_small_sequence_L3(self):
         """L=3 should not crash. Only 1 triangle."""
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(3, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(3, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=50)
@@ -689,7 +678,7 @@ class TestEdgeCases:
         assert math.isfinite(f.C)
 
     def test_numerical_stability_float32(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         Q, K = Q.float(), K.float()
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
@@ -710,7 +699,7 @@ class TestMaterializedPath:
     def test_returns_typed_features(self):
         from glassbox.results import RoutingFeatures
 
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         f = compute_routing_features_materialized(M, rank=4)
         assert isinstance(f, RoutingFeatures)
         assert len(f.singular_values) > 0
@@ -719,7 +708,7 @@ class TestMaterializedPath:
         assert f.C is not None
 
     def test_value_ranges(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         f = compute_routing_features_materialized(M, rank=4)
         assert 0.0 <= f.sigma2 <= 1.0
         assert 0.0 <= f.phi_hat <= 1.0
@@ -730,7 +719,7 @@ class TestMaterializedPath:
         assert f.commutator_norm >= 0.0
 
     def test_pythagorean(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(20, 4, seed=99)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(20, 4, seed=99)
         f = compute_routing_features_materialized(M, rank=4)
         residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 0.01
@@ -746,7 +735,7 @@ class TestMaterializedPath:
         assert f.C < 0.01
 
     def test_singular_values_match_torch(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         f = compute_routing_features_materialized(M, rank=4)
         sigma_ref = torch.linalg.svdvals(M)[:4].tolist()
         for a, b in zip(f.singular_values, sigma_ref):
@@ -760,7 +749,7 @@ class TestMaterializedPath:
 
 class TestMaterializedVsMatrixFree:
     def test_G_agreement(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         f_mat = compute_routing_features_materialized(M, rank=4)
         lse = compute_logsumexp_blocked(Q, K, scale)
@@ -776,7 +765,7 @@ class TestMaterializedVsMatrixFree:
         assert abs(f_mat.G - f_mf.G) < 0.02
 
     def test_sigma2_agreement(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f_mat = compute_routing_features_materialized(M, rank=4)
@@ -792,7 +781,7 @@ class TestMaterializedVsMatrixFree:
         assert abs(f_mat.sigma2 - f_mf.sigma2) < 0.05
 
     def test_curl_agreement(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f_mat = compute_routing_features_materialized(M, rank=4, seed=42)
@@ -811,7 +800,7 @@ class TestMaterializedVsMatrixFree:
     def test_all_features_close(self):
         """All routing features should agree between materialized and matrix-free."""
         for seed in range(5):
-            Q, K, scale, A, M, d_k_inv_sqrt = _make_M(12, 4, seed=seed)
+            Q, K, scale, A, M, d_k_inv_sqrt = make_M(12, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
             lse = compute_logsumexp_blocked(Q, K, scale)
             f_mat = compute_routing_features_materialized(M, rank=4, seed=42)

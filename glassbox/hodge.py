@@ -381,7 +381,14 @@ def compute_routing_features_matrix_free(
         u2 = U_svd[:, idx2]
         v2 = V_svd[:, idx2]
         phi_hat = bipartite_sweep_conductance_matrix_free(
-            u2, v2, Q, K, d_k_inv_sqrt, scale, block_size, causal=causal,
+            u2,
+            v2,
+            Q,
+            K,
+            d_k_inv_sqrt,
+            scale,
+            block_size,
+            causal=causal,
         )
     else:
         phi_hat = 0.0

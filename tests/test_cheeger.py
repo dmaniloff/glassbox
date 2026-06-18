@@ -10,6 +10,7 @@ Organized into 4 groups:
 import math
 
 import torch
+from conftest import make_M
 
 from glassbox.cheeger import (
     bipartite_sweep_conductance,
@@ -30,20 +31,9 @@ from glassbox.svd import (
 # ---------------------------------------------------------------------------
 
 
-def _make_M(L, D, seed=42):
-    """Generate Q, K, scale, A, M and related quantities."""
-    torch.manual_seed(seed)
-    Q = torch.randn(L, D)
-    K = torch.randn(L, D)
-    scale = 1.0 / math.sqrt(D)
-    A = torch.softmax(Q @ K.T * scale, dim=-1)
-    M, _, d_k_inv_sqrt = compute_degree_normalized_M(A)
-    return Q, K, scale, A, M, d_k_inv_sqrt
-
-
 def _make_sweep_inputs(L, D, seed=42):
     """Build M, run full SVD, return (u2, v2, M, sigma2)."""
-    _, _, _, _, M, _ = _make_M(L, D, seed=seed)
+    _, _, _, _, M, _ = make_M(L, D, seed=seed)
     U, sigma, Vt = torch.linalg.svd(M, full_matrices=False)
     sigma2 = sigma[1].item() if len(sigma) > 1 else 0.0
     u2 = U[:, 1] if sigma.shape[0] > 1 else torch.zeros(L)
@@ -213,14 +203,20 @@ class TestSweepEdgeCases:
 class TestMatrixFreeSweep:
     def test_matches_materialized(self):
         """Blocked matrix-free sweep should match dense materialized sweep."""
-        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4, seed=42)
+        Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4, seed=42)
         U, sigma, Vt = torch.linalg.svd(M, full_matrices=False)
         u2 = U[:, 1]
         v2 = Vt[1, :]
 
         phi_mat = bipartite_sweep_conductance(u2, v2, M)
         phi_mf = bipartite_sweep_conductance_matrix_free(
-            u2, v2, Q, K, d_k_inv_sqrt, scale, block_size=8,
+            u2,
+            v2,
+            Q,
+            K,
+            d_k_inv_sqrt,
+            scale,
+            block_size=8,
         )
 
         assert abs(phi_mat - phi_mf) < 0.05, (
@@ -248,7 +244,14 @@ class TestMatrixFreeSweep:
 
         phi_mat = bipartite_sweep_conductance(u2, v2, M)
         phi_mf = bipartite_sweep_conductance_matrix_free(
-            u2, v2, Q, K, d_k_inv_sqrt, scale, block_size=8, causal=True,
+            u2,
+            v2,
+            Q,
+            K,
+            d_k_inv_sqrt,
+            scale,
+            block_size=8,
+            causal=True,
         )
 
         assert abs(phi_mat - phi_mf) < 0.05, (
@@ -258,14 +261,20 @@ class TestMatrixFreeSweep:
     def test_multiple_sizes(self):
         """Verify agreement across L=8, 16, 32."""
         for L in [8, 16, 32]:
-            Q, K, scale, A, M, d_k_inv_sqrt = _make_M(L, 4, seed=42)
+            Q, K, scale, A, M, d_k_inv_sqrt = make_M(L, 4, seed=42)
             U, sigma, Vt = torch.linalg.svd(M, full_matrices=False)
             u2 = U[:, 1]
             v2 = Vt[1, :]
 
             phi_mat = bipartite_sweep_conductance(u2, v2, M)
             phi_mf = bipartite_sweep_conductance_matrix_free(
-                u2, v2, Q, K, d_k_inv_sqrt, scale, block_size=8,
+                u2,
+                v2,
+                Q,
+                K,
+                d_k_inv_sqrt,
+                scale,
+                block_size=8,
             )
 
             assert abs(phi_mat - phi_mf) < 0.05, (
@@ -283,24 +292,28 @@ class TestPhiHatIntegration:
         """phi_hat from routing features should differ from 1 - sigma2."""
         differences = 0
         for seed in range(10):
-            _, _, _, _, M, _ = _make_M(16, 4, seed=seed)
+            _, _, _, _, M, _ = make_M(16, 4, seed=seed)
             features = compute_routing_features_materialized(M, rank=4)
             spectral_gap = 1.0 - features.sigma2
             if abs(features.phi_hat - spectral_gap) > 0.01:
                 differences += 1
-        assert differences > 0, (
-            "phi_hat should differ from 1 - sigma2 for at least some inputs"
-        )
+        assert differences > 0, "phi_hat should differ from 1 - sigma2 for at least some inputs"
 
     def test_matrix_free_uses_sweep_cut(self):
         """phi_hat from matrix-free path should differ from 1 - sigma2."""
         differences = 0
         for seed in range(10):
-            Q, K, scale, _, _, d_k_inv_sqrt = _make_M(16, 4, seed=seed)
+            Q, K, scale, _, _, d_k_inv_sqrt = make_M(16, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
             lse = compute_logsumexp_blocked(Q, K, scale)
             features = compute_routing_features_matrix_free(
-                Q, K, d_k_mf, scale, lse, rank=4, min_samples=50,
+                Q,
+                K,
+                d_k_mf,
+                scale,
+                lse,
+                rank=4,
+                min_samples=50,
             )
             spectral_gap = 1.0 - features.sigma2
             if abs(features.phi_hat - spectral_gap) > 0.01:
@@ -311,13 +324,19 @@ class TestPhiHatIntegration:
 
     def test_materialized_vs_matrix_free(self):
         """phi_hat should agree between materialized and matrix-free paths."""
-        Q, K, scale, _, M, d_k_inv_sqrt = _make_M(16, 4, seed=42)
+        Q, K, scale, _, M, d_k_inv_sqrt = make_M(16, 4, seed=42)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
 
         feat_mat = compute_routing_features_materialized(M, rank=4)
         feat_mf = compute_routing_features_matrix_free(
-            Q, K, d_k_mf, scale, lse, rank=4, min_samples=50,
+            Q,
+            K,
+            d_k_mf,
+            scale,
+            lse,
+            rank=4,
+            min_samples=50,
         )
 
         assert abs(feat_mat.phi_hat - feat_mf.phi_hat) < 0.1, (
@@ -327,7 +346,7 @@ class TestPhiHatIntegration:
     def test_cheeger_bounds_hold(self):
         """Cheeger bounds should hold in the full pipeline."""
         for seed in range(5):
-            _, _, _, _, M, _ = _make_M(16, 4, seed=seed)
+            _, _, _, _, M, _ = make_M(16, 4, seed=seed)
             features = compute_routing_features_materialized(M, rank=4)
             gap = 1.0 - features.sigma2
             lower = gap / 2.0
@@ -342,7 +361,7 @@ class TestPhiHatIntegration:
     def test_routing_features_phi_hat_range(self):
         """0 ≤ phi_hat ≤ 1 across multiple seeds."""
         for seed in range(10):
-            _, _, _, _, M, _ = _make_M(16, 4, seed=seed)
+            _, _, _, _, M, _ = make_M(16, 4, seed=seed)
             features = compute_routing_features_materialized(M, rank=4)
             assert 0.0 <= features.phi_hat <= 1.0, (
                 f"seed={seed}: phi_hat={features.phi_hat} out of [0, 1]"
