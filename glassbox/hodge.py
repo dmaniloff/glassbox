@@ -23,6 +23,10 @@ from functools import lru_cache
 
 import torch
 
+from glassbox.cheeger import (
+    bipartite_sweep_conductance,
+    bipartite_sweep_conductance_matrix_free,
+)
 from glassbox.results import RoutingFeatures
 from glassbox.svd import (
     compute_logsumexp_blocked,
@@ -364,13 +368,30 @@ def compute_routing_features_matrix_free(
         return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     if svd_method == "lanczos":
-        _, S, _ = svd_via_lanczos(matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device))
+        U_svd, S, V_svd = svd_via_lanczos(matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device))
     else:
-        _, S, _ = randomized_svd(matvec, matvec_t, L, k, device=str(device))
+        U_svd, S, V_svd = randomized_svd(matvec, matvec_t, L, k, device=str(device))
 
-    S_sorted, _ = torch.sort(S, descending=True)
+    S_sorted, sort_idx = torch.sort(S, descending=True)
     sigma2 = S_sorted[1].item() if len(S_sorted) > 1 else 0.0
-    phi_hat = 1.0 - sigma2
+
+    # Cheeger conductance via bipartite sweep cut
+    if len(S_sorted) > 1:
+        idx2 = sort_idx[1]
+        u2 = U_svd[:, idx2]
+        v2 = V_svd[:, idx2]
+        phi_hat = bipartite_sweep_conductance_matrix_free(
+            u2,
+            v2,
+            Q,
+            K,
+            d_k_inv_sqrt,
+            scale,
+            block_size,
+            causal=causal,
+        )
+    else:
+        phi_hat = 0.0
 
     # --- ||M||_F (exact, blocked) ---
     M_fro_norm = compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
@@ -467,10 +488,17 @@ def compute_routing_features_materialized(
     Used when L <= threshold. Dense tensor ops are much faster than
     iterative matvec approaches at small sequence lengths.
     """
-    sigma = torch.linalg.svdvals(M)
+    U_mat, sigma, Vt = torch.linalg.svd(M, full_matrices=False)
     k = min(rank, len(sigma))
     sigma2 = sigma[1].item() if len(sigma) > 1 else 0.0
-    phi_hat = 1.0 - sigma2
+
+    # Cheeger conductance via bipartite sweep cut
+    if len(sigma) > 1:
+        u2 = U_mat[:, 1]
+        v2 = Vt[1, :]
+        phi_hat = bipartite_sweep_conductance(u2, v2, M)
+    else:
+        phi_hat = 0.0
 
     G, M_fro = compute_G_materialized(M)
 

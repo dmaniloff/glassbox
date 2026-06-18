@@ -80,7 +80,7 @@ class RoutingFeatures(BaseModel):
     # Hodge decomposition
     phi_hat: float | None = Field(
         None,
-        description="Conductance (1 - sigma2). High = bottlenecked through one mode.",
+        description="Cheeger conductance via bipartite sweep cut.",
     )
     sigma2: float | None = Field(None, description="Second singular value of M.")
     G: float | None = Field(None, description="Total asymmetry: ||M_asym||_F / ||M||_F.")
