@@ -5,6 +5,9 @@ A = softmax(QK^T / sqrt(d))
 M = Dq_inv_sqrt * A * Dk_inv_sqrt
 M is NOT symmetric in general. We compute SVD, not eigen-decomposition,
 using matrix-vector products with M and M^T.
+
+All operator functions accept both 1D vectors (L,) and 2D matrices (L, cols),
+enabling the SVD algorithms to batch operator calls as BLAS-3 matrix multiplies.
 """
 
 from __future__ import annotations
@@ -31,45 +34,67 @@ def _mask_causal(scores: torch.Tensor, row_offset: int) -> torch.Tensor:
 
 
 def matvec_S(Q, K, v):
-    """Calculate Sv = Q K^T v in two O(Ld) passes, avoid computing S: [L, L]."""
-    # v: [L], Q,K: [L, d]
-    z = K.T @ v  # [d]
-    return Q @ z  # [L]
+    """S v = Q (K^T v). v: (L,) or (L, cols)."""
+    return Q @ (K.T @ v)
 
 
 def matvec_ST(Q, K, u):
-    """Calculate S^T u = K Q^T u in two O(Ld) passes, avoid computing S^T: [L, L]."""
-    # u: [L], Q,K: [L, d]
-    z = Q.T @ u  # [d]
-    return K @ z  # [L]
+    """S^T u = K (Q^T u). u: (L,) or (L, cols)."""
+    return K @ (Q.T @ u)
 
 
 def apply_A_blocked(Q, K, v, scale, block_size=256, causal=False):
-    """A @ v via blocked row-streaming. Peak memory: O(block_size * L_k)."""
+    """A @ v via blocked row-streaming. v: (L_k,) or (L_k, cols)."""
     L_q = Q.shape[0]
-    result = torch.zeros(L_q, device=Q.device, dtype=Q.dtype)
+    squeeze = v.ndim == 1
+    if squeeze:
+        v = v.unsqueeze(1)
+    result = torch.zeros(L_q, v.shape[1], device=Q.device, dtype=Q.dtype)
     for i0 in range(0, L_q, block_size):
         i1 = min(i0 + block_size, L_q)
-        scores = Q[i0:i1] @ K.T * scale  # [bs, L_k]
+        scores = Q[i0:i1] @ K.T * scale
         if causal:
             scores = _mask_causal(scores, i0)
-        attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
-        result[i0:i1] = attn @ v  # [bs]
-    return result
+        attn = torch.softmax(scores, dim=-1)
+        result[i0:i1] = attn @ v
+    return result.squeeze(1) if squeeze else result
 
 
 def apply_AT_blocked(Q, K, u, scale, block_size=256, causal=False):
-    """A^T @ u via blocked row-streaming."""
+    """A^T @ u via blocked row-streaming. u: (L_q,) or (L_q, cols)."""
     L_k = K.shape[0]
-    result = torch.zeros(L_k, device=K.device, dtype=K.dtype)
+    squeeze = u.ndim == 1
+    if squeeze:
+        u = u.unsqueeze(1)
+    result = torch.zeros(L_k, u.shape[1], device=K.device, dtype=K.dtype)
     for i0 in range(0, Q.shape[0], block_size):
         i1 = min(i0 + block_size, Q.shape[0])
         scores = Q[i0:i1] @ K.T * scale
         if causal:
             scores = _mask_causal(scores, i0)
-        attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
-        result += attn.T @ u[i0:i1]  # [L_k]
-    return result
+        attn = torch.softmax(scores, dim=-1)
+        result += attn.T @ u[i0:i1]
+    return result.squeeze(1) if squeeze else result
+
+
+def _apply_A_and_AT_blocked(Q, K, v_fwd, u_rev, scale, block_size=256, causal=False):
+    """Fused A @ v_fwd and A^T @ u_rev sharing one softmax pass per block.
+
+    Both inputs must be 2D: v_fwd (L_k, cols), u_rev (L_q, cols).
+    Returns (A @ v_fwd, A^T @ u_rev), both 2D.
+    """
+    L_q = Q.shape[0]
+    Av = torch.zeros(L_q, v_fwd.shape[1], device=Q.device, dtype=Q.dtype)
+    ATu = torch.zeros(K.shape[0], u_rev.shape[1], device=K.device, dtype=K.dtype)
+    for i0 in range(0, L_q, block_size):
+        i1 = min(i0 + block_size, L_q)
+        scores = Q[i0:i1] @ K.T * scale
+        if causal:
+            scores = _mask_causal(scores, i0)
+        attn = torch.softmax(scores, dim=-1)
+        Av[i0:i1] = attn @ v_fwd
+        ATu += attn.T @ u_rev[i0:i1]
+    return Av, ATu
 
 
 def compute_dk_blocked(Q, K, scale, block_size=256, epsilon=1e-10, causal=False):
@@ -90,7 +115,7 @@ def compute_logsumexp_blocked(Q, K, scale, block_size=256, causal=False):
     lse = torch.zeros(L_q, device=Q.device, dtype=Q.dtype)
     for i0 in range(0, L_q, block_size):
         i1 = min(i0 + block_size, L_q)
-        scores = Q[i0:i1] @ K.T * scale  # [bs, L_k]
+        scores = Q[i0:i1] @ K.T * scale
         if causal:
             scores = _mask_causal(scores, i0)
         lse[i0:i1] = torch.logsumexp(scores, dim=-1)
@@ -108,27 +133,34 @@ def get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, ii, jj, causal=False):
 
 
 def matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """M @ x = A @ (D_K^{-1/2} * x). D_Q^{-1/2} = I for row-stochastic A."""
-    return apply_A_blocked(Q, K, d_k_inv_sqrt * x, scale, block_size, causal=causal)
+    """M @ x = A @ (D_K^{-1/2} * x). x: (L_k,) or (L_k, cols)."""
+    dk = d_k_inv_sqrt.unsqueeze(1) if x.ndim > 1 else d_k_inv_sqrt
+    return apply_A_blocked(Q, K, dk * x, scale, block_size, causal=causal)
 
 
 def matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """M^T @ x = D_K^{-1/2} * (A^T @ x)."""
-    return d_k_inv_sqrt * apply_AT_blocked(Q, K, x, scale, block_size, causal=causal)
+    """M^T @ x = D_K^{-1/2} * (A^T @ x). x: (L_q,) or (L_q, cols)."""
+    result = apply_AT_blocked(Q, K, x, scale, block_size, causal=causal)
+    dk = d_k_inv_sqrt.unsqueeze(1) if result.ndim > 1 else d_k_inv_sqrt
+    return dk * result
 
 
 def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """Compute ||M||_F without materializing M."""
+    """Compute ||M||_F without materializing M.
+
+    Uses ||M||_F^2 = sum_j d_kj^2 * sum_i A_ij^2 to avoid a full (bs, L_k)
+    temporary per block.
+    """
     L_q = Q.shape[0]
+    dk_sq = d_k_inv_sqrt * d_k_inv_sqrt
     norm_sq = torch.tensor(0.0, device=Q.device, dtype=Q.dtype)
     for i0 in range(0, L_q, block_size):
         i1 = min(i0 + block_size, L_q)
         scores = Q[i0:i1] @ K.T * scale
         if causal:
             scores = _mask_causal(scores, i0)
-        attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
-        M_block = attn * d_k_inv_sqrt.unsqueeze(0)  # broadcast [bs, L_k]
-        norm_sq = norm_sq + (M_block**2).sum()
+        attn = torch.softmax(scores, dim=-1)
+        norm_sq = norm_sq + torch.dot(attn.pow(2).sum(dim=0), dk_sq)
     return torch.sqrt(norm_sq)
 
 
@@ -167,150 +199,144 @@ def compute_degree_normalized_M(A, epsilon=1e-10):
 
 
 def matvec_B_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """B @ x = M^T @ (M @ x)."""
+    """B @ x = M^T @ (M @ x). x: (L,) or (L, cols)."""
     y = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
     return matvec_MT_blocked(Q, K, y, d_k_inv_sqrt, scale, block_size, causal=causal)
 
 
 def matvec_Masym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """(M - M^T)/2 @ x = (M@x - M^T@x) / 2."""
-    Mx = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
-    MTx = matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
-    return (Mx - MTx) / 2.0
+    """(M - M^T)/2 @ x. Fused: one softmax pass instead of two."""
+    squeeze = x.ndim == 1
+    if squeeze:
+        x = x.unsqueeze(1)
+    dk = d_k_inv_sqrt.unsqueeze(1)
+    Ax, ATx = _apply_A_and_AT_blocked(Q, K, dk * x, x, scale, block_size, causal)
+    result = (Ax - dk * ATx) / 2.0
+    return result.squeeze(1) if squeeze else result
 
 
 def matvec_Msym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """(M + M^T)/2 @ x = (M@x + M^T@x) / 2."""
-    Mx = matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
-    MTx = matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
-    return (Mx + MTx) / 2.0
+    """(M + M^T)/2 @ x. Fused: one softmax pass instead of two."""
+    squeeze = x.ndim == 1
+    if squeeze:
+        x = x.unsqueeze(1)
+    dk = d_k_inv_sqrt.unsqueeze(1)
+    Ax, ATx = _apply_A_and_AT_blocked(Q, K, dk * x, x, scale, block_size, causal)
+    result = (Ax + dk * ATx) / 2.0
+    return result.squeeze(1) if squeeze else result
 
 
 def matvec_commutator_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """[M_sym, M_asym] @ x = M_sym(M_asym(x)) - M_asym(M_sym(x)).
 
-    Cost: 8 matvecs per application (2 per sym/asym call, 4 calls total).
+    3 fused softmax passes instead of 8 individual passes.
     """
-    asym_x = matvec_Masym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
-    term1 = matvec_Msym_blocked(Q, K, asym_x, d_k_inv_sqrt, scale, block_size, causal=causal)
-    sym_x = matvec_Msym_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size, causal=causal)
-    term2 = matvec_Masym_blocked(Q, K, sym_x, d_k_inv_sqrt, scale, block_size, causal=causal)
-    return term1 - term2
+    squeeze = x.ndim == 1
+    if squeeze:
+        x = x.unsqueeze(1)
+    dk = d_k_inv_sqrt.unsqueeze(1)
+
+    # Pass 1: M@x and M^T@x → derive asym(x) and sym(x)
+    Ax, ATx = _apply_A_and_AT_blocked(Q, K, dk * x, x, scale, block_size, causal)
+    MTx = dk * ATx
+    asym_x = (Ax - MTx) / 2.0
+    sym_x = (Ax + MTx) / 2.0
+
+    # Pass 2: M_sym(asym_x) = (M @ asym_x + M^T @ asym_x) / 2
+    A_asym, AT_asym = _apply_A_and_AT_blocked(Q, K, dk * asym_x, asym_x, scale, block_size, causal)
+    sym_of_asym = (A_asym + dk * AT_asym) / 2.0
+
+    # Pass 3: M_asym(sym_x) = (M @ sym_x - M^T @ sym_x) / 2
+    A_sym, AT_sym = _apply_A_and_AT_blocked(Q, K, dk * sym_x, sym_x, scale, block_size, causal)
+    asym_of_sym = (A_sym - dk * AT_sym) / 2.0
+
+    result = sym_of_asym - asym_of_sym
+    return result.squeeze(1) if squeeze else result
 
 
-def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
+def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda", dtype=None):
     """
-    Matrix-free Randomized SVD for a (dim x dim) linear operator given matvecs.
+    Matrix-free Randomized SVD via Halko, Martinsson, Tropp 2011.
 
-    Computes a rank-k approximation M ≈ U diag(S) V^T without ever forming
-    the full L×L matrix. The key insight is that for S = QK^T, we can compute
-    Sv = Q(K^T v) and S^T u = K(Q^T u) in O(Ld) each, avoiding the O(L^2)
-    cost of materializing S. The caller wraps this into the matvec / matvec_t
-    callables, making this routine agnostic to the operator's internal structure.
-
-    Algorithm (Halko, Martinsson, Tropp 2011):
-      1. Draw a random Gaussian test matrix Ω of shape (dim, k+p).
-      2. Form Y = M Ω via k+p matvec calls.
-      3. (Optional) Run q power iterations for better spectral separation.
-      4. Compute an orthonormal basis Q for range(Y).
-      5. Project: B = Q^T M  (computed via matvec_t on columns of Q).
-      6. SVD of the small (k+p)×dim matrix B, then lift U back.
-
-    Args:
-        matvec:   v -> M v,   callable on vectors of length `dim`.
-        matvec_t: u -> M^T u, callable on vectors of length `dim`.
-        dim: Ambient dimension (L, the sequence length).
-        k:   Number of singular triplets to return.
-        p:   Oversampling parameter (default 5).
-        q:   Number of power iterations (default 2).
-        device: Torch device.
-
-    Returns:
-        U: (dim, k) left singular vectors.
-        S: (k,)    singular values (descending).
-        V: (dim, k) right singular vectors.
+    All operator calls are batched: matvec/matvec_t receive (dim, k+p) matrices
+    and return (dim, k+p) results, enabling BLAS-3 throughput.
     """
-    # Clamp oversampling so k + p doesn't exceed dim
     p = min(p, max(dim - k, 0))
+    n = k + p
 
-    # Step 1: random test matrix Ω
-    Omega = torch.randn(dim, k + p, device=device)
+    Omega = torch.randn(dim, n, device=device, dtype=dtype)
+    Y = matvec(Omega)
+    native_dtype = Y.dtype
 
-    # Step 2: sample Y = M Ω
-    Y = torch.stack([matvec(Omega[:, i]) for i in range(k + p)], dim=1)  # (dim, k+p)
-
-    # Optional: power iterations to improve spectral separation.
+    # Power iterations with QR re-orthogonalization (Halko et al. §4.4)
     for _ in range(q):
-        Z = torch.stack([matvec_t(Y[:, i]) for i in range(k + p)], dim=1)  # M^T Y
-        Y = torch.stack([matvec(Z[:, i]) for i in range(k + p)], dim=1)  # M (M^T Y)
+        Z, _ = torch.linalg.qr(matvec_t(Y).float(), mode="reduced")
+        Z = Z.to(native_dtype)
+        Y, _ = torch.linalg.qr(matvec(Z).float(), mode="reduced")
+        Y = Y.to(native_dtype)
 
-    # Step 3: orthonormal basis Q for range(Y)
-    Q, _ = torch.linalg.qr(Y, mode="reduced")  # (dim, k+p)
+    Q, _ = torch.linalg.qr(Y.float(), mode="reduced")
+    Q_native = Q.to(native_dtype)
 
-    # Step 4: form small matrix B = Q^T M  (shape (k+p, dim))
-    # We can compute B via B^T = M^T Q, using matvec_t.
-    Bt = torch.stack([matvec_t(Q[:, i]) for i in range(k + p)], dim=1)  # (dim, k+p)
-    B = Bt.T  # (k+p, dim)
-
-    # Step 5: SVD of small B
+    B = matvec_t(Q_native).T.float()  # (n, dim)
     U_hat, S, Vt = torch.linalg.svd(B, full_matrices=False)
 
-    # Step 6: lift left singular vectors back to original space
-    U = Q @ U_hat[:, :k]  # (dim, k)
-    V = Vt[:k, :].T  # (dim, k)
+    U = (Q @ U_hat[:, :k]).to(native_dtype)
+    V = Vt[:k, :].T.to(native_dtype)
     return U, S[:k], V
 
 
-def lanczos(operator, dim, k, iters, device):
+def lanczos(operator, dim, k, iters, device, dtype=None):
+    """Lanczos iteration with pre-allocated basis and vectorized reorthogonalization.
+
+    operator: v -> operator(v), expects 1D input of shape [dim].
+    dim: dimension L.
+    k: (unused, kept for interface compat) number of Lanczos vectors.
+    iters: total Lanczos steps.
     """
-    operator: function v -> operator(v), expects v shape [dim]
-    dim: dimension L
-    k: number of Lanczos vectors kept (>= desired eigenvectors)
-    iters: total Lanczos steps
-    """
-    Q = []
-    alphas = []
-    betas = []
+    native_dtype = dtype or torch.float32
 
-    # start with random normalized vector
-    q = torch.randn(dim, device=device)
-    q = q / torch.linalg.norm(q)
-    Q.append(q)
+    V = torch.empty(dim, iters + 1, device=device, dtype=native_dtype)
+    alphas = torch.empty(iters, device=device, dtype=torch.float32)
+    betas_arr = torch.empty(iters, device=device, dtype=torch.float32)
 
-    beta = torch.tensor(0.0, device=device)
+    q = torch.randn(dim, device=device, dtype=native_dtype)
+    V[:, 0] = q / torch.linalg.norm(q)
 
-    for _ in range(iters):
-        z = operator(Q[-1])  # apply B = Mᵀ M
-        alpha = torch.dot(Q[-1], z)
-        z = z - alpha * Q[-1] - beta * (Q[-2] if len(Q) > 1 else 0)
+    beta = 0.0
+    m = 0
 
-        # reorthogonalize for numerical stability
-        for q_prev in Q:
-            z -= torch.dot(z, q_prev) * q_prev
+    for j in range(iters):
+        z = operator(V[:, j])
+        alpha = V[:, j].dot(z)
+        alphas[j] = alpha
 
-        beta = torch.linalg.norm(z)
+        z = z - alpha * V[:, j]
+        if j > 0:
+            z = z - beta * V[:, j - 1]
+
+        # Modified Gram-Schmidt reorthogonalization (sequential for fp16 stability)
+        for i in range(j + 1):
+            z = z - V[:, i].dot(z) * V[:, i]
+
+        beta = torch.linalg.norm(z).item()
         if beta < 1e-8:
+            m = j + 1
             break
 
-        Q.append(z / beta)
-        alphas.append(alpha)
-        betas.append(beta)
+        betas_arr[j] = beta
+        V[:, j + 1] = z / beta
+        m = j + 1
 
-    # Build small tridiagonal matrix T
-    T = torch.zeros(len(Q), len(Q), device=device)
-    for i in range(len(Q)):
-        if i < len(alphas):
-            T[i, i] = alphas[i]
-        if i < len(betas):
-            T[i, i + 1] = betas[i]
-            T[i + 1, i] = betas[i]
+    # Build tridiagonal T via vectorized diagonal copy
+    T = torch.zeros(m, m, device=device, dtype=torch.float32)
+    T.diagonal().copy_(alphas[:m])
+    if m > 1:
+        T.diagonal(1).copy_(betas_arr[: m - 1])
+        T.diagonal(-1).copy_(betas_arr[: m - 1])
 
-    # eigen-decomposition of T
     evals, evecs = torch.linalg.eigh(T)
-
-    # reconstruct Ritz vectors
-    V = torch.stack(Q, dim=1)  # [dim, m]
-    ritz_vectors = V @ evecs  # [dim, m]
+    ritz_vectors = V[:, :m] @ evecs.to(V.dtype)
 
     return evals, ritz_vectors
 
@@ -322,41 +348,18 @@ def _principal_angles(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     Both inputs are (dim, k), assumed approximately orthonormal.
     Returns angles in radians, length k, sorted ascending.
     """
-    # Orthonormalize for stability.
-    QA, _ = torch.linalg.qr(A, mode="reduced")
-    QB, _ = torch.linalg.qr(B, mode="reduced")
+    # QR/svdvals require float32 (LAPACK does not support fp16/bf16).
+    QA, _ = torch.linalg.qr(A.float(), mode="reduced")
+    QB, _ = torch.linalg.qr(B.float(), mode="reduced")
     # Singular values of QA^T QB are cosines of principal angles.
     s = torch.linalg.svdvals(QA.T @ QB).clamp(-1.0, 1.0)
     return torch.acos(s)
 
 
-def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str):
-    """
-    Compute top-k singular triplets using Lanczos on B = M^T M.
+def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str, dtype=None):
+    """Top-k singular triplets via Lanczos on M^T M.
 
-    Like randomized_svd, this never forms the L×L matrix. For S = QK^T the
-    crucial observation is that Sv = Q(K^T v) costs only O(Ld) — two
-    thin matmuls through the L×d factors — so each Lanczos step is O(Ld)
-    rather than O(L^2).
-
-    Lanczos builds a Krylov subspace {v, Bv, B^2 v, ...} for the symmetric
-    operator B = M^T M using the supplied matvec / matvec_t pair. After
-    `iters` steps it eigen-decomposes the resulting small tridiagonal matrix
-    to obtain Ritz values λ_i ≈ σ_i^2 and Ritz vectors (right singular
-    vectors). Left singular vectors are recovered via u_i = M v_i / σ_i.
-
-    Args:
-        matvec:   v -> M v,   callable on vectors of length `dim`.
-        matvec_t: u -> M^T u, callable on vectors of length `dim`.
-        dim:   Ambient dimension (L, the sequence length).
-        k:     Number of singular triplets to return.
-        iters: Number of Lanczos iterations.
-        device: Torch device.
-
-    Returns:
-        U: (dim, k) left singular vectors.
-        S: (k,)    singular values (descending).
-        V: (dim, k) right singular vectors.
+    U recovery is batched: a single matvec(V) call replaces k individual calls.
     """
     evals, ritz = lanczos(
         operator=lambda v: matvec_t(matvec(v)),
@@ -364,31 +367,24 @@ def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str)
         k=max(2 * k, k + 2),
         iters=iters,
         device=device,
+        dtype=dtype,
     )
     # torch.linalg.eigh returns ascending; take largest-k.
     idx = torch.argsort(evals, descending=True)[:k]
     lam = evals[idx].clamp(min=0.0)
     S = torch.sqrt(lam)
     V = ritz[:, idx]
-    # U_i = (1/sigma_i) M v_i
-    U_cols = []
-    for i in range(k):
-        if S[i] < 1e-12:
-            U_cols.append(torch.zeros(dim, device=device, dtype=V.dtype))
-        else:
-            U_cols.append(matvec(V[:, i]) / S[i])
-    U = torch.stack(U_cols, dim=1)
+
+    # Batched U recovery: single matvec call for all k columns
+    MV = matvec(V)
+    inv_S = torch.where(S > 1e-12, 1.0 / S, torch.zeros_like(S))
+    U = MV * inv_S.unsqueeze(0).to(MV.dtype)
+
     return U, S, V
 
 
 def compare_svd_results(matvec, matvec_t, U1, S1, V1, U2, S2, V2, trials: int = 8):
-    """
-    Compare two (U,S,V) factorizations for the same operator M using:
-    - singular value agreement
-    - principal angles between left/right subspaces
-    - residual norms ||M v - s u|| and ||M^T u - s v||
-    - randomized reconstruction check on random vectors
-    """
+    """Compare two (U,S,V) factorizations via batched operator calls."""
     device = S1.device
     k = min(S1.numel(), S2.numel())
     S1 = S1[:k]
@@ -408,34 +404,32 @@ def compare_svd_results(matvec, matvec_t, U1, S1, V1, U2, S2, V2, trials: int = 
     ang_U = _principal_angles(U1, U2)
     ang_V = _principal_angles(V1, V2)
 
-    # residuals
-    mv_res_list: list[torch.Tensor] = []
-    mtu_res_list: list[torch.Tensor] = []
-    for i in range(k):
-        s = torch.max(S1s[i], S2s[i]).clamp(min=1e-12)
-        mv_res_list.append(torch.linalg.norm(matvec(V2[:, i]) - S2s[i] * U2[:, i]) / s)
-        mtu_res_list.append(torch.linalg.norm(matvec_t(U2[:, i]) - S2s[i] * V2[:, i]) / s)
-    mv_res: torch.Tensor = torch.stack(mv_res_list)
-    mtu_res: torch.Tensor = torch.stack(mtu_res_list)
+    # Cast S to native dtype so mixed arithmetic with U/V doesn't error.
+    native = V1.dtype
+    S1n = S1s.to(native)
+    S2n = S2s.to(native)
 
-    # reconstruction check on random vectors: compare Mx to U diag(S) V^T x
-    recon_list: list[torch.Tensor] = []
-    for _ in range(trials):
-        x = torch.randn(V1.shape[0], device=device)
-        y = matvec(x)
-        y1 = U1 @ (S1 * (V1.T @ x))
-        y2 = U2 @ (S2 * (V2.T @ x))
-        denom = torch.linalg.norm(y).clamp(min=1e-12)
-        recon_list.append(
-            torch.stack(
-                [
-                    torch.linalg.norm(y - y1) / denom,
-                    torch.linalg.norm(y - y2) / denom,
-                    torch.linalg.norm(y1 - y2) / denom,
-                ]
-            )
-        )
-    recon: torch.Tensor = torch.stack(recon_list, dim=0)  # (trials, 3)
+    # Batched residuals: 2 matvec calls instead of 2k
+    MV2 = matvec(V2)
+    MTU2 = matvec_t(U2)
+    s_denom = torch.max(S1s, S2s).clamp(min=1e-12)
+    mv_res = torch.linalg.norm(MV2.float() - S2s.unsqueeze(0) * U2.float(), dim=0) / s_denom
+    mtu_res = torch.linalg.norm(MTU2.float() - S2s.unsqueeze(0) * V2.float(), dim=0) / s_denom
+
+    # Batched reconstruction: 1 matvec call instead of trials
+    X = torch.randn(V1.shape[0], trials, device=device, dtype=V1.dtype)
+    Y = matvec(X)
+    Y1 = U1 @ (S1n.unsqueeze(1) * (V1.T @ X))
+    Y2 = U2 @ (S2n.unsqueeze(1) * (V2.T @ X))
+    denom = torch.linalg.norm(Y.float(), dim=0).clamp(min=1e-12)
+    recon = torch.stack(
+        [
+            torch.linalg.norm((Y - Y1).float(), dim=0) / denom,
+            torch.linalg.norm((Y - Y2).float(), dim=0) / denom,
+            torch.linalg.norm((Y1 - Y2).float(), dim=0) / denom,
+        ],
+        dim=1,
+    )  # (trials, 3)
 
     return {
         "k": k,
@@ -474,8 +468,8 @@ def compute_scores_matrix_features(
         return matvec_ST(Q, K, u)
 
     if method == "lanczos":
-        _, S, _ = svd_via_lanczos(mv, mv_t, L, k, max(2 * k + 2, 20), str(device))
+        _, S, _ = svd_via_lanczos(mv, mv_t, L, k, max(2 * k + 2, 20), str(device), dtype=Q.dtype)
     else:
-        _, S, _ = randomized_svd(mv, mv_t, L, k, device=str(device))
+        _, S, _ = randomized_svd(mv, mv_t, L, k, device=str(device), dtype=Q.dtype)
 
     return SpectralFeatures(singular_values=S.cpu().tolist())

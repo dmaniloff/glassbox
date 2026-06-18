@@ -282,8 +282,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # Trim to actual sequence length
         k_flat = k_flat[:seq_len]
 
-        # Cast to float if FP8
-        return k_flat.float()
+        # Upcast FP8 (1-byte floats) — fp16/bf16 pass through natively.
+        if k_flat.dtype.is_floating_point and k_flat.element_size() == 1:
+            return k_flat.half()
+        return k_flat
 
     def _run_svd(
         self,
@@ -299,7 +301,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         run_laplacian: bool = False,
     ) -> None:
         # Stack accumulated Q: [L_q, num_heads, head_size]
-        Q_all = torch.cat(state.q_buffer, dim=0).float()
+        Q_all = torch.cat(state.q_buffer, dim=0)
         L_q = Q_all.shape[0]
 
         # Extract K: [L_k, num_kv_heads, head_size]

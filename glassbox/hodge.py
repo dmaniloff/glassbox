@@ -281,9 +281,13 @@ def compute_sigma2_asym_matrix_free(
         return 0.0
 
     if svd_method == "lanczos":
-        _, S, _ = svd_via_lanczos(matvec_asym, matvec_asym_t, L, k, max(2 * k + 2, 20), str(device))
+        _, S, _ = svd_via_lanczos(
+            matvec_asym, matvec_asym_t, L, k, max(2 * k + 2, 20), str(device), dtype=Q.dtype
+        )
     else:
-        _, S, _ = randomized_svd(matvec_asym, matvec_asym_t, L, k, device=str(device))
+        _, S, _ = randomized_svd(
+            matvec_asym, matvec_asym_t, L, k, device=str(device), dtype=Q.dtype
+        )
 
     S_sorted, _ = torch.sort(S, descending=True)
     return S_sorted[1].item() if len(S_sorted) > 1 else 0.0
@@ -368,9 +372,11 @@ def compute_routing_features_matrix_free(
         return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     if svd_method == "lanczos":
-        U_svd, S, V_svd = svd_via_lanczos(matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device))
+        U_svd, S, V_svd = svd_via_lanczos(
+            matvec, matvec_t, L, k, max(2 * k + 2, 20), str(device), dtype=Q.dtype
+        )
     else:
-        U_svd, S, V_svd = randomized_svd(matvec, matvec_t, L, k, device=str(device))
+        U_svd, S, V_svd = randomized_svd(matvec, matvec_t, L, k, device=str(device), dtype=Q.dtype)
 
     S_sorted, sort_idx = torch.sort(S, descending=True)
     sigma2 = S_sorted[1].item() if len(S_sorted) > 1 else 0.0

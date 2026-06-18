@@ -8,6 +8,7 @@ Hodge-theoretic identities.
 import math
 from itertools import combinations
 
+import pytest
 import torch
 from conftest import make_M
 
@@ -821,3 +822,92 @@ class TestMaterializedVsMatrixFree:
             assert abs(f_mat.sigma2 - f_mf.sigma2) < 0.1
             assert abs(f_mat.sigma2_asym - f_mf.sigma2_asym) < 0.1
             assert abs(f_mat.commutator_norm - f_mf.commutator_norm) < 0.15
+
+
+# ===========================================================================
+# Group 15: Half-precision dtype propagation (fp16 / bf16)
+# ===========================================================================
+
+HALF_DTYPES = [torch.float16, torch.bfloat16]
+DTYPE_IDS = {torch.float16: "fp16", torch.bfloat16: "bf16"}
+
+
+def _make_M_half(L, D, dtype, seed=42):
+    """Generate half-precision Q, K and derived quantities."""
+    torch.manual_seed(seed)
+    Q = torch.randn(L, D).to(dtype)
+    K = torch.randn(L, D).to(dtype)
+    scale = 1.0 / math.sqrt(D)
+    d_k, d_k_mf = compute_dk_blocked(Q, K, scale)
+    lse = compute_logsumexp_blocked(Q, K, scale)
+    return Q, K, scale, d_k_mf, lse
+
+
+class TestHalfPrecisionDtype:
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_routing_features_matrix_free_half(self, dtype):
+        """compute_routing_features_matrix_free should not crash with half Q/K."""
+        Q, K, scale, d_k_mf, lse = _make_M_half(16, 4, dtype)
+        f = compute_routing_features_matrix_free(
+            Q,
+            K,
+            d_k_mf,
+            scale,
+            lse,
+            rank=2,
+            min_samples=200,
+            seed=42,
+        )
+        assert f.sigma2 is not None
+        assert f.G is not None
+        assert f.C is not None
+        assert len(f.singular_values) == 2
+        assert all(sv > 0 for sv in f.singular_values)
+
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_sigma2_asym_half(self, dtype):
+        """compute_sigma2_asym_matrix_free should not crash with half Q/K."""
+        Q, K, scale, d_k_mf, _ = _make_M_half(16, 4, dtype)
+        result = compute_sigma2_asym_matrix_free(Q, K, d_k_mf, scale, block_size=256)
+        assert isinstance(result, float)
+        assert math.isfinite(result)
+
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_G_matrix_free_half(self, dtype):
+        """compute_G_matrix_free should not crash with half Q/K."""
+        Q, K, scale, d_k_mf, _ = _make_M_half(16, 4, dtype)
+        G, fro = compute_G_matrix_free(Q, K, d_k_mf, scale)
+        assert math.isfinite(G)
+        assert fro > 0
+
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_curl_matrix_free_half(self, dtype):
+        """estimate_curl_matrix_free should not crash with half Q/K."""
+        Q, K, scale, d_k_mf, lse = _make_M_half(16, 4, dtype)
+        fro = compute_M_fro_norm_blocked(Q, K, d_k_mf, scale)
+        C = estimate_curl_matrix_free(
+            Q,
+            K,
+            lse,
+            d_k_mf,
+            scale,
+            fro.item(),
+            seed=42,
+        )
+        assert math.isfinite(C)
+
+    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
+    def test_commutator_norm_half(self, dtype):
+        """estimate_commutator_norm_matrix_free should not crash with half Q/K."""
+        Q, K, scale, d_k_mf, _ = _make_M_half(16, 4, dtype)
+        fro = compute_M_fro_norm_blocked(Q, K, d_k_mf, scale)
+        cn = estimate_commutator_norm_matrix_free(
+            Q,
+            K,
+            d_k_mf,
+            scale,
+            fro.item(),
+            n_hutchinson=5,
+            seed=42,
+        )
+        assert math.isfinite(cn)
