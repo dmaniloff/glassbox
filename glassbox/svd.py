@@ -290,64 +290,6 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda", dtype=None
     return U, S[:k], V
 
 
-def lanczos(operator, dim, k, iters, device, dtype=None):
-    """Lanczos iteration with pre-allocated basis and vectorized reorthogonalization.
-
-    operator: v -> operator(v), expects 1D input of shape [dim].
-    dim: dimension L.
-    k: (unused, kept for interface compat) number of Lanczos vectors.
-    iters: total Lanczos steps.
-    """
-    if dim <= 0:
-        return torch.empty(0, device=device), torch.empty(dim, 0, device=device)
-
-    native_dtype = dtype or torch.float32
-
-    V = torch.empty(dim, iters + 1, device=device, dtype=native_dtype)
-    alphas = torch.empty(iters, device=device, dtype=torch.float32)
-    betas_arr = torch.empty(iters, device=device, dtype=torch.float32)
-
-    q = torch.randn(dim, device=device, dtype=native_dtype)
-    V[:, 0] = q / torch.linalg.norm(q)
-
-    beta = 0.0
-    m = 0
-
-    for j in range(iters):
-        z = operator(V[:, j])
-        alpha = V[:, j].dot(z)
-        alphas[j] = alpha
-
-        z = z - alpha * V[:, j]
-        if j > 0:
-            z = z - beta * V[:, j - 1]
-
-        # Modified Gram-Schmidt reorthogonalization (sequential for fp16 stability)
-        for i in range(j + 1):
-            z = z - V[:, i].dot(z) * V[:, i]
-
-        beta = torch.linalg.norm(z).item()
-        if beta < 1e-8:
-            m = j + 1
-            break
-
-        betas_arr[j] = beta
-        V[:, j + 1] = z / beta
-        m = j + 1
-
-    # Build tridiagonal T via vectorized diagonal copy
-    T = torch.zeros(m, m, device=device, dtype=torch.float32)
-    T.diagonal().copy_(alphas[:m])
-    if m > 1:
-        T.diagonal(1).copy_(betas_arr[: m - 1])
-        T.diagonal(-1).copy_(betas_arr[: m - 1])
-
-    evals, evecs = torch.linalg.eigh(T)
-    ritz_vectors = V[:, :m] @ evecs.to(V.dtype)
-
-    return evals, ritz_vectors
-
-
 def _working_dtype(native_dtype):
     if native_dtype in (torch.float16, torch.bfloat16):
         return torch.float32

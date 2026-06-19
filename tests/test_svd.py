@@ -600,10 +600,8 @@ class TestSmallSequenceLength:
         assert S.shape == (0,)
         assert V.shape == (seq_len, 0)
 
-    def test_lanczos_dim_zero(self):
-        from glassbox.svd import lanczos
-
-        evals, vecs = lanczos(lambda v: v, dim=0, k=1, iters=10, device="cpu")
+    def test_hermitian_lanczos_dim_zero(self):
+        evals, vecs = hermitian_lanczos(lambda v: v, dim=0, k=1, iters=10, device="cpu")
         assert evals.shape == (0,)
         assert vecs.shape == (0, 0)
 
