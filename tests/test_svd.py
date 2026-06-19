@@ -6,7 +6,6 @@ import torch
 from glassbox.svd import (
     apply_A_blocked,
     apply_AT_blocked,
-    compare_svd_results,
     compute_degree_normalized_M,
     compute_dk_blocked,
     compute_logsumexp_blocked,
@@ -28,6 +27,99 @@ DTYPE_IDS = {torch.float32: "fp32", torch.float16: "fp16", torch.bfloat16: "bf16
 
 L = 8
 D = 2
+
+
+# ---------------------------------------------------------------------------
+# SVD comparison helpers (test-only diagnostics; not used in glassbox runtime)
+# ---------------------------------------------------------------------------
+
+
+def _principal_angles(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+    """
+    Principal angles between column spaces of A and B.
+
+    Both inputs are (dim, k), assumed approximately orthonormal.
+    Returns angles in radians, length k, sorted ascending.
+    """
+    # QR/svdvals require float32 (LAPACK does not support fp16/bf16).
+    QA, _ = torch.linalg.qr(A.float(), mode="reduced")
+    QB, _ = torch.linalg.qr(B.float(), mode="reduced")
+    # Singular values of QA^T QB are cosines of principal angles.
+    s = torch.linalg.svdvals(QA.T @ QB).clamp(-1.0, 1.0)
+    return torch.acos(s)
+
+
+def compare_svd_results(matvec, matvec_t, U1, S1, V1, U2, S2, V2, trials: int = 8):
+    """Compare two (U,S,V) factorizations via batched operator calls.
+
+    Returns a dict of agreement metrics, or ``None`` when there are no
+    singular triplets to compare (``k == 0``) — empty factorizations have no
+    meaningful discrepancy, and a zero-filled dict would misleadingly read as
+    perfect agreement.
+    """
+    device = S1.device
+    k = min(S1.numel(), S2.numel())
+
+    if k == 0:
+        return None
+
+    S1 = S1[:k]
+    S2 = S2[:k]
+    U1 = U1[:, :k]
+    U2 = U2[:, :k]
+    V1 = V1[:, :k]
+    V2 = V2[:, :k]
+
+    # singular values (order them descending before comparing)
+    S1s, _ = torch.sort(S1, descending=True)
+    S2s, _ = torch.sort(S2, descending=True)
+    sv_abs = (S1s - S2s).abs()
+    sv_rel = sv_abs / torch.clamp(torch.max(S1s.abs(), S2s.abs()), min=1e-12)
+
+    # subspace alignment
+    ang_U = _principal_angles(U1, U2)
+    ang_V = _principal_angles(V1, V2)
+
+    # Cast S to native dtype so mixed arithmetic with U/V doesn't error.
+    native = V1.dtype
+    S1n = S1s.to(native)
+    S2n = S2s.to(native)
+
+    # Batched residuals: 2 matvec calls instead of 2k
+    MV2 = matvec(V2)
+    MTU2 = matvec_t(U2)
+    s_denom = torch.max(S1s, S2s).clamp(min=1e-12)
+    mv_res = torch.linalg.norm(MV2.float() - S2s.unsqueeze(0) * U2.float(), dim=0) / s_denom
+    mtu_res = torch.linalg.norm(MTU2.float() - S2s.unsqueeze(0) * V2.float(), dim=0) / s_denom
+
+    # Batched reconstruction: 1 matvec call instead of trials
+    X = torch.randn(V1.shape[0], trials, device=device, dtype=V1.dtype)
+    Y = matvec(X)
+    Y1 = U1 @ (S1n.unsqueeze(1) * (V1.T @ X))
+    Y2 = U2 @ (S2n.unsqueeze(1) * (V2.T @ X))
+    denom = torch.linalg.norm(Y.float(), dim=0).clamp(min=1e-12)
+    recon = torch.stack(
+        [
+            torch.linalg.norm((Y - Y1).float(), dim=0) / denom,
+            torch.linalg.norm((Y - Y2).float(), dim=0) / denom,
+            torch.linalg.norm((Y1 - Y2).float(), dim=0) / denom,
+        ],
+        dim=1,
+    )  # (trials, 3)
+
+    return {
+        "k": k,
+        "sv_abs_max": sv_abs.max().item(),
+        "sv_rel_max": sv_rel.max().item(),
+        "ang_U_max_deg": (ang_U.max() * 180.0 / torch.pi).item(),
+        "ang_V_max_deg": (ang_V.max() * 180.0 / torch.pi).item(),
+        "mv_res_max": mv_res.max().item(),
+        "mtu_res_max": mtu_res.max().item(),
+        "recon_M_minus_USVt_mean": recon[:, 0].mean().item(),
+        "recon_M_minus_USVt_max": recon[:, 0].max().item(),
+        "recon_method_diff_mean": recon[:, 2].mean().item(),
+        "recon_method_diff_max": recon[:, 2].max().item(),
+    }
 
 
 @pytest.fixture
@@ -545,8 +637,7 @@ class TestSmallSequenceLength:
             empty_S,
             empty_V,
         )
-        assert result["k"] == 0
-        assert result["sv_abs_max"] == 0.0
+        assert result is None
 
     def test_randomized_svd_L2_k1(self):
         """L=2 is the smallest non-degenerate case — should produce 1 SV."""
