@@ -290,41 +290,75 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda", dtype=None
     return U, S[:k], V
 
 
-def lanczos(operator, dim, k, iters, device, dtype=None):
-    """Lanczos iteration with pre-allocated basis and vectorized reorthogonalization.
+def _working_dtype(native_dtype):
+    if native_dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return native_dtype
 
-    operator: v -> operator(v), expects 1D input of shape [dim].
-    dim: dimension L.
-    k: (unused, kept for interface compat) number of Lanczos vectors.
-    iters: total Lanczos steps.
+
+def _real_dtype(working_dtype):
+    if working_dtype in (torch.complex128, torch.float64):
+        return torch.float64
+    return torch.float32
+
+
+def hermitian_lanczos(matvec, dim, k, iters, device, which="largest", dtype=None):
+    """Top/bottom-k eigenpairs of a Hermitian operator via Lanczos.
+
+    Supports real and complex dtypes.  Uses conjugated inner products
+    (torch.vdot) so it works correctly for complex-Hermitian H.
+
+    Args:
+        matvec: v -> H @ v, callable on 1-D tensors of length `dim`.
+        dim:    Dimension of the operator.
+        k:      Number of eigenvalues/eigenvectors to return.
+        iters:  Number of Lanczos iterations.
+        device: Torch device string.
+        which:  ``"largest"`` (default) or ``"smallest"``.
+        dtype:  Native dtype of the operator (None → float32).
+
+    Returns:
+        eigenvalues:  (k,) real tensor (float32 or float64).
+        eigenvectors: (dim, k) tensor in *dtype*.
     """
-    if dim <= 0:
-        return torch.empty(0, device=device), torch.empty(dim, 0, device=device)
+    if which not in ("smallest", "largest"):
+        raise ValueError(f"which must be 'smallest' or 'largest', got '{which}'")
 
     native_dtype = dtype or torch.float32
+    work_dt = _working_dtype(native_dtype)
+    real_dt = _real_dtype(work_dt)
 
-    V = torch.empty(dim, iters + 1, device=device, dtype=native_dtype)
-    alphas = torch.empty(iters, device=device, dtype=torch.float32)
-    betas_arr = torch.empty(iters, device=device, dtype=torch.float32)
+    if k <= 0 or dim <= 0:
+        return torch.empty(0, device=device, dtype=real_dt), torch.empty(
+            dim, 0, device=device, dtype=native_dtype
+        )
 
-    q = torch.randn(dim, device=device, dtype=native_dtype)
+    k = min(k, dim)
+    iters = min(iters, dim)
+
+    V = torch.empty(dim, iters + 1, device=device, dtype=work_dt)
+    alphas = torch.empty(iters, device=device, dtype=real_dt)
+    betas_arr = torch.empty(iters, device=device, dtype=real_dt)
+
+    q = torch.randn(dim, device=device, dtype=work_dt)
     V[:, 0] = q / torch.linalg.norm(q)
 
     beta = 0.0
     m = 0
 
     for j in range(iters):
-        z = operator(V[:, j])
-        alpha = V[:, j].dot(z)
+        z = matvec(V[:, j].to(native_dtype)).to(work_dt)
+
+        alpha = torch.vdot(V[:, j], z).real
         alphas[j] = alpha
 
         z = z - alpha * V[:, j]
         if j > 0:
             z = z - beta * V[:, j - 1]
 
-        # Modified Gram-Schmidt reorthogonalization (sequential for fp16 stability)
-        for i in range(j + 1):
-            z = z - V[:, i].dot(z) * V[:, i]
+        # CGS reorthogonalization
+        coeffs = V[:, : j + 1].conj().T @ z
+        z = z - V[:, : j + 1] @ coeffs
 
         beta = torch.linalg.norm(z).item()
         if beta < 1e-8:
@@ -335,17 +369,29 @@ def lanczos(operator, dim, k, iters, device, dtype=None):
         V[:, j + 1] = z / beta
         m = j + 1
 
-    # Build tridiagonal T via vectorized diagonal copy
-    T = torch.zeros(m, m, device=device, dtype=torch.float32)
+    if m == 0:
+        return torch.empty(0, device=device, dtype=real_dt), torch.empty(
+            dim, 0, device=device, dtype=native_dtype
+        )
+
+    T = torch.zeros(m, m, device=device, dtype=real_dt)
     T.diagonal().copy_(alphas[:m])
     if m > 1:
         T.diagonal(1).copy_(betas_arr[: m - 1])
         T.diagonal(-1).copy_(betas_arr[: m - 1])
 
     evals, evecs = torch.linalg.eigh(T)
-    ritz_vectors = V[:, :m] @ evecs.to(V.dtype)
 
-    return evals, ritz_vectors
+    k = min(k, m)
+    if which == "smallest":
+        sel_evals = evals[:k]
+        sel_evecs = evecs[:, :k]
+    else:
+        sel_evals = evals[-k:].flip(0)
+        sel_evecs = evecs[:, -k:].flip(1)
+
+    ritz_vectors = (V[:, :m] @ sel_evecs.to(V.dtype)).to(native_dtype)
+    return sel_evals, ritz_vectors
 
 
 def _golub_kahan_bidiag(matvec, matvec_t, dim, iters, device, dtype=None):
