@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from glassbox.svd import (
+    _working_dtype,
     apply_A_blocked,
     apply_AT_blocked,
     compare_svd_results,
@@ -15,6 +16,7 @@ from glassbox.svd import (
     get_M_entries_batch,
     hermitian_lanczos,
     matvec_M_blocked,
+    matvec_Masym_blocked,
     matvec_MT_blocked,
     matvec_S,
     matvec_ST,
@@ -501,3 +503,96 @@ class TestHermitianLanczos:
             assert evals.dtype == torch.float64
         else:
             assert evals.dtype == torch.float32
+
+
+def _mk_qk(n=24, d=8, seed=0):
+    torch.manual_seed(seed)
+    Q = torch.randn(n, d)
+    K = torch.randn(n, d)
+    scale = 1.0 / math.sqrt(d)
+    _, dk = compute_dk_blocked(Q, K, scale)
+    return Q, K, scale, dk
+
+
+class TestMultiRHSMatvecs:
+    """A [L, m] multi-RHS pass equals m independent [L] matvecs, column-by-column."""
+
+    @pytest.mark.parametrize("causal", [False, True])
+    @pytest.mark.parametrize(
+        "fn",
+        [
+            "apply_A_blocked",
+            "apply_AT_blocked",
+            "matvec_M_blocked",
+            "matvec_MT_blocked",
+            "matvec_Masym_blocked",
+        ],
+    )
+    def test_columns_match_individual(self, fn, causal):
+        Q, K, scale, dk = _mk_qk()
+        n, m = Q.shape[0], 5
+        torch.manual_seed(1)
+        X = torch.randn(n, m)
+        if fn in ("apply_A_blocked", "apply_AT_blocked"):
+            f = {"apply_A_blocked": apply_A_blocked, "apply_AT_blocked": apply_AT_blocked}[fn]
+            batched = f(Q, K, X, scale, block_size=8, causal=causal)
+            cols = [f(Q, K, X[:, j], scale, block_size=8, causal=causal) for j in range(m)]
+        else:
+            f = {
+                "matvec_M_blocked": matvec_M_blocked,
+                "matvec_MT_blocked": matvec_MT_blocked,
+                "matvec_Masym_blocked": matvec_Masym_blocked,
+            }[fn]
+            batched = f(Q, K, X, dk, scale, block_size=8, causal=causal)
+            cols = [f(Q, K, X[:, j], dk, scale, block_size=8, causal=causal) for j in range(m)]
+        assert batched.shape == (n, m)
+        for j in range(m):
+            torch.testing.assert_close(batched[:, j], cols[j], atol=1e-6, rtol=1e-5)
+
+
+class TestRandomizedSVDReproducibility:
+    def test_same_seed_is_deterministic(self):
+        Q, K, scale, dk = _mk_qk(n=32)
+        mv = lambda v: matvec_M_blocked(Q, K, v, dk, scale)  # noqa: E731
+        mvt = lambda u: matvec_MT_blocked(Q, K, u, dk, scale)  # noqa: E731
+        _, s1, _ = randomized_svd(mv, mvt, 32, 4, device="cpu", seed=7)
+        _, s2, _ = randomized_svd(mv, mvt, 32, 4, device="cpu", seed=7)
+        torch.testing.assert_close(s1, s2, atol=0.0, rtol=0.0)
+
+    def test_batched_matches_materialized(self):
+        Q, K, scale, dk = _mk_qk(n=32)
+        A = torch.softmax(Q @ K.T * scale, dim=-1)
+        M, _, _ = compute_degree_normalized_M(A)
+        true = torch.linalg.svdvals(M)[:4]
+        mv = lambda v: matvec_M_blocked(Q, K, v, dk, scale)  # noqa: E731
+        mvt = lambda u: matvec_MT_blocked(Q, K, u, dk, scale)  # noqa: E731
+        _, s, _ = randomized_svd(mv, mvt, 32, 4, device="cpu", seed=0)
+        assert ((s - true).abs() / true).max().item() < 0.02
+
+    def test_seed_none_uses_global_rng(self):
+        # seed=None branch: draws from the global RNG (smoke + shape).
+        Q, K, scale, dk = _mk_qk(n=16)
+        mv = lambda v: matvec_M_blocked(Q, K, v, dk, scale)  # noqa: E731
+        mvt = lambda u: matvec_MT_blocked(Q, K, u, dk, scale)  # noqa: E731
+        _, s, _ = randomized_svd(mv, mvt, 16, 3, device="cpu", seed=None)
+        assert s.shape == (3,) and torch.isfinite(s).all()
+
+
+class TestWorkingDtype:
+    def test_working_dtype_promotes_low_precision(self):
+        assert _working_dtype(torch.float16) == torch.float32
+        assert _working_dtype(torch.bfloat16) == torch.float32
+        assert _working_dtype(torch.float32) == torch.float32
+        assert _working_dtype(torch.float64) == torch.float64
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_fro_norm_low_precision_close_to_fp32(self, dtype):
+        Q, K, scale, _ = _mk_qk(n=48)
+        _, dk32 = compute_dk_blocked(Q, K, scale)
+        ref = compute_M_fro_norm_blocked(Q, K, dk32, scale).item()
+        Ql, Kl = Q.to(dtype), K.to(dtype)
+        _, dkl = compute_dk_blocked(Ql, Kl, scale)
+        got = compute_M_fro_norm_blocked(Ql, Kl, dkl, scale)
+        # output cast back to input dtype, value within low-precision tolerance of fp32
+        assert got.dtype == dtype
+        assert abs(float(got.item()) - ref) < 0.05 * ref

@@ -12,6 +12,9 @@ import torch
 
 from glassbox.hodge import (
     adaptive_curl_samples,
+    asymmetry_partials_matrix_free,
+    compute_asymmetry_witness_materialized,
+    compute_asymmetry_witness_matrix_free,
     compute_G_materialized,
     compute_G_matrix_free,
     compute_routing_features_materialized,
@@ -249,12 +252,26 @@ class TestCurl:
 
 class TestAsymmetryG:
     def test_matrix_free_matches_materialized(self):
+        # G is now a stochastic Hutchinson estimate (Route B): direct
+        # ||M_asym z||^2, no transpose block.  ||M||_F stays exact.
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
         G_ref, fro_ref = compute_G_materialized(M)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        G_mf, fro_mf = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=4)
-        assert abs(G_ref - G_mf) < 0.01, f"G: ref={G_ref}, mf={G_mf}"
+        G_mf, fro_mf = compute_G_matrix_free(
+            Q, K, d_k_mf, scale, block_size=4, n_hutchinson=64, seed=0
+        )
+        assert abs(G_ref - G_mf) < 0.03, f"G: ref={G_ref}, mf={G_mf}"
         assert abs(fro_ref - fro_mf) < 0.01, f"Fro: ref={fro_ref}, mf={fro_mf}"
+
+    def test_no_transpose_block(self):
+        """Acceptance: the (L, block_size) transpose block is gone.
+
+        The Route B estimator must not materialize a transpose block via
+        get_M_entries_batch (the O(L^2) path that was removed in #39)."""
+        import inspect
+
+        src = inspect.getsource(compute_G_matrix_free)
+        assert "get_M_entries_batch" not in src
 
     def test_symmetric_is_small(self):
         """Q=K gives nearly-symmetric M (softmax(QQ^T) is symmetric, but
@@ -265,8 +282,40 @@ class TestAsymmetryG:
         K = Q.clone()
         scale = 1.0 / math.sqrt(4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        G, _ = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=4)
+        G, _ = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=4, n_hutchinson=64, seed=0)
         assert G < 0.25  # small but not exactly zero due to normalization
+
+    def test_seeded_determinism(self):
+        """Same seed -> identical estimate; the Hutchinson probes are seeded."""
+        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        _, d_k_mf = compute_dk_blocked(Q, K, scale)
+        a = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=4, n_hutchinson=32, seed=7)[0]
+        b = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=4, n_hutchinson=32, seed=7)[0]
+        assert a == b
+
+    def test_partials_additive(self):
+        """S_asym ~ ||M_asym||_F^2 and S_M = ||M||_F^2; G = sqrt(S_asym/S_M)."""
+        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        _, d_k_mf = compute_dk_blocked(Q, K, scale)
+        S_asym, S_M = asymmetry_partials_matrix_free(
+            Q, K, d_k_mf, scale, block_size=4, n_hutchinson=32, seed=0
+        )
+        G_from_partials = math.sqrt(S_asym / S_M)
+        G_direct = compute_G_matrix_free(
+            Q, K, d_k_mf, scale, block_size=4, n_hutchinson=32, seed=0
+        )[0]
+        assert abs(G_from_partials - G_direct) < 1e-5
+
+    def test_low_precision_close_to_fp32(self):
+        """fp16/bf16 probe accumulation (float32 working dtype) stays close to fp32."""
+        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(24, 4)
+        _, d_k_mf = compute_dk_blocked(Q, K, scale)
+        G32 = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=8, n_hutchinson=64, seed=0)[0]
+        for dtype in (torch.float16, torch.bfloat16):
+            Ql, Kl = Q.to(dtype), K.to(dtype)
+            _, dkl = compute_dk_blocked(Ql, Kl, scale)
+            Gl = compute_G_matrix_free(Ql, Kl, dkl, scale, block_size=8, n_hutchinson=64, seed=0)[0]
+            assert abs(Gl - G32) < 0.05, f"{dtype}: {Gl} vs {G32}"
 
     def test_algebraic_identity(self):
         """||M_asym||²_F = (||M||²_F - <M,M^T>_F) / 2"""
@@ -277,6 +326,39 @@ class TestAsymmetryG:
         inner = (M * M.T).sum()
         rhs = (M_fro_sq - inner) / 2.0
         assert abs(lhs.item() - rhs.item()) < 1e-6
+
+
+class TestAsymmetryWitness:
+    """Per-row asymmetry profile (witness): ||witness||_2 == G."""
+
+    def test_materialized_norm_equals_G(self):
+        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        G_ref, _ = compute_G_materialized(M)
+        w = compute_asymmetry_witness_materialized(M)
+        assert w.shape == (16,)
+        assert abs(w.norm().item() - G_ref) < 1e-6
+
+    def test_matrix_free_consistent_with_scalar(self):
+        # Same seed/n_hutchinson => witness and scalar use identical probes,
+        # so ||witness||_2 == G exactly (up to float).
+        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        _, d_k_mf = compute_dk_blocked(Q, K, scale)
+        G_mf, _ = compute_G_matrix_free(Q, K, d_k_mf, scale, block_size=4, n_hutchinson=32, seed=0)
+        w = compute_asymmetry_witness_matrix_free(
+            Q, K, d_k_mf, scale, block_size=4, n_hutchinson=32, seed=0
+        )
+        assert w.shape == (16,)
+        assert abs(w.norm().item() - G_mf) < 1e-5
+
+    def test_matrix_free_matches_materialized_profile(self):
+        Q, K, scale, A, M, d_k_inv_sqrt = _make_M(16, 4)
+        _, d_k_mf = compute_dk_blocked(Q, K, scale)
+        w_ref = compute_asymmetry_witness_materialized(M)
+        w_mf = compute_asymmetry_witness_matrix_free(
+            Q, K, d_k_mf, scale, block_size=4, n_hutchinson=256, seed=0
+        )
+        # per-row profile agrees in aggregate (stochastic per-entry)
+        assert abs(w_mf.norm().item() - w_ref.norm().item()) < 0.03
 
 
 # ===========================================================================
@@ -290,8 +372,10 @@ class TestPythagorean:
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=200)
+        # Gamma = sqrt(max(G^2 - C^2, 0)) is derived from G, so the identity is
+        # exact when G >= C; the looser bound absorbs stochastic G dipping below C.
         residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
-        assert residual < 0.01, f"Pythagorean: G={f.G}, Γ={f.Gamma}, C={f.C}, residual={residual}"
+        assert residual < 0.03, f"Pythagorean: G={f.G}, Γ={f.Gamma}, C={f.C}, residual={residual}"
 
     def test_multiple_seeds(self):
         for seed in range(10):
@@ -303,7 +387,7 @@ class TestPythagorean:
                     Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
                 )
                 residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
-                assert residual < 0.02, f"seed={seed}, L={L}: residual={residual}"
+                assert residual < 0.05, f"seed={seed}, L={L}: residual={residual}"
 
     def test_gamma_nonneg(self):
         for seed in range(5):
@@ -323,16 +407,18 @@ class TestPythagorean:
             f = compute_routing_features_matrix_free(
                 Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
             )
-            assert f.C <= f.G + 0.01, f"C={f.C} > G={f.G}"
+            assert f.C <= f.G + 0.05, f"C={f.C} > G={f.G}"
 
     def test_exact_at_exhaustive_n(self):
-        # n=5: C(5,3)=10 < floor=200, all triangles enumerated
+        # n=5: C(5,3)=10 < floor=200, all triangles enumerated (curl C exact).
+        # G is a Hutchinson estimate, but Gamma = sqrt(max(G^2 - C^2, 0)) keeps
+        # the residual ~0 whenever G >= C.
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(5, 4, seed=42)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
         f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
         residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
-        assert residual < 1e-4, f"Exact case residual={residual}"
+        assert residual < 0.05, f"Exhaustive-curl case residual={residual}"
 
 
 # ===========================================================================
@@ -620,9 +706,11 @@ class TestExactHodgeCrossValidation:
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(5, 4, seed=42)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
+        f = compute_routing_features_matrix_free(
+            Q, K, d_k_mf, scale, lse, rank=2, min_samples=200, n_hutchinson=512
+        )
         G_exact, C_exact, Gamma_exact, _, _ = self._exact_hodge_coefficients(M)
-        # G should agree (both exact)
+        # G is a Hutchinson estimate; many probes => agreement with exact G
         assert abs(f.G - G_exact) < 0.02, f"G: mf={f.G}, exact={G_exact}"
         # Both C should be nonzero (correlated)
         assert f.C > 0 and C_exact > 0
@@ -638,9 +726,11 @@ class TestExactHodgeCrossValidation:
         Q, K, scale, A, M, d_k_inv_sqrt = _make_M(8, 4, seed=77)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
+        f = compute_routing_features_matrix_free(
+            Q, K, d_k_mf, scale, lse, rank=2, min_samples=200, n_hutchinson=512
+        )
         G_exact, C_exact, Gamma_exact, _, _ = self._exact_hodge_coefficients(M)
-        # Both G should agree (exact computation)
+        # G is a Hutchinson estimate; many probes => agreement with exact G
         assert abs(f.G - G_exact) < 0.02, f"G: mf={f.G}, exact={G_exact}"
         # Both C should be nonzero (correlated)
         assert f.C > 0 and C_exact > 0
@@ -772,6 +862,7 @@ class TestMaterializedVsMatrixFree:
             lse,
             rank=4,
             min_samples=200,
+            n_hutchinson=512,  # G is a Hutchinson estimate; many probes => tight agreement
         )
         assert abs(f_mat.G - f_mf.G) < 0.02
 

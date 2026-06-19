@@ -45,30 +45,37 @@ def matvec_ST(Q, K, u):
 
 
 def apply_A_blocked(Q, K, v, scale, block_size=256, causal=False):
-    """A @ v via blocked row-streaming. Peak memory: O(block_size * L_k)."""
+    """A @ v via blocked row-streaming. Peak memory: O(block_size * L_k).
+
+    ``v`` may be a vector ``[L_k]`` or a matrix ``[L_k, m]`` of m right-hand
+    sides; in the matrix case all m columns share one softmax pass per block
+    (GEMM instead of m GEMVs), the basis for batched Hutchinson probes.
+    """
     L_q = Q.shape[0]
-    result = torch.zeros(L_q, device=Q.device, dtype=Q.dtype)
+    out_shape = (L_q,) if v.dim() == 1 else (L_q, v.shape[1])
+    result = torch.zeros(out_shape, device=Q.device, dtype=Q.dtype)
     for i0 in range(0, L_q, block_size):
         i1 = min(i0 + block_size, L_q)
         scores = Q[i0:i1] @ K.T * scale  # [bs, L_k]
         if causal:
             scores = _mask_causal(scores, i0)
         attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
-        result[i0:i1] = attn @ v  # [bs]
+        result[i0:i1] = attn @ v  # [bs] or [bs, m]
     return result
 
 
 def apply_AT_blocked(Q, K, u, scale, block_size=256, causal=False):
-    """A^T @ u via blocked row-streaming."""
+    """A^T @ u via blocked row-streaming. ``u`` may be ``[L_q]`` or ``[L_q, m]``."""
     L_k = K.shape[0]
-    result = torch.zeros(L_k, device=K.device, dtype=K.dtype)
+    out_shape = (L_k,) if u.dim() == 1 else (L_k, u.shape[1])
+    result = torch.zeros(out_shape, device=K.device, dtype=K.dtype)
     for i0 in range(0, Q.shape[0], block_size):
         i1 = min(i0 + block_size, Q.shape[0])
         scores = Q[i0:i1] @ K.T * scale
         if causal:
             scores = _mask_causal(scores, i0)
         attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
-        result += attn.T @ u[i0:i1]  # [L_k]
+        result = result + attn.T @ u[i0:i1]  # [L_k] or [L_k, m]
     return result
 
 
@@ -107,20 +114,33 @@ def get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, ii, jj, causal=False):
     return result
 
 
+def _scale_rows(d, x):
+    """Broadcast a per-row vector ``d`` [L] against ``x`` of shape [L] or [L, m]."""
+    return d.unsqueeze(-1) * x if x.dim() == 2 else d * x
+
+
 def matvec_M_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """M @ x = A @ (D_K^{-1/2} * x). D_Q^{-1/2} = I for row-stochastic A."""
-    return apply_A_blocked(Q, K, d_k_inv_sqrt * x, scale, block_size, causal=causal)
+    """M @ x = A @ (D_K^{-1/2} * x). D_Q^{-1/2} = I for row-stochastic A.
+
+    ``x`` may be ``[L]`` or ``[L, m]`` (multi-RHS).
+    """
+    return apply_A_blocked(Q, K, _scale_rows(d_k_inv_sqrt, x), scale, block_size, causal=causal)
 
 
 def matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """M^T @ x = D_K^{-1/2} * (A^T @ x)."""
-    return d_k_inv_sqrt * apply_AT_blocked(Q, K, x, scale, block_size, causal=causal)
+    """M^T @ x = D_K^{-1/2} * (A^T @ x). ``x`` may be ``[L]`` or ``[L, m]``."""
+    return _scale_rows(d_k_inv_sqrt, apply_AT_blocked(Q, K, x, scale, block_size, causal=causal))
 
 
 def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """Compute ||M||_F without materializing M."""
+    """Compute ||M||_F without materializing M.
+
+    The sum-of-squares is accumulated in a float32 working dtype so fp16/bf16
+    inputs do not lose the running total across blocks.
+    """
     L_q = Q.shape[0]
-    norm_sq = torch.tensor(0.0, device=Q.device, dtype=Q.dtype)
+    wdt = _working_dtype(Q.dtype)
+    norm_sq = torch.tensor(0.0, device=Q.device, dtype=wdt)
     for i0 in range(0, L_q, block_size):
         i1 = min(i0 + block_size, L_q)
         scores = Q[i0:i1] @ K.T * scale
@@ -128,8 +148,8 @@ def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256, causal
             scores = _mask_causal(scores, i0)
         attn = torch.softmax(scores, dim=-1)  # [bs, L_k]
         M_block = attn * d_k_inv_sqrt.unsqueeze(0)  # broadcast [bs, L_k]
-        norm_sq = norm_sq + (M_block**2).sum()
-    return torch.sqrt(norm_sq)
+        norm_sq = norm_sq + (M_block.to(wdt) ** 2).sum()
+    return torch.sqrt(norm_sq).to(Q.dtype)
 
 
 def compute_degree_normalized_M(A, epsilon=1e-10):
@@ -198,7 +218,7 @@ def matvec_commutator_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, caus
     return term1 - term2
 
 
-def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
+def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda", seed=42):
     """
     Matrix-free Randomized SVD for a (dim x dim) linear operator given matvecs.
 
@@ -224,32 +244,40 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
         p:   Oversampling parameter (default 5).
         q:   Number of power iterations (default 2).
         device: Torch device.
+        seed: RNG seed for the test matrix Ω (default 42 => reproducible
+              singular values).  Pass None to draw from the global RNG.
 
     Returns:
         U: (dim, k) left singular vectors.
         S: (k,)    singular values (descending).
         V: (dim, k) right singular vectors.
+
+    The matvec / matvec_t callables are applied to the whole (dim, k+p) test
+    matrix at once (multi-RHS), so range-finding and projection cost one
+    blocked pass each instead of k+p separate matvecs.
     """
     # Clamp oversampling so k + p doesn't exceed dim
     p = min(p, max(dim - k, 0))
 
-    # Step 1: random test matrix Ω
-    Omega = torch.randn(dim, k + p, device=device)
+    # Step 1: random test matrix Ω (seeded for reproducibility)
+    if seed is None:
+        Omega = torch.randn(dim, k + p, device=device)
+    else:
+        gen = torch.Generator(device=device).manual_seed(seed)
+        Omega = torch.randn(dim, k + p, device=device, generator=gen)
 
-    # Step 2: sample Y = M Ω
-    Y = torch.stack([matvec(Omega[:, i]) for i in range(k + p)], dim=1)  # (dim, k+p)
+    # Step 2: sample Y = M Ω  (one multi-RHS pass)
+    Y = matvec(Omega)  # (dim, k+p)
 
     # Optional: power iterations to improve spectral separation.
     for _ in range(q):
-        Z = torch.stack([matvec_t(Y[:, i]) for i in range(k + p)], dim=1)  # M^T Y
-        Y = torch.stack([matvec(Z[:, i]) for i in range(k + p)], dim=1)  # M (M^T Y)
+        Y = matvec(matvec_t(Y))  # M (M^T Y)
 
     # Step 3: orthonormal basis Q for range(Y)
     Q, _ = torch.linalg.qr(Y, mode="reduced")  # (dim, k+p)
 
-    # Step 4: form small matrix B = Q^T M  (shape (k+p, dim))
-    # We can compute B via B^T = M^T Q, using matvec_t.
-    Bt = torch.stack([matvec_t(Q[:, i]) for i in range(k + p)], dim=1)  # (dim, k+p)
+    # Step 4: form small matrix B = Q^T M  (shape (k+p, dim)) via B^T = M^T Q
+    Bt = matvec_t(Q)  # (dim, k+p)
     B = Bt.T  # (k+p, dim)
 
     # Step 5: SVD of small B
@@ -261,19 +289,25 @@ def randomized_svd(matvec, matvec_t, dim, k, p=5, q=2, device="cuda"):
     return U, S[:k], V
 
 
-def lanczos(operator, dim, k, iters, device):
+def lanczos(operator, dim, k, iters, device, seed=42):
     """
     operator: function v -> operator(v), expects v shape [dim]
     dim: dimension L
     k: number of Lanczos vectors kept (>= desired eigenvectors)
     iters: total Lanczos steps
+    seed: RNG seed for the start vector (default 42 => reproducible Ritz values);
+          pass None to draw from the global RNG.
     """
     Q = []
     alphas = []
     betas = []
 
-    # start with random normalized vector
-    q = torch.randn(dim, device=device)
+    # start with random normalized vector (seeded for reproducibility)
+    if seed is None:
+        q = torch.randn(dim, device=device)
+    else:
+        gen = torch.Generator(device=device).manual_seed(seed)
+        q = torch.randn(dim, device=device, generator=gen)
     q = q / torch.linalg.norm(q)
     Q.append(q)
 
@@ -375,9 +409,7 @@ def hermitian_lanczos(
         if init.ndim == 1:
             init = init.unsqueeze(1)
         if init.shape[0] != dim:
-            raise ValueError(
-                f"initial_vectors dim {init.shape[0]} != operator dim {dim}"
-            )
+            raise ValueError(f"initial_vectors dim {init.shape[0]} != operator dim {dim}")
         Q_init, _ = torch.linalg.qr(init, mode="reduced")
         V[:, 0] = Q_init[:, 0]
     else:
@@ -550,7 +582,7 @@ def _principal_angles(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     return torch.acos(s)
 
 
-def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str):
+def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str, seed=42):
     """
     Compute top-k singular triplets using Lanczos on B = M^T M.
 
@@ -584,6 +616,7 @@ def svd_via_lanczos(matvec, matvec_t, dim: int, k: int, iters: int, device: str)
         k=max(2 * k, k + 2),
         iters=iters,
         device=device,
+        seed=seed,
     )
     # torch.linalg.eigh returns ascending; take largest-k.
     idx = torch.argsort(evals, descending=True)[:k]

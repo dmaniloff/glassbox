@@ -111,6 +111,21 @@ class RoutingFeatures(BaseModel):
         return values
 
 
+class AsymmetryFeatures(BaseModel):
+    """Asymmetry coefficient G = ||M_asym||_F / ||M||_F of degree-normalized M.
+
+    Hodge G signal (issue #39).  G is estimated matrix-free via a direct
+    Hutchinson estimator on ||M_asym z||^2 (Route B) above the threshold, and
+    exactly below it.  In streaming mode G is the global statistic accumulated
+    from additive sufficient statistics over DISJOINT (tumbling) windows; the
+    per-token asymmetry profile is emitted as the snapshot witness.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    G: float | None = Field(None, description="Total asymmetry: ||M_asym||_F / ||M||_F.")
+
+
 class TrackerFeatures(BaseModel):
     """Features from raw post-softmax attention matrix A.
 
@@ -209,21 +224,37 @@ class CheegerFeatures(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    phi_star: float | None = Field(None, description="Bipartite sweep conductance (None in light mode).")
-    sigma2: float | None = Field(None, description="Second largest eigenvalue of M_sym = (M+M^T)/2.")
+    phi_star: float | None = Field(
+        None, description="Bipartite sweep conductance (None in light mode)."
+    )
+    sigma2: float | None = Field(
+        None, description="Second largest eigenvalue of M_sym = (M+M^T)/2."
+    )
     cheeger_lower: float | None = Field(None, description="Tier 1 lower: (1 - sigma2) / 2.")
     cheeger_upper: float | None = Field(None, description="Tier 1 upper: sqrt(2 * (1 - sigma2)).")
     phi_hat: float | None = Field(None, description="Tier 2: sweep conductance when gap-healthy.")
-    improved_upper: float | None = Field(None, description="Tier 3: KLGT bound O(k)*mu2/sqrt(mu_{k+1}).")
-    bracket_width: float | None = Field(None, description="cheeger_upper - cheeger_lower (confidence signal).")
-    spectral_gap: float | None = Field(None, description="lambda2 - lambda3 from M_sym eigenproblem.")
-    recomputed: bool = Field(False, description="Whether a full recompute was triggered this window.")
+    improved_upper: float | None = Field(
+        None, description="Tier 3: KLGT bound O(k)*mu2/sqrt(mu_{k+1})."
+    )
+    bracket_width: float | None = Field(
+        None, description="cheeger_upper - cheeger_lower (confidence signal)."
+    )
+    spectral_gap: float | None = Field(
+        None, description="lambda2 - lambda3 from M_sym eigenproblem."
+    )
+    recomputed: bool = Field(
+        False, description="Whether a full recompute was triggered this window."
+    )
 
     # Dual Cheeger (Bauer-Jost 2013): bipartiteness diagnostic
     lambda_min: float | None = Field(None, description="Smallest eigenvalue of M_sym.")
     dual_gap: float | None = Field(None, description="1 + lambda_min (bipartiteness spectral gap).")
-    dual_cheeger_lower: float | None = Field(None, description="dual_gap / 2 (lower bound on beta).")
-    dual_cheeger_upper: float | None = Field(None, description="sqrt(2 * dual_gap) (upper bound on beta).")
+    dual_cheeger_lower: float | None = Field(
+        None, description="dual_gap / 2 (lower bound on beta)."
+    )
+    dual_cheeger_upper: float | None = Field(
+        None, description="sqrt(2 * dual_gap) (upper bound on beta)."
+    )
 
 
 class SVDSnapshot(BaseModel):
@@ -244,6 +275,7 @@ class SVDSnapshot(BaseModel):
     features: (
         SpectralFeatures
         | RoutingFeatures
+        | AsymmetryFeatures
         | TrackerFeatures
         | SelfAttnFeatures
         | LaplacianFeatures
@@ -275,6 +307,8 @@ class SVDSnapshot(BaseModel):
         if isinstance(feat_raw, dict):
             if sig == "routing":
                 d["features"] = RoutingFeatures(**feat_raw)
+            elif sig == "asymmetry":
+                d["features"] = AsymmetryFeatures(**feat_raw)
             elif sig == "tracker":
                 d["features"] = TrackerFeatures(**feat_raw)
             elif sig == "selfattn":

@@ -7,13 +7,28 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
-SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian", "cheeger"]
+SIGNAL_NAMES: list[str] = [
+    "spectral",
+    "routing",
+    "asymmetry",
+    "tracker",
+    "selfattn",
+    "laplacian",
+    "cheeger",
+]
 
 # Signals that use SVD rank/method
 SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker", "cheeger"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
-THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian", "cheeger"}
+THRESHOLD_SIGNALS: set[str] = {
+    "routing",
+    "asymmetry",
+    "tracker",
+    "selfattn",
+    "laplacian",
+    "cheeger",
+}
 
 
 def parse_signal_names(ctx, param, value):
@@ -67,6 +82,29 @@ class RoutingConfig(BaseModel):
     hodge_confidence: float = 0.95
     hodge_pilot_size: int = 100
     hodge_min_samples: int = 200
+
+
+class AsymmetryConfig(BaseModel):
+    """Asymmetry coefficient G = ||M_asym||_F / ||M||_F of degree-normalized M.
+
+    Hodge G signal (issue #39).  Matrix-free Hutchinson estimator (Route B,
+    direct ||M_asym z||^2) above ``threshold``, exact materialized below.
+    When ``streaming`` is set, the per-window sufficient statistics
+    (||M_asym||_F^2, ||M||_F^2) are accumulated into a global G — unbiased only
+    under disjoint (tumbling) windowing (``q_buffer_mode='tumbling'``).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    interval: int = 32
+    heads: list[int] = [0]
+    threshold: int = 512
+    block_size: int = 256
+    causal: bool = True
+    n_hutchinson: int = 32
+    seed: int = 42
+    streaming: bool = False
 
 
 class TrackerConfig(BaseModel):
@@ -184,6 +222,7 @@ class GlassboxConfig(BaseSettings):
 
     spectral: SpectralConfig = SpectralConfig()
     routing: RoutingConfig = RoutingConfig()
+    asymmetry: AsymmetryConfig = AsymmetryConfig()
     tracker: TrackerConfig = TrackerConfig()
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()

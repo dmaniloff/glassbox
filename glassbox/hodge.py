@@ -25,7 +25,7 @@ import torch
 
 from glassbox.results import RoutingFeatures
 from glassbox.svd import (
-    compute_logsumexp_blocked,
+    _working_dtype,
     compute_M_fro_norm_blocked,
     get_M_entries_batch,
     matvec_commutator_blocked,
@@ -210,44 +210,176 @@ def estimate_curl_matrix_free(
 # ---------------------------------------------------------------------------
 
 
-def compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size=256, causal=False):
-    """Matrix-free G via blocked streaming.
+def _asymmetry_probe_accumulate(
+    Q, K, d_k_inv_sqrt, scale, block_size, n_hutchinson, seed, causal, per_row=False
+):
+    """Hutchinson accumulation of M_asym @ z over Rademacher (+-1) probes.
 
-    Computes ||M||_F^2 and <M, M^T>_F in one pass over row blocks.
-    ||M_asym||_F^2 = (||M||_F^2 - <M, M^T>_F) / 2
+    Returns (s_asym, row_sq) where, with M_asym = (M - M^T) / 2:
+        s_asym  ~ ||M_asym||_F^2 = (1/m) sum_i ||M_asym z_i||^2
+        row_sq  ~ per-row mass; row_sq[i] = (1/m) sum_i (M_asym z_i)[i]^2,
+                  so row_sq.sum() == s_asym (None if per_row=False)
+
+    All n_hutchinson probes are drawn as one [L, m] Rademacher matrix and pushed
+    through M_asym in a single multi-RHS blocked pass (one softmax recompute per
+    block shared across probes -- a GEMM, not m GEMVs), then reduced.  Squares
+    are accumulated in a float32 working dtype for fp16/bf16 safety.  Seeding the
+    generator makes the scalar (per_row=False) and witness (per_row=True) paths
+    draw the identical probe matrix, so ||witness||_2 == G exactly.
     """
     L = Q.shape[0]
-    lse = compute_logsumexp_blocked(Q, K, scale, block_size, causal=causal)
-    norm_sq = torch.tensor(0.0, device=Q.device, dtype=Q.dtype)
-    inner_sq = torch.tensor(0.0, device=Q.device, dtype=Q.dtype)
+    device = Q.device
+    dtype = Q.dtype
+    wdt = _working_dtype(dtype)
 
-    for i0 in range(0, L, block_size):
-        i1 = min(i0 + block_size, L)
-        scores = Q[i0:i1] @ K.T * scale
-        if causal:
-            from glassbox.svd import _mask_causal
+    gen = torch.Generator(device=device).manual_seed(seed)
+    Z = torch.where(
+        torch.rand(L, n_hutchinson, device=device, generator=gen) < 0.5,
+        torch.ones(L, n_hutchinson, device=device, dtype=dtype),
+        -torch.ones(L, n_hutchinson, device=device, dtype=dtype),
+    )
+    W = matvec_Masym_blocked(Q, K, Z, d_k_inv_sqrt, scale, block_size, causal=causal)  # [L, m]
+    Wsq = W.to(wdt) ** 2
+    s_asym = Wsq.sum() / n_hutchinson
+    row_sq = (Wsq.sum(dim=1) / n_hutchinson) if per_row else None
+    return s_asym, row_sq
 
-            scores = _mask_causal(scores, i0)
-        attn = torch.softmax(scores, dim=-1)  # [bs, L]
-        M_block = attn * d_k_inv_sqrt.unsqueeze(0)  # [bs, L]
-        norm_sq = norm_sq + (M_block**2).sum()
 
-        # Compute M[j, i] for all (i, j) pairs in this block
-        row_idx = torch.arange(i0, i1, device=Q.device)
-        col_idx = torch.arange(L, device=Q.device)
-        ii_exp = col_idx.unsqueeze(1).expand(L, i1 - i0).reshape(-1)
-        jj_exp = row_idx.unsqueeze(0).expand(L, i1 - i0).reshape(-1)
-        M_T_entries = get_M_entries_batch(
-            Q, K, lse, d_k_inv_sqrt, scale, ii_exp, jj_exp, causal=causal
-        )
-        M_T_block = M_T_entries.reshape(L, i1 - i0).T  # [bs, L]
-        inner_sq = inner_sq + (M_block * M_T_block).sum()
+def asymmetry_partials_matrix_free(
+    Q,
+    K,
+    d_k_inv_sqrt,
+    scale,
+    M_fro_norm=None,
+    block_size=256,
+    n_hutchinson=32,
+    seed=42,
+    causal=False,
+):
+    """Additive sufficient statistics for G over one window.
 
-    M_fro = torch.sqrt(norm_sq).item()
-    asym_sq = (norm_sq - inner_sq) / 2.0
-    asym_sq = asym_sq.clamp(min=0.0)
-    G = (torch.sqrt(asym_sq) / (torch.sqrt(norm_sq) + EPSILON)).item()
-    return G, M_fro
+    Returns (S_asym, S_M) where S_asym ~ ||M_asym||_F^2 (Hutchinson, Route B)
+    and S_M = ||M||_F^2 (exact).  Both are sums-of-squares, hence additive over
+    a disjoint partition of windows: a streaming reader maintains running totals
+    and reports G_global = sqrt(sum S_asym / sum S_M) at readout.  Floats.
+    """
+    if M_fro_norm is None:
+        M_fro_norm = compute_M_fro_norm_blocked(
+            Q, K, d_k_inv_sqrt, scale, block_size, causal=causal
+        ).item()
+    s_asym, _ = _asymmetry_probe_accumulate(
+        Q, K, d_k_inv_sqrt, scale, block_size, n_hutchinson, seed, causal, per_row=False
+    )
+    S_asym = float(s_asym.clamp(min=0.0).item())
+    S_M = float(M_fro_norm) ** 2
+    return S_asym, S_M
+
+
+def compute_G_matrix_free(
+    Q,
+    K,
+    d_k_inv_sqrt,
+    scale,
+    block_size=256,
+    n_hutchinson=32,
+    seed=42,
+    M_fro_norm=None,
+    causal=False,
+):
+    """Asymmetry coefficient G = ||M_asym||_F / ||M||_F, matrix-free (stochastic).
+
+    Estimates the numerator ||M_asym||_F^2 DIRECTLY via a Hutchinson estimator
+    (Route B), avoiding the catastrophic cancellation of the tr(M^2) route:
+
+        ||M_asym||_F^2 = tr(M_asym^T M_asym) ~ (1/m) sum_i || M_asym z_i ||^2,
+        z_i ~ Rademacher(+-1),  M_asym z = (M z - M^T z) / 2  (2 matvecs/probe).
+
+    Cost O(n_hutchinson * L * d); no transpose block is materialized.  G is
+    non-negative by construction and downward-biased by Jensen (sqrt of an
+    unbiased squared-norm estimate) -- the same convention used by
+    estimate_commutator_norm_matrix_free.  Returns (G, M_fro).
+    """
+    if M_fro_norm is None:
+        M_fro_norm = compute_M_fro_norm_blocked(
+            Q, K, d_k_inv_sqrt, scale, block_size, causal=causal
+        ).item()
+    S_asym, _ = asymmetry_partials_matrix_free(
+        Q, K, d_k_inv_sqrt, scale, M_fro_norm, block_size, n_hutchinson, seed, causal=causal
+    )
+    G = math.sqrt(S_asym) / (M_fro_norm + EPSILON)
+    return G, M_fro_norm
+
+
+def compute_asymmetry_witness_materialized(M):
+    """Per-row asymmetry profile from materialized M.
+
+    witness[i] = ||M_asym[i, :]||_2 / ||M||_F, with M_asym = (M - M^T) / 2.
+    Then ||witness||_2 == G (the materialized asymmetry coefficient), so the
+    witness is a per-token decomposition of the scalar.  Returns Tensor[L].
+    """
+    M_fro = torch.linalg.norm(M, "fro")
+    M_asym = (M - M.T) / 2.0
+    row_norms = torch.linalg.norm(M_asym, dim=1)  # [L]
+    return row_norms / (M_fro + EPSILON)
+
+
+def compute_asymmetry_witness_matrix_free(
+    Q,
+    K,
+    d_k_inv_sqrt,
+    scale,
+    M_fro_norm=None,
+    block_size=256,
+    n_hutchinson=32,
+    seed=42,
+    causal=False,
+):
+    """Per-row asymmetry profile, matrix-free (Hutchinson, Route B).
+
+    Reuses the same Rademacher probes as compute_G_matrix_free (identical seed
+    and n_hutchinson), estimating r_i^2 ~ (1/m) sum (M_asym z)_i^2.  Emits
+    witness[i] = r_i / ||M||_F, so ||witness||_2 == G computed from the same
+    probes (up to float).  Returns Tensor[L].
+    """
+    if M_fro_norm is None:
+        M_fro_norm = compute_M_fro_norm_blocked(
+            Q, K, d_k_inv_sqrt, scale, block_size, causal=causal
+        ).item()
+    _, row_sq = _asymmetry_probe_accumulate(
+        Q, K, d_k_inv_sqrt, scale, block_size, n_hutchinson, seed, causal, per_row=True
+    )
+    row_norms = torch.sqrt(row_sq.clamp(min=0.0))
+    return row_norms / (M_fro_norm + EPSILON)
+
+
+def asymmetry_partials_and_witness_matrix_free(
+    Q,
+    K,
+    d_k_inv_sqrt,
+    scale,
+    M_fro_norm=None,
+    block_size=256,
+    n_hutchinson=32,
+    seed=42,
+    causal=False,
+):
+    """One probe pass returning (S_asym, S_M, row_sq) for a fused scalar+witness.
+
+    S_asym ~ ||M_asym||_F^2, S_M = ||M||_F^2, and row_sq[i] ~ per-row asymmetry
+    mass with sum(row_sq) == S_asym.  Lets a caller derive both the scalar G
+    (from S_asym, S_M) and the per-row witness (from row_sq, S_M) from a single
+    multi-RHS Hutchinson pass instead of two.
+    """
+    if M_fro_norm is None:
+        M_fro_norm = compute_M_fro_norm_blocked(
+            Q, K, d_k_inv_sqrt, scale, block_size, causal=causal
+        ).item()
+    s_asym, row_sq = _asymmetry_probe_accumulate(
+        Q, K, d_k_inv_sqrt, scale, block_size, n_hutchinson, seed, causal, per_row=True
+    )
+    S_asym = float(s_asym.clamp(min=0.0).item())
+    S_M = float(M_fro_norm) ** 2
+    return S_asym, S_M, row_sq
 
 
 # ---------------------------------------------------------------------------
@@ -297,25 +429,22 @@ def estimate_commutator_norm_matrix_free(
 
     ||C||_F^2 = tr(C^T C) ~ (1/m) sum_i z_i^T C^T C z_i
     where z_i ~ Rademacher(+-1) and C = M_sym @ M_asym - M_asym @ M_sym.
-    Each C @ z costs 8 matvecs.
+    Each C @ z costs 8 matvecs.  All m probes are applied as one [L, m]
+    multi-RHS pass; squares accumulate in a float32 working dtype.
     """
     L = Q.shape[0]
     device = Q.device
     dtype = Q.dtype
+    wdt = _working_dtype(dtype)
 
     gen = torch.Generator(device=device).manual_seed(seed)
-
-    trace_est = torch.tensor(0.0, device=device, dtype=dtype)
-    for _ in range(n_hutchinson):
-        z = torch.where(
-            torch.rand(L, device=device, generator=gen) < 0.5,
-            torch.ones(L, device=device, dtype=dtype),
-            -torch.ones(L, device=device, dtype=dtype),
-        )
-        w = matvec_commutator_blocked(Q, K, z, d_k_inv_sqrt, scale, block_size, causal=causal)
-        trace_est = trace_est + w.dot(w)
-
-    trace_est = trace_est / n_hutchinson
+    Z = torch.where(
+        torch.rand(L, n_hutchinson, device=device, generator=gen) < 0.5,
+        torch.ones(L, n_hutchinson, device=device, dtype=dtype),
+        -torch.ones(L, n_hutchinson, device=device, dtype=dtype),
+    )
+    W = matvec_commutator_blocked(Q, K, Z, d_k_inv_sqrt, scale, block_size, causal=causal)  # [L, m]
+    trace_est = (W.to(wdt) ** 2).sum() / n_hutchinson
     comm_fro = torch.sqrt(trace_est.clamp(min=0.0))
     return (comm_fro / (M_fro_norm + EPSILON)).item()
 
@@ -339,7 +468,7 @@ def compute_routing_features_matrix_free(
     pilot_size=100,
     min_samples=200,
     seed=42,
-    n_hutchinson=10,
+    n_hutchinson=32,
     causal=False,
 ):
     """Compute all Hodge routing features matrix-free.
@@ -347,9 +476,9 @@ def compute_routing_features_matrix_free(
     Returns a RoutingFeatures with singular_values, spectral
     features, and Hodge decomposition features populated.
 
-    The Pythagorean identity G^2 = Gamma^2 + C^2 holds by construction:
-    G is exact (blocked streaming), C is sampled (Bernstein-bound adaptive),
-    Gamma is derived from the identity.
+    The Pythagorean identity G^2 = Gamma^2 + C^2 holds approximately:
+    G is a Hutchinson estimate (Route B), C is sampled (Bernstein-bound
+    adaptive), and Gamma = sqrt(max(G^2 - C^2, 0)) is derived from the identity.
     """
     L = Q.shape[0]
     device = Q.device
@@ -376,8 +505,18 @@ def compute_routing_features_matrix_free(
     M_fro_norm = compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
     M_fro_val = M_fro_norm.item()
 
-    # --- G (exact, blocked) ---
-    G, _ = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
+    # --- G (Hutchinson, matrix-free; reuses exact ||M||_F) ---
+    G, _ = compute_G_matrix_free(
+        Q,
+        K,
+        d_k_inv_sqrt,
+        scale,
+        block_size=block_size,
+        n_hutchinson=n_hutchinson,
+        seed=seed,
+        M_fro_norm=M_fro_val,
+        causal=causal,
+    )
 
     # --- C (sampled, Bernstein-bound adaptive) ---
     C = estimate_curl_matrix_free(
