@@ -141,6 +141,17 @@ class GlassboxConfig(BaseSettings):
     emit: EmitConfig = EmitConfig()
     emit_witness: bool = False
 
+    # Q-buffer windowing — bounds memory and enables streaming diagnostics.
+    # 0 = unbounded (full sequence), > 0 = max tokens retained per layer.
+    q_buffer_max_tokens: int = 0
+
+    # "sliding": overlapping windows, trim oldest on every step, fire per
+    #   signal interval.  Window overlap = W - interval.
+    # "tumbling": non-overlapping windows — accumulate W tokens, fire all
+    #   enabled signals, flush.  Window independence simplifies accumulation
+    #   proofs for streaming local→global merges.
+    q_buffer_mode: Literal["sliding", "tumbling"] = "sliding"
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -169,6 +180,8 @@ class GlassboxConfig(BaseSettings):
         block_size: int | None = None,
         output_path: str | None = None,
         otel: bool | None = None,
+        q_buffer_max_tokens: int | None = None,
+        q_buffer_mode: str | None = None,
     ) -> GlassboxConfig:
         """Build a GlassboxConfig from CLI-style arguments.
 
@@ -184,6 +197,10 @@ class GlassboxConfig(BaseSettings):
             overrides["output"] = {"path": output_path}
         if otel is not None:
             overrides["emit"] = {"otel": otel}
+        if q_buffer_max_tokens is not None:
+            overrides["q_buffer_max_tokens"] = q_buffer_max_tokens
+        if q_buffer_mode is not None:
+            overrides["q_buffer_mode"] = q_buffer_mode
 
         signal_set = set(signals)
 

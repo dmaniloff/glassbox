@@ -47,6 +47,24 @@ class PerLayerSVDState:
 
     q_buffer: list[torch.Tensor] = field(default_factory=list)
     step: int = 0
+    accum: dict[str, dict] = field(default_factory=dict)
+
+    @property
+    def q_tokens(self) -> int:
+        return sum(t.shape[0] for t in self.q_buffer)
+
+    def trim(self, max_tokens: int) -> None:
+        """Drop oldest Q slices until total tokens <= max_tokens."""
+        if max_tokens <= 0:
+            return
+        total = self.q_tokens
+        while total > max_tokens and self.q_buffer:
+            removed = self.q_buffer.pop(0)
+            total -= removed.shape[0]
+
+    def flush(self) -> None:
+        """Clear the Q buffer (used by tumbling mode after each window fires)."""
+        self.q_buffer = []
 
 
 @dataclass
@@ -215,12 +233,24 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         state.q_buffer.append(query[q_start:q_end].detach().clone())
         state.step += 1
 
-        # 4. Check per-signal intervals and run diagnostics
-        due_signals: set[str] = set()
-        for sig_name in SIGNAL_NAMES:
-            sig_cfg = getattr(self.config, sig_name)
-            if sig_cfg.enabled and state.step % sig_cfg.interval == 0:
-                due_signals.add(sig_name)
+        # 4. Determine which signals fire and manage buffer policy
+        tumbling = self.config.q_buffer_mode == "tumbling" and self.config.q_buffer_max_tokens > 0
+
+        if tumbling:
+            # Tumbling: fire all enabled signals when buffer reaches W, then flush.
+            # The window size IS the cadence — per-signal interval is ignored.
+            if state.q_tokens >= self.config.q_buffer_max_tokens:
+                due_signals = {s for s in SIGNAL_NAMES if getattr(self.config, s).enabled}
+            else:
+                due_signals = set()
+        else:
+            # Sliding: per-signal interval check, trim to keep last W tokens.
+            state.trim(self.config.q_buffer_max_tokens)
+            due_signals = set()
+            for sig_name in SIGNAL_NAMES:
+                sig_cfg = getattr(self.config, sig_name)
+                if sig_cfg.enabled and state.step % sig_cfg.interval == 0:
+                    due_signals.add(sig_name)
 
         if due_signals:
             try:
@@ -234,6 +264,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 )
             except Exception:
                 logger.exception("[SVD] error in layer %s at step %d", layer_name, state.step)
+            if tumbling:
+                state.flush()
 
         return result
 
@@ -308,14 +340,14 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         K_all = self._extract_k_from_cache(kv_cache, attn_metadata, seq_idx=0)
         L_k = K_all.shape[0]
 
-        # Q and K should match now that we capture prefill Q, but handle
-        # edge cases (chunked prefill, sequence reordering) by aligning
-        # from the end.
+        # When the Q buffer is windowed, L_q < L_k.  Both Q and K must
+        # refer to the same (most recent) positions, so take the last L
+        # rows from each.
         L = min(L_q, L_k)
         if L < 2:
             return
-        Q_all = Q_all[:L]
-        K_all = K_all[:L]
+        Q_all = Q_all[-L:]
+        K_all = K_all[-L:]
 
         # Union of active heads for due signals
         heads: set[int] = set()
@@ -340,6 +372,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
                 result = diag.reduce(Qh, Kh, L)
                 features = result["features"]
+
+                state.accum[sig_name] = diag.accumulate(result, state.accum.get(sig_name))
 
                 witness = None
                 if self.config.emit_witness:
