@@ -7,13 +7,13 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
-SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
+SIGNAL_NAMES: list[str] = ["spectral", "routing", "asymmetry", "tracker", "selfattn", "laplacian"]
 
 # Signals that use SVD rank/method
 SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
-THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian"}
+THRESHOLD_SIGNALS: set[str] = {"routing", "asymmetry", "tracker", "selfattn", "laplacian"}
 
 
 def parse_signal_names(ctx, param, value):
@@ -75,6 +75,24 @@ class RoutingConfig(SignalConfigBase):
     hodge_min_samples: int = 200
 
 
+class AsymmetryConfig(SignalConfigBase):
+    """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P.
+
+    Hodge G signal.  Computed on the post-softmax attention P (NOT the degree-normalized
+    M — see docs/operator-choice.md).  Matrix-free Hutchinson estimator (Route B, direct
+    ||P_asym z||^2) above ``threshold``, exact materialized below.  When ``streaming`` is
+    set, the per-window sufficient statistics (||P_asym||_F^2, ||P||_F^2) are accumulated
+    into a global G — unbiased only under disjoint (tumbling) windowing.
+    """
+
+    threshold: int = 512
+    block_size: int = 256
+    causal: bool = True
+    n_hutchinson: int = 32
+    seed: int = 42
+    streaming: bool = False
+
+
 class TrackerConfig(SignalConfigBase):
     """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
 
@@ -134,6 +152,7 @@ class GlassboxConfig(BaseSettings):
 
     spectral: SpectralConfig = SpectralConfig()
     routing: RoutingConfig = RoutingConfig()
+    asymmetry: AsymmetryConfig = AsymmetryConfig()
     tracker: TrackerConfig = TrackerConfig()
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()
