@@ -3,71 +3,135 @@
 import torch
 
 from glassbox.config import GlassboxConfig
+from glassbox.qbuffer import QBuffer
 
 
-def _trim(q_buffer: list[torch.Tensor], max_tokens: int) -> list[torch.Tensor]:
-    """Replicate PerLayerSVDState.trim() logic for testing without vLLM import."""
-    if max_tokens <= 0:
-        return q_buffer
-    total = sum(t.shape[0] for t in q_buffer)
-    while total > max_tokens and q_buffer:
-        removed = q_buffer.pop(0)
-        total -= removed.shape[0]
-    return q_buffer
+def _slice(n: int) -> torch.Tensor:
+    """A query slice of n tokens, shape [n, heads, dim]."""
+    return torch.randn(n, 4, 64)
 
 
-class TestTrim:
+class TestSlidingTrim:
+    """Sliding mode trims oldest slices on append to stay within max_tokens."""
+
     def test_noop_when_zero(self):
-        buf = [torch.randn(10, 4, 64)]
-        _trim(buf, 0)
-        assert len(buf) == 1
+        buf = QBuffer(max_tokens=0, mode="sliding")
+        buf.append(_slice(10))
+        assert buf.tokens == 10  # 0 = unbounded
 
     def test_noop_when_under_limit(self):
-        buf = [torch.randn(5, 4, 64)]
-        _trim(buf, 10)
+        buf = QBuffer(max_tokens=10, mode="sliding")
+        buf.append(_slice(5))
         assert len(buf) == 1
-        assert buf[0].shape[0] == 5
+        assert buf.tokens == 5
 
     def test_drops_oldest(self):
-        t1 = torch.randn(10, 4, 64)
-        t2 = torch.randn(5, 4, 64)
-        t3 = torch.randn(3, 4, 64)
-        buf = [t1, t2, t3]
-        _trim(buf, 8)
+        buf = QBuffer(max_tokens=8, mode="sliding")
+        for n in (10, 5, 3):
+            buf.append(_slice(n))
+        # 10 dropped (oldest); 5 + 3 = 8 remain
+        assert buf.tokens == 8
         assert len(buf) == 2
-        assert buf[0] is t2
-        assert buf[1] is t3
-        total = sum(t.shape[0] for t in buf)
-        assert total == 8
 
     def test_bounded_after_many_appends(self):
-        buf: list[torch.Tensor] = []
+        buf = QBuffer(max_tokens=16, mode="sliding")
         for _ in range(100):
-            buf.append(torch.randn(1, 4, 64))
-            _trim(buf, 16)
-        total = sum(t.shape[0] for t in buf)
-        assert total <= 16
-
-    def test_empty_buffer(self):
-        buf: list[torch.Tensor] = []
-        _trim(buf, 10)
-        assert buf == []
+            buf.append(_slice(1))
+        assert buf.tokens <= 16
 
     def test_exact_limit(self):
-        buf = [torch.randn(5, 4, 64), torch.randn(5, 4, 64)]
-        _trim(buf, 10)
+        buf = QBuffer(max_tokens=10, mode="sliding")
+        buf.append(_slice(5))
+        buf.append(_slice(5))
         assert len(buf) == 2
-        assert sum(t.shape[0] for t in buf) == 10
+        assert buf.tokens == 10
+
+    def test_window_concatenates_slices(self):
+        buf = QBuffer(max_tokens=0, mode="sliding")
+        buf.append(_slice(3))
+        buf.append(_slice(4))
+        w = buf.window()
+        assert w.shape[0] == 7
+
+    def test_flush_clears(self):
+        buf = QBuffer(max_tokens=0)
+        buf.append(_slice(5))
+        buf.flush()
+        assert buf.tokens == 0
+        assert len(buf) == 0
+
+
+class TestTumblingMode:
+    """Tumbling fires at non-overlapping window boundaries, then flushes."""
+
+    def test_not_tumbling_without_bound(self):
+        assert QBuffer(max_tokens=0, mode="tumbling").tumbling is False
+        assert QBuffer(max_tokens=8, mode="tumbling").tumbling is True
+        assert QBuffer(max_tokens=8, mode="sliding").tumbling is False
+
+    def test_no_trim_on_append(self):
+        """Tumbling accumulates past max_tokens (no sliding trim)."""
+        buf = QBuffer(max_tokens=4, mode="tumbling")
+        for _ in range(6):
+            buf.append(_slice(1))
+        assert buf.tokens == 6  # not trimmed
+
+    def test_window_complete_at_boundary(self):
+        buf = QBuffer(max_tokens=4, mode="tumbling")
+        for i in range(1, 5):
+            buf.append(_slice(1))
+            assert buf.window_complete() is (i >= 4)
+
+    def test_fires_at_window_boundaries(self):
+        """Drive tumbling like the backend: append, fire+flush on completion."""
+        buf = QBuffer(max_tokens=5, mode="tumbling")
+        fire_steps = []
+        for step in range(1, 21):
+            buf.append(_slice(1))
+            if buf.window_complete():
+                fire_steps.append(step)
+                buf.flush()
+        assert fire_steps == [5, 10, 15, 20]
+
+    def test_non_overlapping_and_flush(self):
+        buf = QBuffer(max_tokens=10, mode="tumbling")
+        flush_sizes = []
+        for _ in range(30):
+            buf.append(_slice(1))
+            if buf.window_complete():
+                flush_sizes.append(buf.tokens)
+                buf.flush()
+        assert flush_sizes == [10, 10, 10]
+        assert buf.tokens == 0
+
+    def test_no_partial_window_at_end(self):
+        buf = QBuffer(max_tokens=5, mode="tumbling")
+        fires = 0
+        for _ in range(13):
+            buf.append(_slice(1))
+            if buf.window_complete():
+                fires += 1
+                buf.flush()
+        assert fires == 2  # 13 // 5, the trailing 3 do not fire
+        assert buf.tokens == 3
+
+    def test_window_1_fires_every_step(self):
+        buf = QBuffer(max_tokens=1, mode="tumbling")
+        fires = 0
+        for _ in range(5):
+            buf.append(_slice(1))
+            if buf.window_complete():
+                fires += 1
+                buf.flush()
+        assert fires == 5
 
 
 class TestConfig:
     def test_default_zero(self):
-        cfg = GlassboxConfig()
-        assert cfg.q_buffer_max_tokens == 0
+        assert GlassboxConfig().q_buffer_max_tokens == 0
 
     def test_default_mode_sliding(self):
-        cfg = GlassboxConfig()
-        assert cfg.q_buffer_mode == "sliding"
+        assert GlassboxConfig().q_buffer_mode == "sliding"
 
     def test_from_cli_args(self):
         cfg = GlassboxConfig.from_cli_args(q_buffer_max_tokens=512)
@@ -84,16 +148,26 @@ class TestConfig:
         assert cfg.q_buffer_mode == "sliding"
 
     def test_programmatic(self):
-        cfg = GlassboxConfig(q_buffer_max_tokens=1024)
-        assert cfg.q_buffer_max_tokens == 1024
+        assert GlassboxConfig(q_buffer_max_tokens=1024).q_buffer_max_tokens == 1024
 
     def test_programmatic_tumbling(self):
         cfg = GlassboxConfig(q_buffer_max_tokens=256, q_buffer_mode="tumbling")
         assert cfg.q_buffer_mode == "tumbling"
 
+    def test_config_feeds_qbuffer(self):
+        """A QBuffer built from config reflects the configured policy."""
+        cfg = GlassboxConfig(q_buffer_max_tokens=256, q_buffer_mode="tumbling")
+        buf = QBuffer(max_tokens=cfg.q_buffer_max_tokens, mode=cfg.q_buffer_mode)
+        assert buf.tumbling is True
+        assert buf.max_tokens == 256
+
 
 class TestKAlignment:
-    """Verify that Q and K slicing takes the LAST L rows (most recent positions)."""
+    """Verify that Q and K slicing takes the LAST L rows (most recent positions).
+
+    The slice itself lives in the backend's _run_svd; these pin the invariant
+    that windowed Q and full K must align at their most-recent positions.
+    """
 
     def test_last_l_rows_when_q_shorter(self):
         L_q, L_k = 8, 20
@@ -111,13 +185,10 @@ class TestKAlignment:
         assert K_win[0, 0, 0].item() == L_k - L
 
     def test_positions_match_when_windowed(self):
-        """When Q buffer is windowed to W < L_k, the last W positions of K
-        must correspond to the same sequence positions as Q."""
         W = 4
         L_k = 20
         Q_positions = list(range(L_k - W, L_k))
-        K_all_positions = list(range(L_k))
-        K_windowed_positions = K_all_positions[-W:]
+        K_windowed_positions = list(range(L_k))[-W:]
         assert Q_positions == K_windowed_positions
 
     def test_noop_when_equal(self):
@@ -126,53 +197,3 @@ class TestKAlignment:
         K = torch.randn(L, 4, 64)
         assert Q[-L:].data_ptr() == Q.data_ptr()
         assert K[-L:].data_ptr() == K.data_ptr()
-
-
-class TestTumblingMode:
-    """Simulate tumbling window semantics without importing vLLM."""
-
-    @staticmethod
-    def _simulate_tumbling(n_steps: int, W: int) -> list[int]:
-        """Return the steps at which diagnostics fire in tumbling mode.
-
-        Each step appends 1 token. When buffer reaches W, fire and flush.
-        """
-        buf_tokens = 0
-        fire_steps: list[int] = []
-        for step in range(1, n_steps + 1):
-            buf_tokens += 1
-            if buf_tokens >= W:
-                fire_steps.append(step)
-                buf_tokens = 0
-        return fire_steps
-
-    def test_fires_at_window_boundaries(self):
-        fires = self._simulate_tumbling(20, W=5)
-        assert fires == [5, 10, 15, 20]
-
-    def test_non_overlapping(self):
-        fires = self._simulate_tumbling(30, W=10)
-        for i in range(1, len(fires)):
-            assert fires[i] - fires[i - 1] == 10
-
-    def test_no_partial_window_at_end(self):
-        fires = self._simulate_tumbling(13, W=5)
-        assert fires == [5, 10]
-
-    def test_window_1_fires_every_step(self):
-        fires = self._simulate_tumbling(5, W=1)
-        assert fires == [1, 2, 3, 4, 5]
-
-    def test_buffer_empty_after_flush(self):
-        """After firing, buffer should be empty (0 tokens)."""
-        buf: list[torch.Tensor] = []
-        W = 4
-        flush_counts = []
-        for _ in range(12):
-            buf.append(torch.randn(1, 4, 64))
-            total = sum(t.shape[0] for t in buf)
-            if total >= W:
-                flush_counts.append(total)
-                buf = []
-        assert flush_counts == [4, 4, 4]
-        assert buf == []
