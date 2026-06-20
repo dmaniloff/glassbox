@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
 )
 
-from glassbox.config import SIGNAL_NAMES, GlassboxConfig
+from glassbox.config import SIGNAL_NAMES, GlassboxConfig, SignalConfigBase
 from glassbox.diagnostics import DIAGNOSTIC_REGISTRY
 from glassbox.handlers import LoggingHandler, create_handlers_from_config
 from glassbox.results import SVDSnapshot
@@ -126,7 +126,10 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         cls._diagnostics = {}
         for sig_name, diag_cls in DIAGNOSTIC_REGISTRY.items():
             sig_cfg = getattr(cls.config, sig_name)
-            params = sig_cfg.model_dump(exclude={"enabled", "interval", "heads"})
+            # Strip orchestration fields (enabled/interval/heads); the rest are
+            # the diagnostic's algorithm params. Derived from the base so adding
+            # an orchestration field there keeps it out of the constructor.
+            params = sig_cfg.model_dump(exclude=set(SignalConfigBase.model_fields))
             cls._diagnostics[sig_name] = diag_cls(**params)
 
     def forward(
