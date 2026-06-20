@@ -168,6 +168,13 @@ Some routing metrics need access to selected entries of `M`. Instead of building
 
 ## Features We Compute
 
+> **Which operator?** Each diagnostic runs on the attention matrix its mathematics requires —
+> conductance on the degree-normalized **M**, Hodge asymmetry (the `asymmetry` signal, G) on the
+> row-stochastic post-softmax **P**, and cyclic-triangle/tournament signals on the pre-softmax
+> scores **S = QKᵀ**. These are not interchangeable. See
+> [docs/operator-choice.md](docs/operator-choice.md) for the rationale (with paper references)
+> and the causal-masking caveats.
+
 ### 1. Spectral signal — scores matrix features (pre-softmax scores)
 
 These come from the singular values of the pre-softmax scores matrix `S = QK^T`.

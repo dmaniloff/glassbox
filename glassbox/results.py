@@ -164,6 +164,20 @@ class MagneticFeatures(BaseModel):
         return v if v is None or math.isfinite(v) else None
 
 
+class AsymmetryFeatures(BaseModel):
+    """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P.
+
+    Hodge G signal.  Computed on the post-softmax attention P (NOT the degree-normalized
+    M — see docs/operator-choice.md).  G is estimated matrix-free via a direct Hutchinson
+    estimator on ||P_asym z||^2 (Route B) above the threshold, exactly below it; the
+    per-token asymmetry profile is emitted as the snapshot witness.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    G: float | None = Field(None, description="Total asymmetry: ||P_asym||_F / ||P||_F.")
+
+
 class TrackerFeatures(BaseModel):
     """Features from raw post-softmax attention matrix A.
 
@@ -268,6 +282,7 @@ class SVDSnapshot(BaseModel):
     features: (
         SpectralFeatures
         | RoutingFeatures
+        | AsymmetryFeatures
         | CyclicTrianglesFeatures
         | MagneticFeatures
         | TrackerFeatures
@@ -300,6 +315,8 @@ class SVDSnapshot(BaseModel):
         if isinstance(feat_raw, dict):
             if sig == "routing":
                 d["features"] = RoutingFeatures(**feat_raw)
+            elif sig == "asymmetry":
+                d["features"] = AsymmetryFeatures(**feat_raw)
             elif sig == "cyclic":
                 d["features"] = CyclicTrianglesFeatures(**feat_raw)
             elif sig == "magnetic":

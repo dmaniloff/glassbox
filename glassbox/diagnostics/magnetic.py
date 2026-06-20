@@ -7,7 +7,7 @@ post-softmax matrix is triangular ⇒ its orientation is transitive ⇒ frustrat
 continuous partner of the cyclic-triangle count: the discrete member counts non-transitive
 triangles, the magnetic member measures their spectral frustration. See docs/operator-choice.md.
 
-Construction (formally verified in shade-formal ``MagneticFrustration.lean``):
+Construction (see *directed-attention-geometry*):
 
     magnitude   W_ij = (|S_ij| + |S_ji|) / 2            (symmetric, ≥ 0; W_ii = 0)
     phase       θ_ij = arctan((S_ij − S_ji)/(S_ij + S_ji))   (θ_ij = 0 when S_ij + S_ji = 0)
