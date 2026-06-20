@@ -311,3 +311,76 @@ class TestAsymmetryIncremental:
         fresh = AsymmetryDiagnostic(causal=True, incremental=True)
         one_shot = fresh.reduce(Q, K, N, prior_state=None)
         assert abs(r["features"].G - one_shot["features"].G) < 1e-9
+
+
+class TestAsymmetryCurlSplit:
+    """Hodge gradient/curl split G^2 = Gamma^2 + C^2 on causal P (Gamma exact via row-sum)."""
+
+    def _oracle(self, Q, K, n):
+        # Independent Hodge decomposition: potential phi = A.sum(1)/n, A_grad[i,j]=phi_i-phi_j.
+        scale = 1.0 / (D**0.5)
+        scores = Q[:n] @ K[:n].T * scale
+        scores = scores.masked_fill(~torch.tril(torch.ones(n, n, dtype=torch.bool)), float("-inf"))
+        P = torch.softmax(scores, dim=-1)
+        A = (P - P.T) / 2
+        phi = A.sum(dim=1) / n
+        A_grad = phi[:, None] - phi[None, :]
+        pn = P.norm().item()
+        return A.norm().item() / pn, A_grad.norm().item() / pn, (A - A_grad).norm().item() / pn
+
+    def test_materialized_matches_hodge_oracle(self, qk):
+        Q, K = qk
+        f = AsymmetryDiagnostic(threshold=1024, causal=True).reduce(Q, K, L)["features"]
+        g, gamma, c = self._oracle(Q, K, L)
+        assert abs(f.G - g) < 1e-6
+        assert abs(f.Gamma - gamma) < 1e-6
+        assert abs(f.C - c) < 1e-6
+
+    def test_pythagorean_identity(self, qk):
+        Q, K = qk
+        f = AsymmetryDiagnostic(threshold=1024, causal=True).reduce(Q, K, L)["features"]
+        assert abs(f.G**2 - (f.Gamma**2 + f.C**2)) < 1e-9
+        assert f.Gamma >= 0.0 and f.C >= 0.0
+
+    def test_matrix_free_gamma_is_exact(self, qk):
+        # Gamma uses r = A_asym @ 1 (one exact matvec), so it is exact even matrix-free;
+        # only G and C carry Hutchinson noise from S_asym.
+        Q, K = qk
+        diag = AsymmetryDiagnostic(threshold=4, block_size=4, n_hutchinson=128, seed=0, causal=True)
+        f = diag.reduce(Q, K, L)["features"]
+        g, gamma, c = self._oracle(Q, K, L)
+        assert f.G > 0 and diag.reduce(Q, K, L)["tier"] == "matrix_free"
+        assert abs(f.Gamma - gamma) < 1e-5
+        assert abs(f.G - g) < 0.05
+
+    def test_incremental_split_matches_batch_at_each_fire(self):
+        torch.manual_seed(0)
+        N = 24
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        diag = AsymmetryDiagnostic(causal=True, incremental=True)
+        state = None
+        for fire_L in (4, 9, 16, N):
+            res = diag.reduce(Q[:fire_L], K[:fire_L], fire_L, prior_state=state)
+            state = diag.accumulate(res, state)
+            f = res["features"]
+            g, gamma, c = self._oracle(Q, K, fire_L)
+            assert abs(f.G - g) < 1e-6
+            assert abs(f.Gamma - gamma) < 1e-6
+            assert abs(f.C - c) < 1e-6
+            assert abs(f.G**2 - (f.Gamma**2 + f.C**2)) < 1e-9
+
+    def test_split_serialization_round_trip(self):
+        snap = SVDSnapshot(
+            signal="asymmetry",
+            request_id=0,
+            layer="model.layers.0.self_attn",
+            layer_idx=0,
+            head=0,
+            step=8,
+            L=8,
+            tier="incremental",
+            features=AsymmetryFeatures(G=0.5, Gamma=0.3, C=0.4),
+        )
+        back = SVDSnapshot.from_jsonl_row(json.loads(snap.model_dump_json()))
+        assert isinstance(back.features, AsymmetryFeatures)
+        assert back.features.Gamma == 0.3 and back.features.C == 0.4
