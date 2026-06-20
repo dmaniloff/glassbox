@@ -291,7 +291,14 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     ) -> None:
         cls = type(self)
         if not cls._diagnostics:
-            cls._build_diagnostics()
+            # _build_diagnostics() runs in set_config(), which every run mode
+            # calls (plugin, runner, extract). Reaching extraction with an empty
+            # cache means set_config() was never called in this process — fail
+            # loudly rather than silently extracting with default config.
+            raise RuntimeError(
+                "Diagnostics not initialised — set_config() must be called "
+                "before extraction (no glassbox plugin or programmatic config?)."
+            )
 
         # Stack accumulated Q: [L_q, num_heads, head_size]
         Q_all = torch.cat(state.q_buffer, dim=0)
