@@ -108,10 +108,19 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
     @classmethod
     def set_config(cls, config: GlassboxConfig) -> None:
-        """Set config and initialise handlers.
+        """Set config and (re)initialise handlers and the diagnostics cache.
 
-        Must be called before engine creation.  Replaces direct assignment
-        to ``cls.config``.
+        This is the single entry point for configuration — it keeps
+        ``cls.config``, ``cls._handlers`` and the ``cls._diagnostics`` cache in
+        sync. Always use it; never assign ``cls.config`` directly, or the cached
+        diagnostics (built from config here) would go stale.
+
+        vLLM forks/spawns subprocesses (API server, engine core, workers) and
+        loads this plugin in *every* one of them. Setting ``_config_set_explicitly``
+        here is what lets the plugin tell "config was set programmatically" from
+        "use defaults": after a fork the child inherits the explicit config (and
+        this flag), so the plugin must NOT re-run ``set_config(GlassboxConfig())``
+        and clobber it with defaults. Call this before engine creation.
         """
         cls.config = config
         cls._config_set_explicitly = True
