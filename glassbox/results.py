@@ -112,18 +112,19 @@ class RoutingFeatures(BaseModel):
 
 
 class AsymmetryFeatures(BaseModel):
-    """Asymmetry coefficient G = ||M_asym||_F / ||M||_F of degree-normalized M.
+    """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P.
 
-    Hodge G signal (issue #39).  G is estimated matrix-free via a direct
-    Hutchinson estimator on ||M_asym z||^2 (Route B) above the threshold, and
-    exactly below it.  In streaming mode G is the global statistic accumulated
-    from additive sufficient statistics over DISJOINT (tumbling) windows; the
-    per-token asymmetry profile is emitted as the snapshot witness.
+    Hodge G signal (issue #39).  Computed on the post-softmax attention P (NOT the
+    degree-normalized M — see docs/operator-choice.md).  G is estimated matrix-free
+    via a direct Hutchinson estimator on ||P_asym z||^2 (Route B) above the threshold,
+    and exactly below it.  In streaming mode G is the global statistic accumulated from
+    additive sufficient statistics over DISJOINT (tumbling) windows; the per-token
+    asymmetry profile is emitted as the snapshot witness.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    G: float | None = Field(None, description="Total asymmetry: ||M_asym||_F / ||M||_F.")
+    G: float | None = Field(None, description="Total asymmetry: ||P_asym||_F / ||P||_F.")
 
 
 class TrackerFeatures(BaseModel):

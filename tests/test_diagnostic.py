@@ -17,9 +17,7 @@ from glassbox.diagnostics import (
     SpectralDiagnostic,
     TrackerDiagnostic,
 )
-from glassbox.hodge import compute_G_materialized
 from glassbox.results import AsymmetryFeatures, SpectralFeatures, SVDSnapshot
-from glassbox.svd import compute_degree_normalized_M
 
 L = 16
 D = 8
@@ -98,11 +96,11 @@ class TestAsymmetryDiagnostic:
         assert AsymmetryDiagnostic.signal_name == "asymmetry"
 
     def test_reduce_materialized_matches_oracle(self, qk):
+        # Operator is P (row-stochastic attention), NOT the degree-normalized M.
         Q, K = qk
         scale = 1.0 / (D**0.5)
-        A = torch.softmax(Q @ K.T * scale, dim=-1)
-        M, _, _ = compute_degree_normalized_M(A)
-        G_ref, _ = compute_G_materialized(M)
+        P = torch.softmax(Q @ K.T * scale, dim=-1)
+        G_ref = (((P - P.T) / 2).norm() / P.norm()).item()
 
         diag = AsymmetryDiagnostic(threshold=1024, causal=False)
         result = diag.reduce(Q, K, L)
@@ -112,9 +110,8 @@ class TestAsymmetryDiagnostic:
     def test_reduce_matrix_free_matches_oracle(self, qk):
         Q, K = qk
         scale = 1.0 / (D**0.5)
-        A = torch.softmax(Q @ K.T * scale, dim=-1)
-        M, _, _ = compute_degree_normalized_M(A)
-        G_ref, _ = compute_G_materialized(M)
+        P = torch.softmax(Q @ K.T * scale, dim=-1)
+        G_ref = (((P - P.T) / 2).norm() / P.norm()).item()
 
         diag = AsymmetryDiagnostic(
             threshold=4, block_size=4, n_hutchinson=128, seed=0, causal=False
@@ -151,11 +148,11 @@ class TestAsymmetryDiagnostic:
 
     def test_accumulate_latest_only_when_not_streaming(self):
         diag = AsymmetryDiagnostic()
-        local = {"features": "x", "partials": {"S_asym": 1.0, "S_M": 2.0, "n_windows": 1}}
+        local = {"features": "x", "partials": {"S_asym": 1.0, "S_den": 2.0, "n_windows": 1}}
         assert diag.accumulate(local, None) is local
 
     def test_streaming_accumulate_is_additive_global(self, qk):
-        # Two disjoint windows -> global G = sqrt(sum S_asym / sum S_M).
+        # Two disjoint windows -> global G = sqrt(sum S_asym / sum S_den).
         torch.manual_seed(7)
         Q1, K1 = torch.randn(L, D), torch.randn(L, D)
         Q2, K2 = torch.randn(L, D), torch.randn(L, D)
@@ -171,30 +168,29 @@ class TestAsymmetryDiagnostic:
         # additivity of the sufficient statistics
         solo2 = AsymmetryDiagnostic(threshold=1024, causal=False).reduce(Q2, K2, L)["partials"]
         assert abs(p2["S_asym"] - (p1["S_asym"] + solo2["S_asym"])) < 1e-6
-        assert abs(p2["S_M"] - (p1["S_M"] + solo2["S_M"])) < 1e-6
+        assert abs(p2["S_den"] - (p1["S_den"] + solo2["S_den"])) < 1e-6
 
         # reported global G equals the ratio of accumulated statistics
-        g_global = (p2["S_asym"] ** 0.5) / (p2["S_M"] ** 0.5 + 1e-10)
+        g_global = (p2["S_asym"] ** 0.5) / (p2["S_den"] ** 0.5 + 1e-10)
         assert abs(r2["features"].G - g_global) < 1e-9
 
     def test_batch_reduce_is_per_window(self, qk):
         # Without streaming, prior_state is ignored: each window reports its own G.
         Q, K = qk
         diag = AsymmetryDiagnostic(threshold=1024, causal=False, streaming=False)
-        prior = {"partials": {"S_asym": 99.0, "S_M": 1.0, "n_windows": 5}}
+        prior = {"partials": {"S_asym": 99.0, "S_den": 1.0, "n_windows": 5}}
         r = diag.reduce(Q, K, L, prior_state=prior)
         assert r["partials"]["n_windows"] == 1
 
     def test_causal_materialized_matches_oracle(self, qk):
-        # causal=True (the default) materialized path: build M from the causal
-        # softmax and check reduce G + witness against the materialized oracle.
+        # causal=True (the default) materialized path on the attention operator P:
+        # check reduce G + witness against the exact P-based oracle.
         Q, K = qk
         scale = 1.0 / (D**0.5)
         scores = Q @ K.T * scale
         scores = scores.masked_fill(~torch.tril(torch.ones(L, L, dtype=torch.bool)), float("-inf"))
-        A = torch.softmax(scores, dim=-1)
-        M, _, _ = compute_degree_normalized_M(A)
-        G_ref, _ = compute_G_materialized(M)
+        P = torch.softmax(scores, dim=-1)
+        G_ref = (((P - P.T) / 2).norm() / P.norm()).item()
 
         diag = AsymmetryDiagnostic(threshold=1024, causal=True)
         r = diag.reduce(Q, K, L)
@@ -209,9 +205,8 @@ class TestAsymmetryDiagnostic:
         scale = 1.0 / (D**0.5)
         scores = Q @ K.T * scale
         scores = scores.masked_fill(~torch.tril(torch.ones(L, L, dtype=torch.bool)), float("-inf"))
-        A = torch.softmax(scores, dim=-1)
-        M, _, _ = compute_degree_normalized_M(A)
-        G_ref, _ = compute_G_materialized(M)
+        P = torch.softmax(scores, dim=-1)
+        G_ref = (((P - P.T) / 2).norm() / P.norm()).item()
 
         diag = AsymmetryDiagnostic(threshold=4, block_size=4, n_hutchinson=256, seed=0, causal=True)
         r = diag.reduce(Q, K, L)

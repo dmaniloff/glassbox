@@ -85,13 +85,14 @@ class RoutingConfig(BaseModel):
 
 
 class AsymmetryConfig(BaseModel):
-    """Asymmetry coefficient G = ||M_asym||_F / ||M||_F of degree-normalized M.
+    """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P.
 
-    Hodge G signal (issue #39).  Matrix-free Hutchinson estimator (Route B,
-    direct ||M_asym z||^2) above ``threshold``, exact materialized below.
-    When ``streaming`` is set, the per-window sufficient statistics
-    (||M_asym||_F^2, ||M||_F^2) are accumulated into a global G — unbiased only
-    under disjoint (tumbling) windowing (``q_buffer_mode='tumbling'``).
+    Hodge G signal (issue #39).  Computed on the post-softmax attention P (NOT the
+    degree-normalized M — see docs/operator-choice.md).  Matrix-free Hutchinson
+    estimator (Route B, direct ||P_asym z||^2) above ``threshold``, exact materialized
+    below.  When ``streaming`` is set, the per-window sufficient statistics
+    (||P_asym||_F^2, ||P||_F^2) are accumulated into a global G — unbiased only under
+    disjoint (tumbling) windowing (``q_buffer_mode='tumbling'``).
     """
 
     model_config = ConfigDict(frozen=True)
