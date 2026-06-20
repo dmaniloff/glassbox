@@ -32,28 +32,35 @@ def parse_signal_names(ctx, param, value):
     return tuple(result)
 
 
-class SpectralConfig(BaseModel):
-    """SVD of pre-softmax scores matrix S = QK^T."""
+class SignalConfigBase(BaseModel):
+    """Orchestration fields shared by every signal config.
 
-    model_config = ConfigDict(frozen=True)
-
-    enabled: bool = True
-    interval: int = 32
-    rank: int = 4
-    method: Literal["randomized", "lanczos"] = "randomized"
-    heads: list[int] = [0]
-
-
-class RoutingConfig(BaseModel):
-    """SVD of post-softmax degree-normalized operator M = D_Q^{-1/2} A D_K^{-1/2}."""
+    Subclasses add their algorithm-specific parameters. The backend strips
+    these orchestration fields (via ``model_dump(exclude=...)``) before
+    constructing the corresponding Diagnostic, so any field declared here is
+    automatically kept out of the diagnostic constructor.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     enabled: bool = False
     interval: int = 32
+    heads: list[int] = [0]
+
+
+class SpectralConfig(SignalConfigBase):
+    """SVD of pre-softmax scores matrix S = QK^T."""
+
+    enabled: bool = True
     rank: int = 4
     method: Literal["randomized", "lanczos"] = "randomized"
-    heads: list[int] = [0]
+
+
+class RoutingConfig(SignalConfigBase):
+    """SVD of post-softmax degree-normalized operator M = D_Q^{-1/2} A D_K^{-1/2}."""
+
+    rank: int = 4
+    method: Literal["randomized", "lanczos"] = "randomized"
     # Materialize M for L <= threshold, matrix-free above.
     # Crossover ~512 on NVIDIA A10G (bench_hodge.py, 2026-03-24, d=64, rank=4):
     #   L=256: mat 21ms vs mf 39ms (1.8x), L=512: 54ms vs 61ms (1.1x),
@@ -68,43 +75,28 @@ class RoutingConfig(BaseModel):
     hodge_min_samples: int = 200
 
 
-class TrackerConfig(BaseModel):
+class TrackerConfig(SignalConfigBase):
     """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
 
-    model_config = ConfigDict(frozen=True)
-
-    enabled: bool = False
-    interval: int = 32
     rank: int = 4
     method: Literal["randomized", "lanczos"] = "randomized"
-    heads: list[int] = [0]
     threshold: int = 512
     block_size: int = 256
     causal: bool = True
 
 
-class SelfAttnConfig(BaseModel):
+class SelfAttnConfig(SignalConfigBase):
     """Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)."""
 
-    model_config = ConfigDict(frozen=True)
-
-    enabled: bool = False
-    interval: int = 32
-    heads: list[int] = [0]
     top_k: int = 10
     threshold: int = 512
     block_size: int = 256
     causal: bool = True
 
 
-class LaplacianConfig(BaseModel):
+class LaplacianConfig(SignalConfigBase):
     """Laplacian eigenvalues from attention graphs (LapEigvals, EMNLP 2025)."""
 
-    model_config = ConfigDict(frozen=True)
-
-    enabled: bool = False
-    interval: int = 32
-    heads: list[int] = [0]
     top_k: int = 10
     threshold: int = 512
     block_size: int = 256
@@ -147,6 +139,7 @@ class GlassboxConfig(BaseSettings):
     laplacian: LaplacianConfig = LaplacianConfig()
     output: OutputConfig = OutputConfig()
     emit: EmitConfig = EmitConfig()
+    emit_witness: bool = False
 
     @classmethod
     def settings_customise_sources(
