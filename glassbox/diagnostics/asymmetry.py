@@ -49,6 +49,7 @@ class AsymmetryDiagnostic:
         n_hutchinson: int = 32,
         seed: int = 42,
         streaming: bool = False,
+        incremental: bool = False,
     ):
         self.threshold = threshold
         self.block_size = block_size
@@ -56,6 +57,12 @@ class AsymmetryDiagnostic:
         self.n_hutchinson = n_hutchinson
         self.seed = seed
         self.streaming = streaming
+        # incremental: exact full-operator G by folding only the delta tokens since the
+        # last fire into running (S_asym, S_den).  Requires the unbounded full-sequence
+        # buffer (each fire's Qh/Kh is a superset of the previous) and causal attention
+        # (adding a token only *adds* its row).  O(L^2) total vs O(L^3/interval) recompute,
+        # O(1) state, exact.  See issue: incremental exact-full Hodge.
+        self.incremental = incremental
         self._cache: tuple | None = None  # (key, (S_asym, S_den, row_sq, tier))
 
     def _attention_matrix(
@@ -117,7 +124,37 @@ class AsymmetryDiagnostic:
         self._cache = (key, val)
         return val
 
+    def _incremental_reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, prior: dict) -> dict:
+        """Exact full-operator G by folding only the delta tokens since the last fire.
+
+        On causal P, token t adds row P[t,:t+1]; prior rows are unchanged, so:
+            S_den  += ||P[t,:]||^2          (full new-row mass)
+            S_asym += (sum_{i<t} P[t,i]^2)/2  (new antisymmetric edges)
+        G = sqrt(S_asym/S_den) equals the batch full-operator G exactly.
+        """
+        incr = (prior.get("partials") or {}).get("incr") if prior else None
+        S_asym = incr["S_asym"] if incr else 0.0
+        S_den = incr["S_den"] if incr else 0.0
+        n_prev = incr["n"] if incr else 0
+        scale = 1.0 / math.sqrt(Qh.shape[1])
+        for t in range(n_prev, L):
+            scores = Qh[t] @ Kh[: t + 1].T * scale  # causal: token t attends to keys 0..t
+            p = torch.softmax(scores, dim=-1)
+            S_den += float((p * p).sum().item())
+            if t > 0:
+                off = p[:t]  # off-diagonal new edges (exclude self-attention p[t])
+                S_asym += float((off * off).sum().item()) / 2.0
+        G = math.sqrt(max(S_asym, 0.0)) / (math.sqrt(max(S_den, 0.0)) + EPSILON)
+        return {
+            "features": AsymmetryFeatures(G=G),
+            "tier": "incremental",
+            "partials": {"incr": {"S_asym": S_asym, "S_den": S_den, "n": L}},
+        }
+
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
+        if self.incremental:
+            return self._incremental_reduce(Qh, Kh, L, ctx.get("prior_state") or {})
+
         prior = ctx.get("prior_state") or {}
         prev = prior.get("partials") if self.streaming else None
 
