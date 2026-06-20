@@ -114,14 +114,16 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
     @classmethod
     def set_config(cls, config: GlassboxConfig) -> None:
-        """Set config and (re)initialise handlers, the diagnostics cache, and
-        per-layer state.
+        """Set config and (re)initialise all config-derived state.
 
-        This is the single entry point for configuration — it keeps
-        ``cls.config``, ``cls._handlers``, the ``cls._diagnostics`` cache, and
-        the per-layer ``cls.state_dict`` (whose QBuffers capture the windowing
-        policy at construction) in sync. Always use it; never assign
-        ``cls.config`` directly, or those config-derived caches would go stale.
+        Single entry point for configuration. Always use it; never assign
+        ``cls.config`` directly, or the caches below go stale. Keeps these in
+        sync with ``config``:
+
+        - ``cls._handlers`` — snapshot sinks, rebuilt from config.
+        - ``cls._diagnostics`` — per-signal Diagnostic objects, rebuilt from config.
+        - ``cls.state_dict`` — per-layer state; dropped so each layer's QBuffer
+          rebuilds with the new windowing policy on the next forward.
 
         vLLM forks/spawns subprocesses (API server, engine core, workers) and
         loads this plugin in *every* one of them. Setting ``_config_set_explicitly``
