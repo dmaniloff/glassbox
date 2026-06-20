@@ -43,7 +43,7 @@ _LAYER_IDX_RE = re.compile(r"(?:layers|\.h)\.(\d+)")
 
 
 @dataclass
-class PerLayerSVDState:
+class PerLayerState:
     """Per-layer streaming state for a single attention layer.
 
     Holds the windowed Q buffer (``qbuf``), the firing-cadence counter
@@ -94,7 +94,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     # Class-level layer state; shared mutable.
     # Shared by all impl instances (one per layer or shared).
     # Keyed by layer_name (e.g. "model.layers.0.self_attn").
-    state_dict: dict[str, PerLayerSVDState] = {}
+    state_dict: dict[str, PerLayerState] = {}
 
     # Class-level request tracking; shared mutable.
     req_tracker: ReqTracker = ReqTracker()
@@ -134,6 +134,11 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             h.close()
         cls._handlers = create_handlers_from_config(config)
         cls._build_diagnostics()
+        # Drop per-layer state so QBuffers rebuild with the new windowing policy
+        # (max_tokens/mode are captured at QBuffer construction). Mirrors the
+        # diagnostics rebuild above; no-op in the normal "set_config before engine
+        # creation" path since no state exists yet.
+        cls.state_dict = {}
 
     @classmethod
     def _build_diagnostics(cls) -> None:
@@ -194,7 +199,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         cls = type(self)
         state = cls.state_dict.get(layer_name)
         if state is None:
-            state = PerLayerSVDState(
+            state = PerLayerState(
                 qbuf=QBuffer(
                     max_tokens=self.config.q_buffer_max_tokens,
                     mode=self.config.q_buffer_mode,
@@ -306,7 +311,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         self,
         layer_name: str,
         layer_idx: int | None,
-        state: PerLayerSVDState,
+        state: PerLayerState,
         kv_cache: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
         due_signals: set[str],
