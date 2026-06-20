@@ -181,6 +181,9 @@ class AsymmetryConfig(SignalConfigBase):
     n_hutchinson: int = 32
     seed: int = 42
     streaming: bool = False
+    # incremental: exact full-operator G, folding only delta tokens per fire (causal,
+    # unbounded buffer). O(1) state, O(L^2) total. See docs/operator-choice.md.
+    incremental: bool = False
 
 
 class TrackerConfig(SignalConfigBase):
