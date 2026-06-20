@@ -78,10 +78,11 @@ class AsymmetryDiagnostic:
         return torch.softmax(scores, dim=-1)
 
     def _window_stats(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, seed: int) -> tuple:
-        """(S_asym, S_den, row_sq, tier) for one window on the attention operator P.
+        """(S_asym, S_den, grad_energy, row_sq, tier) for one window on the operator P.
 
-        S_asym ~ ||P_asym||_F^2, S_den = ||P||_F^2, row_sq[i] ~ per-row asymmetry mass.
-        Memoized on input identity so reduce() then witness() reuse one Hutchinson pass.
+        S_asym ~ ||P_asym||_F^2, S_den = ||P||_F^2, row_sq[i] ~ per-row asymmetry mass,
+        and grad_energy = 2||r||^2/L (exact Hodge gradient energy, r = A_asym @ 1) for the
+        Gamma/C split.  Memoized on input identity so reduce() then witness() reuse one pass.
         """
         key = (
             Qh.data_ptr(),
@@ -102,12 +103,13 @@ class AsymmetryDiagnostic:
             row_sq = P_asym.square().sum(dim=1)  # [L] exact per-row mass
             S_asym = float(row_sq.sum().item())
             S_den = float(torch.linalg.norm(P, "fro").square().item())
+            r = P_asym.sum(dim=1)  # exact row-sum vector A_asym @ 1
             tier = "materialized"
         else:
             # Operator = P (row-stochastic attention): pass a unit degree vector so the
             # shared matrix-free machinery computes on P = A·I, NOT the degree-normalized M.
             ones = torch.ones(L, device=Qh.device, dtype=Qh.dtype)
-            S_asym, S_den, row_sq = asymmetry_partials_and_witness_matrix_free(
+            S_asym, S_den, row_sq, r = asymmetry_partials_and_witness_matrix_free(
                 Qh,
                 Kh,
                 ones,
@@ -120,22 +122,44 @@ class AsymmetryDiagnostic:
             )
             tier = "matrix_free"
 
-        val = (S_asym, S_den, row_sq, tier)
+        grad_energy = 2.0 * float((r * r).sum().item()) / L  # ||A_grad||^2 = 2||r||^2/L
+        val = (S_asym, S_den, grad_energy, row_sq, tier)
         self._cache = (key, val)
         return val
 
+    def _split(self, S_asym: float, S_den: float, grad_energy: float) -> tuple:
+        """(G, Gamma, C) from sufficient statistics; G^2 = Gamma^2 + C^2.
+
+        G = ||A_asym||/||P||, Gamma = ||A_grad||/||P|| (gradient/hierarchical),
+        C = ||A_curl||/||P|| (curl/circulatory, the divergence-free residual).
+        """
+        den = math.sqrt(max(S_den, 0.0)) + EPSILON
+        G = math.sqrt(max(S_asym, 0.0)) / den
+        Gamma = math.sqrt(max(grad_energy, 0.0)) / den
+        C = math.sqrt(max(S_asym - grad_energy, 0.0)) / den
+        return G, Gamma, C
+
     def _incremental_reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, prior: dict) -> dict:
-        """Exact full-operator G by folding only the delta tokens since the last fire.
+        """Exact full-operator G/Gamma/C by folding only the delta tokens since the last fire.
 
         On causal P, token t adds row P[t,:t+1]; prior rows are unchanged, so:
-            S_den  += ||P[t,:]||^2          (full new-row mass)
+            S_den  += ||P[t,:]||^2            (full new-row mass)
             S_asym += (sum_{i<t} P[t,i]^2)/2  (new antisymmetric edges)
-        G = sqrt(S_asym/S_den) equals the batch full-operator G exactly.
+        and the row-sum vector r = A_asym @ 1 updates as r_t = (sum_{i<t} P[t,i])/2,
+        r_i += -P[t,i]/2 for i<t (the new column).  Gamma uses the exact gradient energy
+        2||r||^2/L; C is the residual.  G/Gamma/C equal the batch full-operator values exactly.
         """
         incr = (prior.get("partials") or {}).get("incr") if prior else None
         S_asym = incr["S_asym"] if incr else 0.0
         S_den = incr["S_den"] if incr else 0.0
         n_prev = incr["n"] if incr else 0
+        # row-sum vector r = A_asym @ 1 (O(N) state), grows with context for the Gamma/C split
+        if incr is not None and incr.get("r") is not None:
+            r = incr["r"]
+            if r.shape[0] < L:
+                r = torch.cat([r, r.new_zeros(L - r.shape[0])])
+        else:
+            r = torch.zeros(L, device=Qh.device, dtype=Qh.dtype)
         scale = 1.0 / math.sqrt(Qh.shape[1])
         for t in range(n_prev, L):
             scores = Qh[t] @ Kh[: t + 1].T * scale  # causal: token t attends to keys 0..t
@@ -144,11 +168,14 @@ class AsymmetryDiagnostic:
             if t > 0:
                 off = p[:t]  # off-diagonal new edges (exclude self-attention p[t])
                 S_asym += float((off * off).sum().item()) / 2.0
-        G = math.sqrt(max(S_asym, 0.0)) / (math.sqrt(max(S_den, 0.0)) + EPSILON)
+                r[:t] += -off / 2.0  # new column: -P[t,i]/2 added to each prior r_i
+                r[t] = float(off.sum().item()) / 2.0  # new entry r_t = (sum_{i<t} P[t,i])/2
+        grad_energy = 2.0 * float((r * r).sum().item()) / L
+        G, Gamma, C = self._split(S_asym, S_den, grad_energy)
         return {
-            "features": AsymmetryFeatures(G=G),
+            "features": AsymmetryFeatures(G=G, Gamma=Gamma, C=C),
             "tier": "incremental",
-            "partials": {"incr": {"S_asym": S_asym, "S_den": S_den, "n": L}},
+            "partials": {"incr": {"S_asym": S_asym, "S_den": S_den, "n": L, "r": r}},
         }
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
@@ -161,28 +188,35 @@ class AsymmetryDiagnostic:
         # Offset the probe seed per window so streaming estimation errors are
         # independent and average out across the accumulated stream.
         seed = self.seed + (prev.get("n_windows", 0) if prev else 0)
-        S_asym, S_den, _, tier = self._window_stats(Qh, Kh, L, seed)
+        S_asym, S_den, grad_energy, _, tier = self._window_stats(Qh, Kh, L, seed)
 
         if prev:
+            # Block-diagonal streaming: all three energies are additive over disjoint windows
+            # (the gradient energy of blockdiag(M1..Mk) is the sum of per-block energies).
             S_asym_tot = prev.get("S_asym", 0.0) + S_asym
             S_den_tot = prev.get("S_den", 0.0) + S_den
+            S_grad_tot = prev.get("S_grad", 0.0) + grad_energy
             n_windows = prev.get("n_windows", 0) + 1
         else:
-            S_asym_tot, S_den_tot, n_windows = S_asym, S_den, 1
+            S_asym_tot, S_den_tot, S_grad_tot, n_windows = S_asym, S_den, grad_energy, 1
 
-        # G = ||P_asym||_F / ||P||_F = sqrt(S_asym) / sqrt(S_den).
-        G = math.sqrt(max(S_asym_tot, 0.0)) / (math.sqrt(max(S_den_tot, 0.0)) + EPSILON)
+        G, Gamma, C = self._split(S_asym_tot, S_den_tot, S_grad_tot)
 
         return {
-            "features": AsymmetryFeatures(G=G),
+            "features": AsymmetryFeatures(G=G, Gamma=Gamma, C=C),
             "tier": tier,
-            "partials": {"S_asym": S_asym_tot, "S_den": S_den_tot, "n_windows": n_windows},
+            "partials": {
+                "S_asym": S_asym_tot,
+                "S_den": S_den_tot,
+                "S_grad": S_grad_tot,
+                "n_windows": n_windows,
+            },
         }
 
     def witness(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> torch.Tensor:
         # Per-window localization (base seed); shares reduce()'s pass via the cache in batch
         # mode.  witness[i] = ||P_asym[i,:]|| / ||P||_F, so in batch mode ||witness||_2 == G.
-        _, S_den, row_sq, _ = self._window_stats(Qh, Kh, L, self.seed)
+        _, S_den, _, row_sq, _ = self._window_stats(Qh, Kh, L, self.seed)
         row_norms = torch.sqrt(row_sq.clamp(min=0.0))
         return row_norms / (math.sqrt(max(S_den, 0.0)) + EPSILON)
 

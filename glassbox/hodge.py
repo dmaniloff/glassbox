@@ -393,11 +393,12 @@ def asymmetry_partials_and_witness_matrix_free(
 ):
     """Additive sufficient statistics + per-row witness for the asymmetry coefficient.
 
-    Returns (S_asym, S_den, row_sq): S_asym ~ ||A_asym||_F^2 (direct Hutchinson on
+    Returns (S_asym, S_den, row_sq, r): S_asym ~ ||A_asym||_F^2 (direct Hutchinson on
     ||A_asym z||^2, Route B — non-negative, cancellation-free), S_den = ||A||_F^2
-    (exact), and row_sq[i] ~ per-row asymmetry mass.  The operator A is set by
-    ``d_k_inv_sqrt`` (a unit vector => the row-stochastic attention P).  Both partials
-    are sums-of-squares, hence additive over a disjoint partition of windows:
+    (exact), row_sq[i] ~ per-row asymmetry mass, and r = A_asym @ 1 (exact row-sum vector,
+    one matvec) for the Hodge gradient/curl split — gradient energy = 2||r||^2/L.  The
+    operator A is set by ``d_k_inv_sqrt`` (a unit vector => the row-stochastic attention P).
+    The sum-of-squares partials are additive over a disjoint partition of windows:
     G = sqrt(sum S_asym / sum S_den).
     """
     if M_fro_norm is None:
@@ -409,4 +410,7 @@ def asymmetry_partials_and_witness_matrix_free(
     )
     S_asym = float(s_asym.clamp(min=0.0).item())
     S_den = float(M_fro_norm) ** 2
-    return S_asym, S_den, row_sq
+    # r = A_asym @ 1: exact gradient row-sum (one matvec), not a Hutchinson estimate.
+    ones_vec = torch.ones(Q.shape[0], device=Q.device, dtype=Q.dtype)
+    r = matvec_Masym_blocked(Q, K, ones_vec, d_k_inv_sqrt, scale, block_size, causal=causal)
+    return S_asym, S_den, row_sq, r
