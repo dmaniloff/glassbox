@@ -111,6 +111,20 @@ class RoutingFeatures(BaseModel):
         return values
 
 
+class AsymmetryFeatures(BaseModel):
+    """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P.
+
+    Hodge G signal.  Computed on the post-softmax attention P (NOT the degree-normalized
+    M — see docs/operator-choice.md).  G is estimated matrix-free via a direct Hutchinson
+    estimator on ||P_asym z||^2 (Route B) above the threshold, exactly below it; the
+    per-token asymmetry profile is emitted as the snapshot witness.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    G: float | None = Field(None, description="Total asymmetry: ||P_asym||_F / ||P||_F.")
+
+
 class TrackerFeatures(BaseModel):
     """Features from raw post-softmax attention matrix A.
 
@@ -213,7 +227,12 @@ class SVDSnapshot(BaseModel):
     tier: str | None = None  # "materialized" | "matrix_free"
     witness: list[float] | None = None
     features: (
-        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
+        SpectralFeatures
+        | RoutingFeatures
+        | AsymmetryFeatures
+        | TrackerFeatures
+        | SelfAttnFeatures
+        | LaplacianFeatures
     )
 
     def __repr__(self) -> str:
@@ -241,6 +260,8 @@ class SVDSnapshot(BaseModel):
         if isinstance(feat_raw, dict):
             if sig == "routing":
                 d["features"] = RoutingFeatures(**feat_raw)
+            elif sig == "asymmetry":
+                d["features"] = AsymmetryFeatures(**feat_raw)
             elif sig == "tracker":
                 d["features"] = TrackerFeatures(**feat_raw)
             elif sig == "selfattn":
