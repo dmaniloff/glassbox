@@ -114,12 +114,14 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
     @classmethod
     def set_config(cls, config: GlassboxConfig) -> None:
-        """Set config and (re)initialise handlers and the diagnostics cache.
+        """Set config and (re)initialise handlers, the diagnostics cache, and
+        per-layer state.
 
         This is the single entry point for configuration — it keeps
-        ``cls.config``, ``cls._handlers`` and the ``cls._diagnostics`` cache in
-        sync. Always use it; never assign ``cls.config`` directly, or the cached
-        diagnostics (built from config here) would go stale.
+        ``cls.config``, ``cls._handlers``, the ``cls._diagnostics`` cache, and
+        the per-layer ``cls.state_dict`` (whose QBuffers capture the windowing
+        policy at construction) in sync. Always use it; never assign
+        ``cls.config`` directly, or those config-derived caches would go stale.
 
         vLLM forks/spawns subprocesses (API server, engine core, workers) and
         loads this plugin in *every* one of them. Setting ``_config_set_explicitly``
