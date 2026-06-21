@@ -84,6 +84,11 @@ class AsymmetryDiagnostic:
         and grad_energy = 2||r||^2/L (exact Hodge gradient energy, r = A_asym @ 1) for the
         Gamma/C split.  Memoized on input identity so reduce() then witness() reuse one pass.
         """
+        # Seed is deliberately NOT in the key: in streaming mode reduce() uses seed
+        # self.seed + n_windows while witness() uses self.seed, so keying on seed would
+        # miss and recompute a second matrix-free pass with different probes (breaking
+        # ||witness||_2 == G). With the per-reduce cache clear, witness() reuses the exact
+        # pass (and probes) reduce() just computed this fire.
         key = (
             Qh.data_ptr(),
             Kh.data_ptr(),
@@ -91,18 +96,18 @@ class AsymmetryDiagnostic:
             tuple(Kh.shape),
             L,
             self.n_hutchinson,
-            None if L <= self.threshold else seed,
         )
         if self._cache is not None and self._cache[0] == key:
             return self._cache[1]
 
         scale = 1.0 / math.sqrt(Qh.shape[1])
         if L <= self.threshold:
-            P = self._attention_matrix(Qh, Kh, L, scale)
+            # fp32 throughout: sums-of-squares over L^2 entries lose precision in fp16/bf16.
+            P = self._attention_matrix(Qh, Kh, L, scale).to(torch.float32)
             P_asym = (P - P.T) / 2.0
             row_sq = P_asym.square().sum(dim=1)  # [L] exact per-row mass
             S_asym = float(row_sq.sum().item())
-            S_den = float(torch.linalg.norm(P, "fro").square().item())
+            S_den = float(P.square().sum().item())  # ||P||_F^2 (one pass, reuses P)
             r = P_asym.sum(dim=1)  # exact row-sum vector A_asym @ 1
             tier = "materialized"
         else:
@@ -142,34 +147,54 @@ class AsymmetryDiagnostic:
     def _incremental_reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, prior: dict) -> dict:
         """Exact full-operator G/Gamma/C by folding only the delta tokens since the last fire.
 
-        On causal P, token t adds row P[t,:t+1]; prior rows are unchanged, so:
-            S_den  += ||P[t,:]||^2            (full new-row mass)
-            S_asym += (sum_{i<t} P[t,i]^2)/2  (new antisymmetric edges)
-        and the row-sum vector r = A_asym @ 1 updates as r_t = (sum_{i<t} P[t,i])/2,
-        r_i += -P[t,i]/2 for i<t (the new column).  Gamma uses the exact gradient energy
-        2||r||^2/L; C is the residual.  G/Gamma/C equal the batch full-operator values exactly.
+        On causal P, the new rows [n_prev, L) only *add* to the operator (prior rows are
+        unchanged), so the whole delta block is computed in ONE batched matmul + one
+        causal-masked softmax (no per-token Python loop, no per-iteration GPU syncs):
+            S_den  += ||P[t,:]||^2               (full new-row mass)
+            S_asym += (sum_{i<t} P[t,i]^2)/2     (new antisymmetric edges, diagonal excluded)
+        and the row-sum vector r = A_asym @ 1 updates as r_t += (1 - P[t,t])/2 (the new
+        entry's below-mass) and r_i += -(sum_{t>i} P[t,i])/2 (the new column edges).
+        Gamma uses the exact gradient energy 2||r||^2/L; C is the residual.  G/Gamma/C
+        equal the batch full-operator values exactly.
+
+        State cost: O(N) for the persisted r vector per (layer, head), growing with context
+        (the exact-full guarantee requires the full sequence; it cannot be bounded like the
+        Q-buffer without losing exactness).  The O(L^2)-total work assumes prior_state is
+        threaded every fire; a dropped prior_state restarts at n_prev=0 (a one-off O(L^2)
+        recompute that fire, still correct).
         """
         incr = (prior.get("partials") or {}).get("incr") if prior else None
         S_asym = incr["S_asym"] if incr else 0.0
         S_den = incr["S_den"] if incr else 0.0
         n_prev = incr["n"] if incr else 0
-        # row-sum vector r = A_asym @ 1 (O(N) state), grows with context for the Gamma/C split
+        # row-sum vector r = A_asym @ 1 (O(N) state, fp32), grows with context for Gamma/C
         if incr is not None and incr.get("r") is not None:
             r = incr["r"]
             if r.shape[0] < L:
                 r = torch.cat([r, r.new_zeros(L - r.shape[0])])
         else:
-            r = torch.zeros(L, device=Qh.device, dtype=Qh.dtype)
-        scale = 1.0 / math.sqrt(Qh.shape[1])
-        for t in range(n_prev, L):
-            scores = Qh[t] @ Kh[: t + 1].T * scale  # causal: token t attends to keys 0..t
-            p = torch.softmax(scores, dim=-1)
-            S_den += float((p * p).sum().item())
-            if t > 0:
-                off = p[:t]  # off-diagonal new edges (exclude self-attention p[t])
-                S_asym += float((off * off).sum().item()) / 2.0
-                r[:t] += -off / 2.0  # new column: -P[t,i]/2 added to each prior r_i
-                r[t] = float(off.sum().item()) / 2.0  # new entry r_t = (sum_{i<t} P[t,i])/2
+            r = torch.zeros(L, device=Qh.device, dtype=torch.float32)
+
+        if L > n_prev:
+            lo = n_prev
+            scale = 1.0 / math.sqrt(Qh.shape[1])
+            scores = (Qh[lo:L] @ Kh[:L].T) * scale  # [B, L]
+            grow = torch.arange(lo, L, device=Qh.device).unsqueeze(1)  # global row index
+            gcol = torch.arange(L, device=Qh.device).unsqueeze(0)
+            scores = scores.masked_fill(gcol > grow, float("-inf"))  # causal: keep cols 0..t
+            P = torch.softmax(scores, dim=-1).to(torch.float32)  # [B, L], each row sums over 0..t
+            B = P.shape[0]
+            local = torch.arange(B, device=Qh.device)
+            diag = P[local, grow.squeeze(1)]  # [B] self-attention P[t,t]
+            S_den += float(P.square().sum().item())
+            S_asym += float((P.square().sum() - diag.square().sum()).item()) / 2.0
+            # new column edges: r[i] += -(sum over new rows t != i of P[t,i]) / 2
+            P_nodiag = P.clone()
+            P_nodiag[local, grow.squeeze(1)] = 0.0
+            r[:L] += -P_nodiag.sum(dim=0) / 2.0
+            # new entries: r[t] += (rowmass below t) / 2 = (1 - P[t,t]) / 2  (additive, not set)
+            r[lo:L] += (P.sum(dim=1) - diag) / 2.0
+
         grad_energy = 2.0 * float((r * r).sum().item()) / L
         G, Gamma, C = self._split(S_asym, S_den, grad_energy)
         return {
@@ -179,6 +204,11 @@ class AsymmetryDiagnostic:
         }
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
+        # Drop any prior-fire cache: it is keyed on tensor data_ptr(), and the allocator
+        # recycles addresses, so a stale entry from a freed tensor of the same shape could
+        # otherwise be returned for new data.  Cleared here, repopulated by this fire's
+        # _window_stats, and reused by witness() within the same fire.
+        self._cache = None
         if self.incremental:
             return self._incremental_reduce(Qh, Kh, L, ctx.get("prior_state") or {})
 

@@ -186,6 +186,14 @@ class AsymmetryFeatures(BaseModel):
         None, description="Curl (circulatory) part: ||A_curl||_F / ||P||_F; G^2 = Gamma^2 + C^2."
     )
 
+    @field_validator("G", "Gamma", "C")
+    @classmethod
+    def _scrub_nonfinite(cls, v: float | None) -> float | None:
+        # NaN/inf must never reach the sink: the upstream max(x, 0.0) guards do NOT scrub
+        # NaN (max(nan, 0.0) == nan), so a poisoned estimate would otherwise be emitted
+        # silently. Coerce non-finite to None so downstream sees "no value", not garbage.
+        return v if v is None or math.isfinite(v) else None
+
 
 class TrackerFeatures(BaseModel):
     """Features from raw post-softmax attention matrix A.

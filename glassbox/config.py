@@ -175,14 +175,17 @@ class AsymmetryConfig(SignalConfigBase):
     into a global G — unbiased only under disjoint (tumbling) windowing.
     """
 
-    threshold: int = 512
-    block_size: int = 256
+    # Bounds guard against crashes / silent NaN: block_size=0 raises in range(),
+    # n_hutchinson=0 divides by zero, negative threshold forces the noisy path for all L.
+    threshold: int = Field(512, ge=0)
+    block_size: int = Field(256, ge=1)
     causal: bool = True
-    n_hutchinson: int = 32
+    n_hutchinson: int = Field(32, ge=1)
     seed: int = 42
     streaming: bool = False
     # incremental: exact full-operator G, folding only delta tokens per fire (causal,
-    # unbounded buffer). O(1) state, O(L^2) total. See docs/operator-choice.md.
+    # unbounded buffer). O(1) scalars but an O(N) row-sum vector r per (layer, head);
+    # see _incremental_reduce. See docs/operator-choice.md.
     incremental: bool = False
 
 
