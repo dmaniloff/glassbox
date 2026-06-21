@@ -122,15 +122,17 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
         - ``cls._handlers`` — snapshot sinks, rebuilt from config.
         - ``cls._diagnostics`` — per-signal Diagnostic objects, rebuilt from config.
-        - ``cls.state_dict`` — per-layer state; dropped so each layer's QBuffer
-          rebuilds with the new windowing policy on the next forward.
+
+        Call this before engine creation: per-layer QBuffers capture the
+        windowing policy (max_tokens/mode) at construction, so the config must
+        be final before any forward() runs.
 
         vLLM forks/spawns subprocesses (API server, engine core, workers) and
         loads this plugin in *every* one of them. Setting ``_config_set_explicitly``
         here is what lets the plugin tell "config was set programmatically" from
         "use defaults": after a fork the child inherits the explicit config (and
         this flag), so the plugin must NOT re-run ``set_config(GlassboxConfig())``
-        and clobber it with defaults. Call this before engine creation.
+        and clobber it with defaults.
         """
         cls.config = config
         cls._config_set_explicitly = True
@@ -138,11 +140,6 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             h.close()
         cls._handlers = create_handlers_from_config(config)
         cls._build_diagnostics()
-        # Drop per-layer state so QBuffers rebuild with the new windowing policy
-        # (max_tokens/mode are captured at QBuffer construction). Mirrors the
-        # diagnostics rebuild above; no-op in the normal "set_config before engine
-        # creation" path since no state exists yet.
-        cls.state_dict = {}
 
     @classmethod
     def _build_diagnostics(cls) -> None:
