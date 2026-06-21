@@ -39,10 +39,25 @@ EPSILON = 1e-10
 class MagneticDiagnostic:
     signal_name = "magnetic"
 
-    def __init__(self, threshold: int = 512, block_size: int = 256):
+    def __init__(self, threshold: int = 512, block_size: int = 256, incremental: bool = False):
         self.threshold = threshold
         self.block_size = block_size
-        self._cache: tuple | None = None  # (key, (lambda1, bottom_evec))
+        # incremental: report the streamable phase-curl frustration energy (Hodge curl of θ via
+        # the row-sum identity, eigensolver-free) folded across fires, instead of the dense λ₁.
+        self.incremental = incremental
+        self._cache: tuple | None = None  # (key, (lambda1, bottom_evec, phase_curl))
+
+    @staticmethod
+    def _phase_curl(theta: torch.Tensor, L: int) -> float:
+        """Hodge curl energy of the antisymmetric phase field θ: ‖θ‖² − 2‖θ·1‖²/L.
+
+        Equals the total squared triangle holonomy Σ Φ_ijk²; 0 ⟺ θ is a pure gauge gradient
+        ⟺ balanced ⟺ λ₁ = 0.  Streamable via the row-sum r_θ = θ·1 (issue #68).
+        """
+        r = theta.sum(dim=1)
+        total = float((theta * theta).sum().item())
+        grad_energy = 2.0 * float((r * r).sum().item()) / L
+        return max(0.0, total - grad_energy)
 
     @staticmethod
     def _phase_and_magnitude(S: torch.Tensor, St: torch.Tensor) -> tuple:
@@ -54,25 +69,20 @@ class MagneticDiagnostic:
         theta = torch.where(denom != 0, torch.atan(num / safe), torch.zeros_like(denom))
         return W, theta
 
-    def _dense_Lphi(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int) -> torch.Tensor:
-        """Hermitian L_φ = D − A_θ as a dense complex [L, L] tensor (L ≤ threshold)."""
+    def _materialized(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int) -> tuple:
+        """(lambda1, bottom_evec, phase_curl) via dense Hermitian eig.  Cached per fire."""
+        key = (Qh.data_ptr(), Kh.data_ptr(), tuple(Qh.shape), tuple(Kh.shape), L)
+        if self._cache is not None and self._cache[0] == key:
+            return self._cache[1]
         scale = 1.0 / math.sqrt(Qh.shape[1])
         S = (Qh @ Kh.T * scale).to(torch.float32)
         W, theta = self._phase_and_magnitude(S, S.T)
         W = W - torch.diag(torch.diagonal(W))  # no self-loops: W_ii = 0
         A_theta = torch.complex(W * torch.cos(theta), W * torch.sin(theta))
         A_theta = A_theta - torch.diag(torch.diagonal(A_theta))  # zero diagonal phase term
-        d = W.sum(dim=1)  # real degree
-        return torch.diag(d).to(A_theta.dtype) - A_theta
-
-    def _materialized(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int) -> tuple:
-        """(lambda1, bottom_evec) via dense Hermitian eigendecomposition.  Cached per fire."""
-        key = (Qh.data_ptr(), Kh.data_ptr(), tuple(Qh.shape), tuple(Kh.shape), L)
-        if self._cache is not None and self._cache[0] == key:
-            return self._cache[1]
-        L_phi = self._dense_Lphi(Qh, Kh, L)
+        L_phi = torch.diag(W.sum(dim=1)).to(A_theta.dtype) - A_theta
         evals, evecs = torch.linalg.eigh(L_phi)  # ascending real evals, complex evecs
-        val = (float(evals[0].item()), evecs[:, 0])
+        val = (float(evals[0].item()), evecs[:, 0], self._phase_curl(theta, L))
         self._cache = (key, val)
         return val
 
@@ -107,8 +117,29 @@ class MagneticDiagnostic:
             d[i0:i1] = W.sum(dim=1)
         return d
 
+    def _phase_curl_stream(self, Qh, Kh, L, n_prev, r, theta_sq):
+        """Fold tokens [n_prev, L) into the phase row-sum r_θ and ‖θ‖² (the curl-energy stats).
+
+        New token t adds edges (t, j) for j < t; θ is antisymmetric (θ_jt = −θ_tj). O(L) state,
+        O((L−n_prev)·L) work. Mirrors the asymmetry incremental fold, applied to the phase θ.
+        """
+        if L <= n_prev:
+            return r, theta_sq
+        scale = 1.0 / math.sqrt(Qh.shape[1])
+        lo = n_prev
+        Sb = (Qh[lo:L] @ Kh.T * scale).to(torch.float32)  # S[t, j]
+        SbT = (Kh[lo:L] @ Qh.T * scale).to(torch.float32)  # S[j, t]
+        _, theta = self._phase_and_magnitude(Sb, SbT)  # θ[t, j], [B, L]
+        rows = torch.arange(lo, L, device=Qh.device).unsqueeze(1)
+        cols = torch.arange(L, device=Qh.device).unsqueeze(0)
+        th = torch.where(cols < rows, theta, torch.zeros_like(theta))  # keep new pairs j < t
+        theta_sq = theta_sq + 2.0 * float((th * th).sum().item())  # both (t,j) and (j,t)
+        r = r - th.sum(dim=0)  # new columns: r[j] += θ_jt = −θ_tj
+        r[lo:L] = r[lo:L] + th.sum(dim=1)  # new entries: r[t] += Σ_{j<t} θ_tj
+        return r, theta_sq
+
     def _matrix_free(self, Qh, Kh, L) -> tuple:
-        """(lambda1, bottom_evec) via complex-Hermitian Lanczos (which='smallest')."""
+        """(lambda1, bottom_evec, phase_curl) via complex-Hermitian Lanczos (which='smallest')."""
         scale = 1.0 / math.sqrt(Qh.shape[1])
         d = self._degree(Qh, Kh, L, scale)
         mv = self._matvec_Lphi(Qh, Kh, L, scale, d)
@@ -116,25 +147,51 @@ class MagneticDiagnostic:
         evals, evecs = hermitian_lanczos(
             mv, L, k=1, iters=iters, device=str(Qh.device), which="smallest", dtype=torch.complex64
         )
-        return float(evals[0].item()), evecs[:, 0]
+        r, theta_sq = self._phase_curl_stream(
+            Qh, Kh, L, 0, torch.zeros(L, device=Qh.device, dtype=torch.float32), 0.0
+        )
+        pc = max(0.0, theta_sq - 2.0 * float((r * r).sum().item()) / L)
+        return float(evals[0].item()), evecs[:, 0], pc
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
         self._cache = None
+        if self.incremental:
+            # Streamable phase-curl frustration (eigensolver-free); λ₁ left None. See issue #68.
+            prior = ctx.get("prior_state") or {}
+            st = (prior.get("partials") or {}).get("mag")
+            if st is not None:
+                r = st["r"]
+                if r.shape[0] < L:
+                    r = torch.cat([r, r.new_zeros(L - r.shape[0])])
+                theta_sq, n_prev = st["theta_sq"], st["n"]
+            else:
+                r = torch.zeros(L, device=Qh.device, dtype=torch.float32)
+                theta_sq, n_prev = 0.0, 0
+            r, theta_sq = self._phase_curl_stream(Qh, Kh, L, n_prev, r, theta_sq)
+            pc = max(0.0, theta_sq - 2.0 * float((r * r).sum().item()) / L)
+            return {
+                "features": MagneticFeatures(frustration=None, phase_curl=pc),
+                "tier": "incremental",
+                "partials": {"mag": {"r": r, "theta_sq": theta_sq, "n": L}},
+            }
         if L <= self.threshold:
-            lambda1, _ = self._materialized(Qh, Kh, L)
+            lambda1, _, pc = self._materialized(Qh, Kh, L)
             tier = "materialized"
         else:
-            lambda1, _ = self._matrix_free(Qh, Kh, L)
+            lambda1, _, pc = self._matrix_free(Qh, Kh, L)
             tier = "matrix_free"
         # L_φ is PSD, so λ₁ ≥ 0; clamp away float-eig noise (e.g. ~-1e-7 on a balanced operator).
-        return {"features": MagneticFeatures(frustration=max(0.0, lambda1)), "tier": tier}
+        return {
+            "features": MagneticFeatures(frustration=max(0.0, lambda1), phase_curl=pc),
+            "tier": tier,
+        }
 
     def witness(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> torch.Tensor:
         if L <= self.threshold:
-            _, evec = self._materialized(Qh, Kh, L)
+            _, evec, _ = self._materialized(Qh, Kh, L)
         else:
-            _, evec = self._matrix_free(Qh, Kh, L)
-        return evec.abs()  # per-token frustration localization
+            _, evec, _ = self._matrix_free(Qh, Kh, L)
+        return evec.abs()  # per-token frustration localization (bottom eigenvector magnitude)
 
     def accumulate(self, local: dict, state: dict | None) -> dict:
         return local

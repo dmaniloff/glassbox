@@ -124,8 +124,15 @@ class MagneticFeatures(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     frustration: float | None = Field(None, description="λ₁ of the magnetic Laplacian L_φ.")
+    phase_curl: float | None = Field(
+        None,
+        description=(
+            "Streamable frustration energy: Hodge curl energy of the phase field θ "
+            "(‖θ‖² − 2‖θ·1‖²/L). 0 ⟺ balanced (λ₁=0); brackets λ₁. Eigensolver-free."
+        ),
+    )
 
-    @field_validator("frustration")
+    @field_validator("frustration", "phase_curl")
     @classmethod
     def _scrub_nonfinite(cls, v: float | None) -> float | None:
         return v if v is None or math.isfinite(v) else None

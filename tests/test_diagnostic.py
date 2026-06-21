@@ -252,3 +252,43 @@ class TestMagnetic:
         back = SVDSnapshot.from_jsonl_row(json.loads(snap.model_dump_json()))
         assert isinstance(back.features, MagneticFeatures)
         assert back.features.frustration == 0.73
+
+
+class TestMagneticStreaming:
+    """Streamable frustration: phase-field Hodge curl energy (eigensolver-free, issue #68)."""
+
+    def _explicit_curlE(self, Q, K):
+        scale = 1.0 / (D**0.5)
+        S = Q @ K.T * scale
+        denom = S + S.T
+        safe = torch.where(denom != 0, denom, torch.ones_like(denom))
+        theta = torch.where(denom != 0, torch.atan((S - S.T) / safe), torch.zeros_like(denom))
+        phi = theta.sum(1) / Q.shape[0]
+        grad = phi[:, None] - phi[None, :]
+        return float(((theta - grad) ** 2).sum())
+
+    def test_batch_reports_lambda1_and_phase_curl(self, qk):
+        Q, K = qk
+        f = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)["features"]
+        assert f.frustration is not None and f.frustration >= 0.0
+        assert abs(f.phase_curl - self._explicit_curlE(Q, K)) < 1e-2
+
+    def test_incremental_matches_batch(self):
+        torch.manual_seed(3)
+        N = 28
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        batch_pc = MagneticDiagnostic(threshold=1024).reduce(Q, K, N)["features"].phase_curl
+        diag = MagneticDiagnostic(incremental=True)
+        state = None
+        for t in range(1, N + 1):  # one token at a time
+            r = diag.reduce(Q[:t], K[:t], t, prior_state=state)
+            state = diag.accumulate(r, state)
+        assert r["tier"] == "incremental"
+        assert r["features"].frustration is None  # eigensolver-free
+        assert abs(r["features"].phase_curl - batch_pc) < 1e-2
+
+    def test_balanced_phase_curl_is_zero(self):
+        # Q=K -> symmetric S -> theta=0 -> phase_curl = 0 (balanced, matches lambda1=0).
+        torch.manual_seed(1)
+        Q = torch.randn(L, D)
+        assert MagneticDiagnostic(incremental=True).reduce(Q, Q, L)["features"].phase_curl < 1e-5

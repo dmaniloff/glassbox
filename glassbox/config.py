@@ -86,6 +86,10 @@ class MagneticConfig(SignalConfigBase):
 
     threshold: int = 512
     block_size: int = 256
+    # incremental: report the streamable phase-curl frustration energy (Hodge curl of θ via the
+    # row-sum identity, eigensolver-free) maintained across fires, instead of the dense λ₁.
+    # Exact full-sequence frustration energy; requires the unbounded buffer. See issue #68.
+    incremental: bool = False
 
 
 class TrackerConfig(SignalConfigBase):
