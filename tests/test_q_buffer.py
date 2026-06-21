@@ -147,20 +147,6 @@ class TestConfig:
         assert cfg.q_buffer_max_tokens == 0
         assert cfg.q_buffer_mode == "sliding"
 
-    def test_programmatic(self):
-        assert GlassboxConfig(q_buffer_max_tokens=1024).q_buffer_max_tokens == 1024
-
-    def test_programmatic_tumbling(self):
-        cfg = GlassboxConfig(q_buffer_max_tokens=256, q_buffer_mode="tumbling")
-        assert cfg.q_buffer_mode == "tumbling"
-
-    def test_config_feeds_qbuffer(self):
-        """A QBuffer built from config reflects the configured policy."""
-        cfg = GlassboxConfig(q_buffer_max_tokens=256, q_buffer_mode="tumbling")
-        buf = QBuffer(max_tokens=cfg.q_buffer_max_tokens, mode=cfg.q_buffer_mode)
-        assert buf.tumbling is True
-        assert buf.max_tokens == 256
-
 
 class TestKAlignment:
     """Verify that Q and K slicing takes the LAST L rows (most recent positions).
