@@ -38,9 +38,12 @@ The asymmetry/Hodge family runs on the **row-stochastic post-softmax attention P
 
 1. **Asymmetric normalization distorts the antisymmetric structure.** `M = D_Q^{-1/2}(·)D_K^{-1/2}`
    with `D_Q ≠ D_K` is an *asymmetric* scaling. `ShadeFormal/Research/Hodge/NormalizationInvariance.lean`
-   proves asymmetric scaling does not preserve antisymmetry and can **inflate the rank of the
-   antisymmetric part**; symmetric scaling `D·A·D` does preserve it. P (no normalization) keeps the
-   clean rank-2 gradient.
+   *proves* that symmetric scaling `D·A·D` preserves antisymmetry
+   (`symmetric_diag_scaling_preserves_antisymm`, line 88) and that any invertible scaling preserves
+   the **total** rank (`rank_diag_scaling`, line 56). That asymmetric `D₁AD₂` (`D₁ ≠ D₂`) inflates
+   the rank of the *antisymmetric part* is a paper remark (`rem:asymmetric_scaling`, *Beyond Hodge*),
+   stated in the file's docstring but **not** a formalized theorem. Either way, P (no normalization)
+   is the operator whose antisymmetric structure is certified clean.
 2. **Clean interpretation on P.** The Hodge gradient on P is exactly the in-degree imbalance:
    `A_grad(i,j) = m(i) − m(j)`, `m(i) ∝ (1 − cᵢ)`, `cᵢ = Σⱼ Pⱼᵢ`. The curl is the divergence-free
    residual — the **solenoidal / row-mean projection** (`ShadeFormal` `HodgeDecomposition`,
