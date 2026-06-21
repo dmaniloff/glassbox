@@ -63,7 +63,7 @@ update implemented (use *local block* or *full recompute*).
 | `selfattn` | diagonal stats | ✓ | — | — |
 | `laplacian` | Laplacian eigvals | ✓ | ✗ spectral | — |
 | `magnetic` *(#41)* | frustration `λ₁` (spectral) | ✓ | ✗ spectral | —³ |
-| `magnetic` *(#68/#69)* | phase-curl energy `‖θ‖²−2‖r_θ‖²/L` | ✓ | ✓ **additive** | ✓ |
+| `magnetic` *(#68/#69)* | phase-curl: unweighted `‖θ‖²−2‖r_θ‖²/L`; **W-weighted** `ΣWθ²−2Σb²/d` | ✓ | ✓ **additive** | ✓ |
 
 ¹ Conductance is **doubly** unsound as a block-diagonal-global: `σ₂` is an order statistic of
 the *union* of block spectra (not a sum), and the conductance `φ` of a block-diagonal (i.e.
@@ -77,8 +77,12 @@ exact-modes matrix.
 apply (only approximate subspace tracking, like `σ₂` above). The **faithful streamable
 frustration** is the **phase-curl energy** (next row) — the Hodge curl of the phase field `θ`,
 computed by the same row-sum identity as the asymmetry curl, hence additive and fully
-streamable. `λ₁` and `phase_curl` are both `0 ⟺ balanced`, and `phase_curl` brackets `λ₁`
-(magnetic Cheeger); `λ₁` itself stays batch (or approximate). See issue #68.
+streamable. Two variants: the unweighted `‖θ‖²−2‖r_θ‖²/L` (formally-cleanest, pure phase) and
+the **magnitude-weighted** `ΣWθ²−2Σb²/d` (`b_i=Σ_j W_ij θ_ij`, `d_i=Σ_j W_ij`; the Jacobi
+weighted Hodge, reducing to the unweighted form for uniform `W`). The W-weighted one is the
+**faithful `λ₁` stream** — it tracks `λ₁` at ρ≈0.97 vs ≈0.68 for unweighted, because it
+downweights weak/near-symmetric edges. Both are `0 ⟺ balanced`; `λ₁` itself stays batch (or
+approximate subspace tracking). See issue #68.
 
 Conductance is **already emitted today** by the `routing` signal (`phi_hat`, `sigma2`) on M;
 #38/#53 is the dedicated streaming version. The Cheeger σ₂ bracket is the M-operator family in
