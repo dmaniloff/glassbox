@@ -11,7 +11,7 @@ from glassbox.hodge import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
 )
-from glassbox.svd import compute_degree_normalized_M, compute_dk_blocked, compute_logsumexp_blocked
+from glassbox.svd import compute_degree_normalized_M, compute_dk_blocked
 
 
 class RoutingDiagnostic:
@@ -24,22 +24,14 @@ class RoutingDiagnostic:
         threshold: int = 512,
         block_size: int = 256,
         causal: bool = True,
-        hodge_target_cv: float = 0.05,
-        hodge_confidence: float = 0.95,
-        hodge_pilot_size: int = 100,
-        hodge_min_samples: int = 200,
-        hodge_curl_seed: int = 42,
+        hodge_seed: int = 42,
     ):
         self.rank = rank
         self.method = method
         self.threshold = threshold
         self.block_size = block_size
         self.causal = causal
-        self.hodge_target_cv = hodge_target_cv
-        self.hodge_confidence = hodge_confidence
-        self.hodge_pilot_size = hodge_pilot_size
-        self.hodge_min_samples = hodge_min_samples
-        self.hodge_curl_seed = hodge_curl_seed
+        self.hodge_seed = hodge_seed
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
         scale = 1.0 / math.sqrt(Qh.shape[1])
@@ -55,21 +47,9 @@ class RoutingDiagnostic:
             A = torch.softmax(scores, dim=-1)
             M, _, _ = compute_degree_normalized_M(A)
             tier = "materialized"
-            features = compute_routing_features_materialized(
-                M,
-                rank=k,
-                target_cv=self.hodge_target_cv,
-                seed=self.hodge_curl_seed,
-            )
+            features = compute_routing_features_materialized(M, rank=k)
         else:
             _, d_k_inv_sqrt = compute_dk_blocked(
-                Qh,
-                Kh,
-                scale,
-                self.block_size,
-                causal=self.causal,
-            )
-            lse = compute_logsumexp_blocked(
                 Qh,
                 Kh,
                 scale,
@@ -82,15 +62,10 @@ class RoutingDiagnostic:
                 Kh,
                 d_k_inv_sqrt,
                 scale,
-                lse,
                 rank=k,
                 svd_method=self.method,
                 block_size=self.block_size,
-                target_cv=self.hodge_target_cv,
-                confidence=self.hodge_confidence,
-                pilot_size=self.hodge_pilot_size,
-                min_samples=self.hodge_min_samples,
-                seed=self.hodge_curl_seed,
+                seed=self.hodge_seed,
                 causal=self.causal,
             )
 

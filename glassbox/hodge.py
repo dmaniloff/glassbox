@@ -19,7 +19,6 @@ References:
 from __future__ import annotations
 
 import math
-from functools import lru_cache
 
 import torch
 
@@ -41,173 +40,6 @@ from glassbox.svd import (
 )
 
 EPSILON = 1e-10
-
-# ---------------------------------------------------------------------------
-# Triangle sampling (ported from shade.functional.hodge_ops)
-# ---------------------------------------------------------------------------
-
-
-@lru_cache(maxsize=64)
-def sample_triangles(n: int, n_samples: int, seed: int = 42) -> torch.Tensor:
-    """Generate triangle vertex indices for curl estimation (cached, CPU).
-
-    Returns a (m, 3) int64 tensor of strictly-ordered triangle vertices
-    (i < j < k) on CPU.  Cached by (n, n_samples, seed) so that repeated
-    calls at the same sequence length reuse indices across heads.
-
-    Ported from shade.functional.hodge_ops.sample_triangles.
-    """
-    n_tri = n * (n - 1) * (n - 2) // 6
-    actual = min(n_samples, n_tri)
-    if actual <= 0:
-        return torch.zeros((0, 3), dtype=torch.int64)
-    # Oversample to absorb rejections from degenerate and duplicate draws
-    gen = torch.Generator(device="cpu").manual_seed(seed)
-    collected = []
-    seen = set()
-    remaining = actual
-    while remaining > 0:
-        batch_size = remaining * 3  # oversample 3x
-        raw = torch.randint(0, n, (batch_size, 3), generator=gen)
-        raw_sorted, _ = raw.sort(dim=1)
-        valid = (raw_sorted[:, 0] < raw_sorted[:, 1]) & (raw_sorted[:, 1] < raw_sorted[:, 2])
-        for row in raw_sorted[valid]:
-            key = (row[0].item(), row[1].item(), row[2].item())
-            if key not in seen:
-                seen.add(key)
-                collected.append(row)
-                remaining -= 1
-                if remaining <= 0:
-                    break
-    return torch.stack(collected) if collected else torch.zeros((0, 3), dtype=torch.int64)
-
-
-# ---------------------------------------------------------------------------
-# Adaptive sample sizing (Bernstein bound, ported from shade)
-# ---------------------------------------------------------------------------
-
-
-def adaptive_curl_samples(
-    n: int,
-    Q: torch.Tensor | None = None,
-    K: torch.Tensor | None = None,
-    lse: torch.Tensor | None = None,
-    d_k_inv_sqrt: torch.Tensor | None = None,
-    scale: float | None = None,
-    target_cv: float = 0.05,
-    confidence: float = 0.95,
-    pilot_size: int = 100,
-    floor: int = 200,
-    causal: bool = False,
-) -> int:
-    """Compute required triangle samples for target CV on curl RMS estimator.
-
-    Uses the Bernstein bound (ported from shade):
-
-        m >= (kappa_4 - 1) / (4 * eps^2) * 2 * ln(2 / delta)
-
-    If Q/K/lse/d_k_inv_sqrt/scale are provided, kappa_4 is estimated from a
-    pilot sample via matrix-free M[i,j] lookups.  Otherwise a conservative
-    empirical formula kappa_4 = max(3, n/5) is used.
-    """
-    if n < 4:
-        return 0
-    n_tri = n * (n - 1) * (n - 2) // 6
-    if n_tri <= floor:
-        return n_tri  # enumerate all triangles
-
-    delta = 1.0 - confidence
-    log_factor = 2.0 * math.log(2.0 / delta)
-
-    has_pilot = all(x is not None for x in (Q, K, lse, d_k_inv_sqrt, scale))
-    if has_pilot:
-        tri = sample_triangles(n, pilot_size, seed=0)
-        if len(tri) < 10:
-            return min(floor, n_tri)
-        ii = tri[:, 0].to(Q.device)
-        jj = tri[:, 1].to(Q.device)
-        kk = tri[:, 2].to(Q.device)
-
-        def _entry(a, b):
-            return get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, a, b, causal=causal)
-
-        circs = (
-            (_entry(ii, jj) - _entry(jj, ii))
-            + (_entry(jj, kk) - _entry(kk, jj))
-            - (_entry(ii, kk) - _entry(kk, ii))
-        )
-        c2 = circs.square().to(torch.float64)
-        mu2 = c2.mean()
-        mu4 = c2.square().mean()
-        kappa = (mu4 / (mu2.square() + 1e-30)).item()
-        kappa = max(kappa, 1.0)
-    else:
-        kappa = max(3.0, n / 5.0)
-
-    m = int(math.ceil((kappa - 1.0) / (4.0 * target_cv**2) * log_factor))
-    return min(max(floor, m), n_tri)
-
-
-# ---------------------------------------------------------------------------
-# Matrix-free curl estimation
-# ---------------------------------------------------------------------------
-
-
-def estimate_curl_matrix_free(
-    Q: torch.Tensor,
-    K: torch.Tensor,
-    lse: torch.Tensor,
-    d_k_inv_sqrt: torch.Tensor,
-    scale: float,
-    M_fro_norm: float,
-    target_cv: float = 0.05,
-    confidence: float = 0.95,
-    pilot_size: int = 100,
-    min_samples: int = 200,
-    seed: int = 42,
-    causal: bool = False,
-) -> float:
-    """Triangle-sampling curl using on-the-fly M[i,j] lookups.
-
-    Uses Bernstein-bound adaptive sizing.  Triangle indices are cached via
-    sample_triangles for reuse across heads at the same sequence length.
-    """
-    n = Q.shape[0]
-    n_samp = adaptive_curl_samples(
-        n,
-        Q=Q,
-        K=K,
-        lse=lse,
-        d_k_inv_sqrt=d_k_inv_sqrt,
-        scale=scale,
-        target_cv=target_cv,
-        confidence=confidence,
-        pilot_size=pilot_size,
-        floor=min_samples,
-        causal=causal,
-    )
-    if n_samp == 0:
-        return 0.0
-
-    tri = sample_triangles(n, n_samp, seed)
-    if len(tri) == 0:
-        return 0.0
-    ii = tri[:, 0].to(Q.device)
-    jj = tri[:, 1].to(Q.device)
-    kk = tri[:, 2].to(Q.device)
-
-    def _entry(a, b):
-        return get_M_entries_batch(Q, K, lse, d_k_inv_sqrt, scale, a, b, causal=causal)
-
-    circs = (
-        (_entry(ii, jj) - _entry(jj, ii))
-        + (_entry(jj, kk) - _entry(kk, jj))
-        - (_entry(ii, kk) - _entry(kk, ii))
-    )
-    rms = circs.square().mean().sqrt()
-    C = rms.item() / (math.sqrt(2) * (M_fro_norm + EPSILON))
-    return C
-
 
 # ---------------------------------------------------------------------------
 # Matrix-free G (asymmetry coefficient)
@@ -338,14 +170,9 @@ def compute_routing_features_matrix_free(
     K,
     d_k_inv_sqrt,
     scale,
-    lse,
     rank,
     svd_method="randomized",
     block_size=256,
-    target_cv=0.05,
-    confidence=0.95,
-    pilot_size=100,
-    min_samples=200,
     seed=42,
     n_hutchinson=10,
     causal=False,
@@ -355,9 +182,10 @@ def compute_routing_features_matrix_free(
     Returns a RoutingFeatures with singular_values, spectral
     features, and Hodge decomposition features populated.
 
-    The Pythagorean identity G^2 = Gamma^2 + C^2 holds by construction:
-    G is exact (blocked streaming), C is sampled (Bernstein-bound adaptive),
-    Gamma is derived from the identity.
+    The Pythagorean identity G^2 = Gamma^2 + C^2 is a genuine split: G is exact (blocked
+    streaming), and Gamma/C are both derived from the exact row-sum r = M_asym @ 1 (one
+    matvec) via the Hodge identity ||A_grad||^2 = 2||r||^2/L. ``seed`` / ``n_hutchinson``
+    feed only the commutator-norm estimator.
     """
     L = Q.shape[0]
     device = Q.device
@@ -406,24 +234,11 @@ def compute_routing_features_matrix_free(
     # --- G (exact, blocked) ---
     G, _ = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
 
-    # --- C (sampled, Bernstein-bound adaptive) ---
-    C = estimate_curl_matrix_free(
-        Q,
-        K,
-        lse,
-        d_k_inv_sqrt,
-        scale,
-        M_fro_val,
-        target_cv=target_cv,
-        confidence=confidence,
-        pilot_size=pilot_size,
-        min_samples=min_samples,
-        seed=seed,
-        causal=causal,
-    )
-
-    # --- Pythagorean: Gamma = sqrt(G^2 - C^2) ---
-    Gamma = math.sqrt(max(G**2 - C**2, 0.0))
+    # --- Exact Hodge gradient/curl split via the row-sum r = M_asym @ 1 (one matvec; #55) ---
+    ones = torch.ones(L, device=device, dtype=Q.dtype)
+    r = matvec_Masym_blocked(Q, K, ones, d_k_inv_sqrt, scale, block_size, causal=causal)
+    M_asym_fro_sq = (G * M_fro_val) ** 2  # ||M_asym||^2 = (G * ||M||)^2
+    Gamma, C = _gradient_curl_split(M_asym_fro_sq, r, L, M_fro_val)
     curl_ratio = C / (G + EPSILON)
 
     # --- sigma2_asym (matrix-free) ---
@@ -454,26 +269,6 @@ def compute_routing_features_matrix_free(
 # ---------------------------------------------------------------------------
 
 
-def estimate_curl_materialized(M, target_cv=0.05, seed=42):
-    """Triangle-sampling curl on a materialized M tensor."""
-    n = M.shape[0]
-    if n < 4:
-        return 0.0
-    n_tri = n * (n - 1) * (n - 2) // 6
-    n_samp = min(max(200, int(math.ceil(1.0 / (target_cv**2)))), n_tri)
-    tri = sample_triangles(n, n_samp, seed)
-    if len(tri) == 0:
-        return 0.0
-    ii = tri[:, 0]
-    jj = tri[:, 1]
-    kk = tri[:, 2]
-    circs = (M[ii, jj] - M[jj, ii]) + (M[jj, kk] - M[kk, jj]) - (M[ii, kk] - M[kk, ii])
-    rms = circs.square().mean().sqrt()
-    M_fro_norm = torch.linalg.norm(M, "fro").item()
-    C = rms.item() / (math.sqrt(2) * (M_fro_norm + EPSILON))
-    return C
-
-
 def compute_G_materialized(M):
     """Asymmetry coefficient from materialized M."""
     M_fro = torch.linalg.norm(M, "fro")
@@ -483,9 +278,28 @@ def compute_G_materialized(M):
     return G, M_fro.item()
 
 
-def compute_routing_features_materialized(
-    M, rank, svd_method="randomized", target_cv=0.05, seed=42
-) -> RoutingFeatures:
+def _gradient_curl_split(asym_fro_sq: float, r: torch.Tensor, n: int, fro: float) -> tuple:
+    """Exact Hodge gradient/curl split of an antisymmetric part from its row-sum r = A_asym @ 1.
+
+    ``||A_grad||^2 = 2||r||^2 / n`` (potential phi = r/n); Gamma = ||A_grad||/||M|| (gradient,
+    hierarchical) and the curl is the divergence-free residual
+    ``C = sqrt(||A_asym||^2 - ||A_grad||^2)/||M||`` (circulatory). Both are derived from r, so
+    ``G^2 = Gamma^2 + C^2`` is a genuine split — not the tautology of defining Gamma as
+    sqrt(G^2 - C^2). This replaces the mis-normalized triangle-RMS curl (issue #55), which
+    divided the triangle circulation by the triangle count C(n,3), understating C by ~1/n and
+    silently reabsorbing the curl mass into Gamma. The row-sum form sidesteps that
+    normalization entirely: C is the Pythagorean residual of the exact gradient energy, so no
+    triangle count enters. The gradient identity itself is the load-bearing, formally-verified
+    part (the same one the asymmetry signal uses).
+    """
+    grad_energy = 2.0 * float((r * r).sum().item()) / n
+    den = fro + EPSILON
+    gamma = math.sqrt(max(grad_energy, 0.0)) / den
+    c = math.sqrt(max(asym_fro_sq - grad_energy, 0.0)) / den
+    return gamma, c
+
+
+def compute_routing_features_materialized(M, rank, svd_method="randomized") -> RoutingFeatures:
     """All routing features from materialized M.
 
     Returns a RoutingFeatures with singular_values, spectral
@@ -521,8 +335,12 @@ def compute_routing_features_materialized(
     comm = M_sym @ M_asym - M_asym @ M_sym
     commutator_norm = torch.linalg.norm(comm, "fro").item() / (M_fro + EPSILON)
 
-    C = estimate_curl_materialized(M, target_cv, seed)
-    Gamma = math.sqrt(max(G**2 - C**2, 0.0))
+    # Exact Hodge gradient/curl split via the row-sum identity (issue #55), replacing the
+    # mis-normalized triangle-RMS curl. r = M_asym @ 1; Gamma/C both derived from it.
+    # ||M_asym||^2 is taken as (G*||M||)^2 (consistent with G) so G^2 = Gamma^2 + C^2 is exact.
+    r = M_asym.sum(dim=1)
+    M_asym_fro_sq = (G * M_fro) ** 2
+    Gamma, C = _gradient_curl_split(M_asym_fro_sq, r, M.shape[0], M_fro)
     curl_ratio = C / (G + EPSILON)
 
     return RoutingFeatures(

@@ -13,20 +13,15 @@ import torch
 from conftest import make_M
 
 from glassbox.hodge import (
-    adaptive_curl_samples,
     compute_G_materialized,
     compute_G_matrix_free,
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
     compute_sigma2_asym_matrix_free,
     estimate_commutator_norm_matrix_free,
-    estimate_curl_materialized,
-    estimate_curl_matrix_free,
-    sample_triangles,
 )
 from glassbox.svd import (
     compute_dk_blocked,
-    compute_logsumexp_blocked,
     compute_M_fro_norm_blocked,
     matvec_commutator_blocked,
     matvec_M_blocked,
@@ -91,145 +86,66 @@ def _matrix_to_edge_flow(M, edges):
 
 
 # ===========================================================================
-# Group 1: Triangle Sampling Correctness
-# ===========================================================================
-
-
-class TestTriangleSampling:
-    def test_valid_ordering(self):
-        tri = sample_triangles(10, 20, seed=0)
-        assert tri.shape[1] == 3
-        assert len(tri) == 20
-        assert (tri[:, 0] < tri[:, 1]).all()
-        assert (tri[:, 1] < tri[:, 2]).all()
-
-    def test_no_duplicates(self):
-        tri = sample_triangles(10, 20, seed=0)
-        tri_set = set(map(tuple, tri.tolist()))
-        assert len(tri_set) == len(tri)
-
-    def test_small_n(self):
-        tri = sample_triangles(2, 10)
-        assert len(tri) == 0
-
-    def test_exhaustive_small(self):
-        tri = sample_triangles(4, 100, seed=0)
-        assert len(tri) == 4  # C(4,3) = 4
-        canonical = {(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)}
-        actual = set(map(tuple, tri.tolist()))
-        assert actual == canonical
-
-    def test_lru_cache(self):
-        sample_triangles.cache_clear()
-        t1 = sample_triangles(10, 20, seed=42)
-        t2 = sample_triangles(10, 20, seed=42)
-        assert t1 is t2
-        t3 = sample_triangles(10, 20, seed=99)
-        assert t1 is not t3
-
-    def test_deterministic(self):
-        sample_triangles.cache_clear()
-        t1 = sample_triangles(10, 20, seed=7)
-        sample_triangles.cache_clear()
-        t2 = sample_triangles(10, 20, seed=7)
-        assert torch.equal(t1, t2)
-
-
-# ===========================================================================
-# Group 2: Adaptive Sample Sizing (Bernstein Bound)
-# ===========================================================================
-
-
-class TestAdaptiveSampling:
-    def test_formula_mode_bounds(self):
-        m = adaptive_curl_samples(100, target_cv=0.05, confidence=0.95, floor=200)
-        assert m >= 200
-        assert m <= 100 * 99 * 98 // 6
-
-    def test_small_n_enumerate_all(self):
-        # C(5,3) = 10 < floor=200 → enumerate all
-        m = adaptive_curl_samples(5, floor=200)
-        assert m == 10
-
-    def test_n3_returns_zero(self):
-        assert adaptive_curl_samples(3) == 0
-
-    def test_pilot_mode_matrix_free(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = make_M(20, 4)
-        _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        m = adaptive_curl_samples(
-            20,
-            Q=Q,
-            K=K,
-            lse=lse,
-            d_k_inv_sqrt=d_k_mf,
-            scale=scale,
-            target_cv=0.05,
-            confidence=0.95,
-            pilot_size=50,
-            floor=200,
-        )
-        assert 0 < m <= 20 * 19 * 18 // 6
-
-    def test_confidence_monotonicity(self):
-        m_low = adaptive_curl_samples(50, confidence=0.90, floor=10)
-        m_high = adaptive_curl_samples(50, confidence=0.99, floor=10)
-        assert m_high >= m_low
-
-    def test_cv_monotonicity(self):
-        m_loose = adaptive_curl_samples(50, target_cv=0.10, floor=10)
-        m_tight = adaptive_curl_samples(50, target_cv=0.01, floor=10)
-        assert m_tight >= m_loose
-
-
-# ===========================================================================
-# Group 3: Curl Coefficient — Matrix-Free Faithfulness
+# Curl coefficient C — exact Hodge gradient/curl split (row-sum identity, #55)
 # ===========================================================================
 
 
 class TestCurl:
+    """Exact gradient/curl split of M_asym via the row-sum identity (replaces triangle-RMS)."""
+
+    def _hodge_oracle(self, M):
+        # independent split: potential phi = (M_asym @ 1)/n, A_grad[i,j] = phi_i - phi_j
+        A = (M - M.T) / 2.0
+        n = M.shape[0]
+        phi = A.sum(dim=1) / n
+        A_grad = phi[:, None] - phi[None, :]
+        fro = torch.linalg.norm(M, "fro")
+        return (
+            (A.norm() / fro).item(),
+            (A_grad.norm() / fro).item(),
+            ((A - A_grad).norm() / fro).item(),
+        )
+
+    def test_materialized_matches_hodge_oracle(self):
+        _, _, _, _, M, _ = make_M(16, 4)
+        f = compute_routing_features_materialized(M, rank=4)
+        g, gamma, c = self._hodge_oracle(M)
+        assert abs(f.G - g) < 1e-6
+        assert abs(f.Gamma - gamma) < 1e-6
+        assert abs(f.C - c) < 1e-6
+        assert abs(f.G**2 - (f.Gamma**2 + f.C**2)) < 1e-9  # genuine split, not a tautology
+
     def test_matrix_free_matches_materialized(self):
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        M_fro = torch.linalg.norm(M, "fro").item()
-        C_mat = estimate_curl_materialized(M, target_cv=0.05, seed=42)
-        C_mf = estimate_curl_matrix_free(
-            Q,
-            K,
-            lse,
-            d_k_mf,
-            scale,
-            M_fro,
-            min_samples=200,
-            seed=42,
-        )
-        assert abs(C_mat - C_mf) < 0.05, f"mat={C_mat}, mf={C_mf}"
+        f_mat = compute_routing_features_materialized(M, rank=4)
+        f_mf = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=4, block_size=8)
+        assert abs(f_mat.C - f_mf.C) < 1e-4
+        assert abs(f_mat.Gamma - f_mf.Gamma) < 1e-4
 
-    def test_symmetric_near_zero(self):
-        torch.manual_seed(42)
-        Q = torch.randn(12, 4)
-        K = Q.clone()  # Q=K → symmetric attention
-        scale = 1.0 / math.sqrt(4)
-        _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        M_fro = compute_M_fro_norm_blocked(Q, K, d_k_mf, scale).item()
-        C = estimate_curl_matrix_free(Q, K, lse, d_k_mf, scale, M_fro, min_samples=50)
-        assert C < 0.05, f"Symmetric M should have C~0, got {C}"
+    def test_pure_gradient_has_zero_curl(self):
+        # M_asym built as a pure gradient field (phi_i - phi_j) -> curl C = 0, Gamma = G.
+        # float64: the exact-zero curl is the difference of two ~equal energies, so it needs
+        # the precision (in float32 the residual is ~3e-4).
+        torch.manual_seed(0)
+        n = 12
+        phi = torch.randn(n, dtype=torch.float64)
+        A_grad = phi[:, None] - phi[None, :]  # antisymmetric, pure gradient (no curl)
+        M = torch.eye(n, dtype=torch.float64) + A_grad  # symmetric part I + pure-gradient asym
+        f = compute_routing_features_materialized(M, rank=4)
+        assert f.C < 1e-6  # no circulatory component
+        assert abs(f.Gamma - f.G) < 1e-6
 
     def test_scales_with_antisymmetry(self):
-        Q, K, scale, A, M, d_k_inv_sqrt = make_M(12, 4, seed=77)
+        _, _, _, _, M, _ = make_M(12, 4, seed=77)
         M_sym = (M + M.T) / 2.0
         M_asym = (M - M.T) / 2.0
-        curls = []
-        for alpha in [0.0, 0.5, 1.0, 2.0]:
-            M_scaled = M_sym + alpha * M_asym
-            C = estimate_curl_materialized(M_scaled, seed=42)
-            curls.append(C)
-        # Monotonically increasing (approximately)
+        curls = [
+            compute_routing_features_materialized(M_sym + a * M_asym, rank=4).C
+            for a in [0.0, 0.5, 1.0, 2.0]
+        ]
         for i in range(len(curls) - 1):
-            assert curls[i] <= curls[i + 1] + 0.02
+            assert curls[i] <= curls[i + 1] + 1e-6  # monotone (now exact)
 
 
 # ===========================================================================
@@ -278,8 +194,7 @@ class TestPythagorean:
     def test_basic(self):
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(20, 4, seed=99)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=200)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=4)
         residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 0.01, f"Pythagorean: G={f.G}, Γ={f.Gamma}, C={f.C}, residual={residual}"
 
@@ -288,10 +203,7 @@ class TestPythagorean:
             for L in [8, 12, 16, 20]:
                 Q, K, scale, A, M, d_k_inv_sqrt = make_M(L, 4, seed=seed)
                 _, d_k_mf = compute_dk_blocked(Q, K, scale)
-                lse = compute_logsumexp_blocked(Q, K, scale)
-                f = compute_routing_features_matrix_free(
-                    Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
-                )
+                f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
                 residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
                 assert residual < 0.02, f"seed={seed}, L={L}: residual={residual}"
 
@@ -299,28 +211,21 @@ class TestPythagorean:
         for seed in range(5):
             Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
-            lse = compute_logsumexp_blocked(Q, K, scale)
-            f = compute_routing_features_matrix_free(
-                Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
-            )
+            f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
             assert f.Gamma >= 0.0
 
     def test_curl_bounded_by_G(self):
         for seed in range(5):
             Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
-            lse = compute_logsumexp_blocked(Q, K, scale)
-            f = compute_routing_features_matrix_free(
-                Q, K, d_k_mf, scale, lse, rank=2, min_samples=200
-            )
+            f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
             assert f.C <= f.G + 0.01, f"C={f.C} > G={f.G}"
 
     def test_exact_at_exhaustive_n(self):
         # n=5: C(5,3)=10 < floor=200, all triangles enumerated
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(5, 4, seed=42)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
         residual = abs(f.G**2 - f.Gamma**2 - f.C**2)
         assert residual < 1e-4, f"Exact case residual={residual}"
 
@@ -336,18 +241,14 @@ class TestSpectral:
         sigma_ref = torch.linalg.svdvals(M)
         s2_ref = sigma_ref[1].item()
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=50)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=4)
         assert abs(s2_ref - f.sigma2) < 0.05
 
     def test_phi_hat_range(self):
         for seed in range(5):
             Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
-            lse = compute_logsumexp_blocked(Q, K, scale)
-            f = compute_routing_features_matrix_free(
-                Q, K, d_k_mf, scale, lse, rank=2, min_samples=50
-            )
+            f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
             assert 0.0 <= f.phi_hat <= 1.0
 
 
@@ -536,8 +437,7 @@ class TestRoutingFeatures:
 
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=50)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=4)
         assert isinstance(f, RoutingFeatures)
         assert len(f.singular_values) > 0
         # All hodge fields populated
@@ -555,8 +455,7 @@ class TestRoutingFeatures:
     def test_value_ranges(self):
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=50)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=4)
         assert 0.0 <= f.sigma2 <= 1.0
         assert 0.0 <= f.phi_hat <= 1.0
         assert f.G >= 0.0
@@ -569,8 +468,7 @@ class TestRoutingFeatures:
     def test_singular_values_descending(self):
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=4, min_samples=50)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=4)
         for i in range(len(f.singular_values) - 1):
             assert f.singular_values[i] >= f.singular_values[i + 1] - 1e-6
 
@@ -609,8 +507,7 @@ class TestExactHodgeCrossValidation:
         """
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(5, 4, seed=42)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
         G_exact, C_exact, Gamma_exact, _, _ = self._exact_hodge_coefficients(M)
         # G should agree (both exact)
         assert abs(f.G - G_exact) < 0.02, f"G: mf={f.G}, exact={G_exact}"
@@ -627,8 +524,7 @@ class TestExactHodgeCrossValidation:
         the Pythagorean identity should hold for the RMS-based estimate."""
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(8, 4, seed=77)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=200)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
         G_exact, C_exact, Gamma_exact, _, _ = self._exact_hodge_coefficients(M)
         # Both G should agree (exact computation)
         assert abs(f.G - G_exact) < 0.02, f"G: mf={f.G}, exact={G_exact}"
@@ -673,8 +569,7 @@ class TestEdgeCases:
         """L=3 should not crash. Only 1 triangle."""
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(3, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=50)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
         assert f.G >= 0.0
         assert math.isfinite(f.C)
 
@@ -682,8 +577,7 @@ class TestEdgeCases:
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         Q, K = Q.float(), K.float()
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, lse, rank=2, min_samples=50)
+        f = compute_routing_features_matrix_free(Q, K, d_k_mf, scale, rank=2)
         for key, val in f.model_dump().items():
             if isinstance(val, float):
                 assert math.isfinite(val), f"{key} is not finite: {val}"
@@ -753,47 +647,38 @@ class TestMaterializedVsMatrixFree:
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
         f_mat = compute_routing_features_materialized(M, rank=4)
-        lse = compute_logsumexp_blocked(Q, K, scale)
         f_mf = compute_routing_features_matrix_free(
             Q,
             K,
             d_k_mf,
             scale,
-            lse,
             rank=4,
-            min_samples=200,
         )
         assert abs(f_mat.G - f_mf.G) < 0.02
 
     def test_sigma2_agreement(self):
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
         f_mat = compute_routing_features_materialized(M, rank=4)
         f_mf = compute_routing_features_matrix_free(
             Q,
             K,
             d_k_mf,
             scale,
-            lse,
             rank=4,
-            min_samples=200,
         )
         assert abs(f_mat.sigma2 - f_mf.sigma2) < 0.05
 
     def test_curl_agreement(self):
         Q, K, scale, A, M, d_k_inv_sqrt = make_M(16, 4)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
-        f_mat = compute_routing_features_materialized(M, rank=4, seed=42)
+        f_mat = compute_routing_features_materialized(M, rank=4)
         f_mf = compute_routing_features_matrix_free(
             Q,
             K,
             d_k_mf,
             scale,
-            lse,
             rank=4,
-            min_samples=200,
             seed=42,
         )
         assert abs(f_mat.C - f_mf.C) < 0.05
@@ -803,16 +688,13 @@ class TestMaterializedVsMatrixFree:
         for seed in range(5):
             Q, K, scale, A, M, d_k_inv_sqrt = make_M(12, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
-            lse = compute_logsumexp_blocked(Q, K, scale)
-            f_mat = compute_routing_features_materialized(M, rank=4, seed=42)
+            f_mat = compute_routing_features_materialized(M, rank=4)
             f_mf = compute_routing_features_matrix_free(
                 Q,
                 K,
                 d_k_mf,
                 scale,
-                lse,
                 rank=4,
-                min_samples=200,
                 seed=42,
             )
             for key in ["G", "C", "Gamma", "curl_ratio"]:
@@ -839,23 +721,20 @@ def _make_M_half(L, D, dtype, seed=42):
     K = torch.randn(L, D).to(dtype)
     scale = 1.0 / math.sqrt(D)
     d_k, d_k_mf = compute_dk_blocked(Q, K, scale)
-    lse = compute_logsumexp_blocked(Q, K, scale)
-    return Q, K, scale, d_k_mf, lse
+    return Q, K, scale, d_k_mf
 
 
 class TestHalfPrecisionDtype:
     @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
     def test_routing_features_matrix_free_half(self, dtype):
         """compute_routing_features_matrix_free should not crash with half Q/K."""
-        Q, K, scale, d_k_mf, lse = _make_M_half(16, 4, dtype)
+        Q, K, scale, d_k_mf = _make_M_half(16, 4, dtype)
         f = compute_routing_features_matrix_free(
             Q,
             K,
             d_k_mf,
             scale,
-            lse,
             rank=2,
-            min_samples=200,
             seed=42,
         )
         assert f.sigma2 is not None
@@ -867,7 +746,7 @@ class TestHalfPrecisionDtype:
     @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
     def test_sigma2_asym_half(self, dtype):
         """compute_sigma2_asym_matrix_free should not crash with half Q/K."""
-        Q, K, scale, d_k_mf, _ = _make_M_half(16, 4, dtype)
+        Q, K, scale, d_k_mf = _make_M_half(16, 4, dtype)
         result = compute_sigma2_asym_matrix_free(Q, K, d_k_mf, scale, block_size=256)
         assert isinstance(result, float)
         assert math.isfinite(result)
@@ -875,31 +754,15 @@ class TestHalfPrecisionDtype:
     @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
     def test_G_matrix_free_half(self, dtype):
         """compute_G_matrix_free should not crash with half Q/K."""
-        Q, K, scale, d_k_mf, _ = _make_M_half(16, 4, dtype)
+        Q, K, scale, d_k_mf = _make_M_half(16, 4, dtype)
         G, fro = compute_G_matrix_free(Q, K, d_k_mf, scale)
         assert math.isfinite(G)
         assert fro > 0
 
     @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
-    def test_curl_matrix_free_half(self, dtype):
-        """estimate_curl_matrix_free should not crash with half Q/K."""
-        Q, K, scale, d_k_mf, lse = _make_M_half(16, 4, dtype)
-        fro = compute_M_fro_norm_blocked(Q, K, d_k_mf, scale)
-        C = estimate_curl_matrix_free(
-            Q,
-            K,
-            lse,
-            d_k_mf,
-            scale,
-            fro.item(),
-            seed=42,
-        )
-        assert math.isfinite(C)
-
-    @pytest.mark.parametrize("dtype", HALF_DTYPES, ids=lambda d: DTYPE_IDS[d])
     def test_commutator_norm_half(self, dtype):
         """estimate_commutator_norm_matrix_free should not crash with half Q/K."""
-        Q, K, scale, d_k_mf, _ = _make_M_half(16, 4, dtype)
+        Q, K, scale, d_k_mf = _make_M_half(16, 4, dtype)
         fro = compute_M_fro_norm_blocked(Q, K, d_k_mf, scale)
         cn = estimate_commutator_norm_matrix_free(
             Q,

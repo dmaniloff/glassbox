@@ -17,9 +17,7 @@ def test_defaults():
     assert config.spectral.heads == [0]
     assert config.routing.interval == 32
     assert config.routing.threshold == 512
-    assert config.routing.hodge_confidence == 0.95
-    assert config.routing.hodge_pilot_size == 100
-    assert config.routing.hodge_min_samples == 200
+    assert config.routing.hodge_seed == 42
     assert config.selfattn.interval == 32
     assert config.selfattn.threshold == 512
     assert config.selfattn.heads == [0]
@@ -212,7 +210,7 @@ def test_from_cli_args_yaml_auto_load(tmp_path, monkeypatch):
         textwrap.dedent("""\
         routing:
           enabled: true
-          hodge_target_cv: 0.1
+          hodge_seed: 7
     """)
     )
     monkeypatch.chdir(tmp_path)
@@ -222,7 +220,7 @@ def test_from_cli_args_yaml_auto_load(tmp_path, monkeypatch):
     )
     assert config.routing.enabled is True
     assert config.routing.rank == 2  # CLI args beat YAML
-    assert config.routing.hodge_target_cv == 0.1  # from YAML
+    assert config.routing.hodge_seed == 7  # from YAML
 
 
 def test_from_cli_args_svd_not_set_on_non_svd_signals():
