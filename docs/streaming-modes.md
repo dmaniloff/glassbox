@@ -62,7 +62,8 @@ update implemented (use *local block* or *full recompute*).
 | `tracker` | A SVD | ✓ | ✗ spectral | — |
 | `selfattn` | diagonal stats | ✓ | — | — |
 | `laplacian` | Laplacian eigvals | ✓ | ✗ spectral | — |
-| `magnetic` *(planned, #41)* | frustration `λ₁` | ✓ | ✗ spectral | — |
+| `magnetic` *(#41)* | frustration `λ₁` (spectral) | ✓ | ✗ spectral | —³ |
+| `magnetic` *(#68/#69)* | phase-curl energy `‖θ‖²−2‖r_θ‖²/L` | ✓ | ✓ **additive** | ✓ |
 
 ¹ Conductance is **doubly** unsound as a block-diagonal-global: `σ₂` is an order statistic of
 the *union* of block spectra (not a sum), and the conductance `φ` of a block-diagonal (i.e.
@@ -71,10 +72,22 @@ window. ² No *exact* incremental update; the streaming-Cheeger line (#38/#53) m
 **approximate** `σ₂` via bordered Rayleigh–Ritz — a separate approximate regime outside this
 exact-modes matrix.
 
+³ The magnetic frustration `λ₁` has **no exact incremental update**: a new token borders `L_φ`
+*and* shifts every prior degree, a rank-`t` PSD change, so interlacing/secular tricks don't
+apply (only approximate subspace tracking, like `σ₂` above). The **faithful streamable
+frustration** is the **phase-curl energy** (next row) — the Hodge curl of the phase field `θ`,
+computed by the same row-sum identity as the asymmetry curl, hence additive and fully
+streamable. `λ₁` and `phase_curl` are both `0 ⟺ balanced`, and `phase_curl` brackets `λ₁`
+(magnetic Cheeger); `λ₁` itself stays batch (or approximate). See issue #68.
+
 Conductance is **already emitted today** by the `routing` signal (`phi_hat`, `sigma2`) on M;
 #38/#53 is the dedicated streaming version. The Cheeger σ₂ bracket is the M-operator family in
 the [operator taxonomy](operator-choice.md) (Cheeger→M, Hodge→P, orientation→pre-softmax S).
 
-**Rule of thumb:** additive (Frobenius/sum) statistics get all four modes; spectral and
-non-additive-combinatorial statistics get *local block* + *full recompute* (and *exact-full
-incremental* where an O(Δ) update exists, e.g. `|T_cyc|`), but **never** block-diagonal-global.
+**Rule of thumb:** additive (Frobenius/sum) statistics get all four modes (e.g. the asymmetry
+`G/Γ/C` and the magnetic **phase-curl energy** — both Hodge sums-of-squares via the same row-sum
+identity); spectral statistics (SVD `σ`, `σ₂`, Laplacian/magnetic `λ₁`) get *local block* +
+*full recompute* (+ *approximate* subspace tracking), **never** block-diagonal-global; and
+non-additive-combinatorial statistics (`|T_cyc|`) get *local block* + *exact-full incremental*
+(an O(Δ) update) but **never** block-diagonal-global. When a spectral quantity has an additive
+Hodge proxy (frustration `λ₁` → phase-curl energy), **that proxy is the faithful stream**.
