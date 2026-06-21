@@ -70,13 +70,6 @@ lower-triangular ⇒ its sign tournament is the transitive position order ⇒ `|
 The pre-softmax q·k tournament is never causally masked, so it survives. Matches
 `streaming-cyclic-triangles`.
 
-## A detectability ceiling on all of these
-
-Attention-pattern monitors — Hodge, spectral, aperture — are **blind to value-pathway steering**
-(the attention-insufficiency result of *subliminal-detection*). So no attention-only asymmetry
-diagnostic is complete; the asymmetry axis has a fundamental detectability limit independent of
-operator choice.
-
 ## References
 
 SHADE papers:
@@ -86,4 +79,3 @@ SHADE papers:
 - *streaming-asym-operators* — Hodge decomposition on the row-stochastic P.
 - *zero-shot-cheeger* — conductance on M; asymmetry-is-mask-artifact under causal masking.
 - *streaming-cyclic-triangles* — cyclic-triangle tournament on the pre-softmax q·k scores.
-- *subliminal-detection* — attention-pattern monitors are blind to value-pathway steering.
