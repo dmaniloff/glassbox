@@ -2,8 +2,8 @@
 
 Attention exposes three matrices, and **each diagnostic family must run on the one its
 mathematics requires** — they are not interchangeable. Using the wrong operator silently
-changes (or destroys) the quantity being measured. The choices below are grounded in three
-papers and the `ShadeFormal` Lean development.
+changes (or destroys) the quantity being measured. The choices below are grounded in the
+SHADE papers (see References).
 
 ## TL;DR
 
@@ -37,19 +37,16 @@ The asymmetry/Hodge family runs on the **row-stochastic post-softmax attention P
 `A = (P − Pᵀ)/2`, **not** on the degree-normalized M. Reasons:
 
 1. **Asymmetric normalization distorts the antisymmetric structure.** `M = D_Q^{-1/2}(·)D_K^{-1/2}`
-   with `D_Q ≠ D_K` is an *asymmetric* scaling. `ShadeFormal/Research/Hodge/NormalizationInvariance.lean`
-   *proves* that symmetric scaling `D·A·D` preserves antisymmetry
-   (`symmetric_diag_scaling_preserves_antisymm`, line 88) and that any invertible scaling preserves
-   the **total** rank (`rank_diag_scaling`, line 56). That asymmetric `D₁AD₂` (`D₁ ≠ D₂`) inflates
-   the rank of the *antisymmetric part* is a paper remark (`rem:asymmetric_scaling`, *Beyond Hodge*),
-   stated in the file's docstring but **not** a formalized theorem. Either way, P (no normalization)
-   is the operator whose antisymmetric structure is certified clean.
+   with `D_Q ≠ D_K` is an *asymmetric* scaling. *Beyond Hodge* shows that symmetric scaling
+   `D·A·D` preserves antisymmetry, whereas asymmetric `D₁AD₂` (`D₁ ≠ D₂`) does not, and can inflate
+   the rank of the antisymmetric part (`rem:asymmetric_scaling`). P (no normalization) keeps the
+   clean rank-2 gradient.
 2. **Clean interpretation on P.** The Hodge gradient on P is exactly the in-degree imbalance:
    `A_grad(i,j) = m(i) − m(j)`, `m(i) ∝ (1 − cᵢ)`, `cᵢ = Σⱼ Pⱼᵢ`. The curl is the divergence-free
-   residual — the **solenoidal / row-mean projection** (`ShadeFormal` `HodgeDecomposition`,
-   `EnergyDecomposition`: `A = A_pot + A_sol`, `A_pot = d₀(-m)`, Pythagorean proved), **not** a
+   residual — the **solenoidal / row-mean projection** (*Beyond Hodge*: `A = A_pot + A_sol`,
+   `A_pot = d₀(-m)`, with the Pythagorean energy split `G² = Γ² + C²`), **not** a
    triangle-circulation RMS.
-3. **Paper alignment.** `streaming-asym-operators` decomposes the row-stochastic P.
+3. **Paper alignment.** *streaming-asym-operators* decomposes the row-stochastic P.
 
 **What it gives:** total asymmetry `G = ‖P_asym‖_F/‖P‖_F`; the gradient (hierarchical) vs curl
 (circulatory) split (`G² = Γ² + C²`); and a per-token asymmetry witness.
@@ -60,8 +57,8 @@ found exactly this for GPT-2 / Pythia; the sign tournament is transitive ⇒ `|T
 asymmetry axis therefore carries limited diagnostic power for decoder-only models — interpret G
 accordingly. It is genuinely informative for *non-causal* attention (encoder / cross-attention).
 
-**G on M vs P.** `G = ‖M_asym‖_F/‖M‖_F` on M is the well-posed `ShadeFormal` Theorem-3.1
-"circulation ratio" — fine as a transpose-sensitivity *feature* in the conductance bundle (this is
+**G on M vs P.** `G = ‖M_asym‖_F/‖M‖_F` on M is the well-posed *Beyond Hodge* circulation ratio
+(Thm 3.1) — fine as a transpose-sensitivity *feature* in the conductance bundle (this is
 what `zero-shot-cheeger` and the `routing` signal report). The dedicated **`asymmetry` signal
 computes G on P**, the operator of the Hodge/circulation program.
 
@@ -73,17 +70,20 @@ lower-triangular ⇒ its sign tournament is the transitive position order ⇒ `|
 The pre-softmax q·k tournament is never causally masked, so it survives. Matches
 `streaming-cyclic-triangles`.
 
-## A formal ceiling on all of these
+## A detectability ceiling on all of these
 
-Attention-pattern monitors — Hodge, spectral, aperture — are **provably blind to value-pathway
-steering** (`ShadeFormal/.../SubliminalDetection/AttentionInsufficiency.lean`). So no attention-only
-asymmetry diagnostic is complete; the asymmetry axis has a fundamental detectability limit
-independent of operator choice.
+Attention-pattern monitors — Hodge, spectral, aperture — are **blind to value-pathway steering**
+(the attention-insufficiency result of *subliminal-detection*). So no attention-only asymmetry
+diagnostic is complete; the asymmetry axis has a fundamental detectability limit independent of
+operator choice.
 
 ## References
 
-- Papers (SHADE): `streaming-asym-operators` (Hodge on P), `zero-shot-cheeger` (conductance on M,
-  asymmetry-is-mask-artifact), `streaming-cyclic-triangles` (tournament on pre-softmax q·k).
-- Formal (`ShadeFormal`): `Research/Hodge/{HodgeDecomposition, EnergyDecomposition,
-  NormalizationInvariance, DegreeNormalizedCirculation}.lean`,
-  `Papers/SubliminalDetection/AttentionInsufficiency.lean`.
+SHADE papers:
+
+- *beyond-hodge* — Hodge decomposition of attention operators, normalization invariance, the
+  circulation ratio (Thm 3.1), and the gradient/curl energy split `G² = Γ² + C²`.
+- *streaming-asym-operators* — Hodge decomposition on the row-stochastic P.
+- *zero-shot-cheeger* — conductance on M; asymmetry-is-mask-artifact under causal masking.
+- *streaming-cyclic-triangles* — cyclic-triangle tournament on the pre-softmax q·k scores.
+- *subliminal-detection* — attention-pattern monitors are blind to value-pathway steering.

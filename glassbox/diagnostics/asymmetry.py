@@ -2,12 +2,11 @@
 
 **Operator: the row-stochastic post-softmax attention `P`** (causal-masked), NOT the
 degree-normalized `M = D_Q^{-1/2} P D_K^{-1/2}`.  The Hodge/asymmetry family is computed
-on `P` because the degree normalization is an *asymmetric* scaling (`D_Q != D_K`): ShadeFormal
-`NormalizationInvariance` proves only that *symmetric* scaling `D·A·D` preserves antisymmetry
-(the asymmetric-scaling-inflates-the-antisymmetric-rank direction is a paper remark, not a
-formalized theorem), so P (no normalization) is the operator whose antisymmetric structure is
-certified clean — keeping the gradient = degree-imbalance reading faithful.  This matches the
-streaming-asym-operators paper, which decomposes `A = (P - P^T)/2`.  Conductance/Cheeger keeps
+on `P` because the degree normalization is an *asymmetric* scaling (`D_Q != D_K`): the
+*beyond-hodge* paper shows symmetric scaling `D·A·D` preserves antisymmetry while asymmetric
+scaling does not (and can inflate the antisymmetric rank), so P (no normalization) keeps the
+antisymmetric structure — and the gradient = degree-imbalance reading — clean.  This matches the
+*streaming-asym-operators* paper, which decomposes `A = (P - P^T)/2`.  Conductance/Cheeger keeps
 `M` (its normalization is theorem-required).  See `docs/operator-choice.md`.
 
 `P_asym = (P - P^T)/2`.  G = ||P_asym||_F / ||P||_F is estimated matrix-free with a direct
