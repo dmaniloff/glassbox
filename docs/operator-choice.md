@@ -11,7 +11,8 @@ SHADE papers (see References).
 |---|---|---|---|---|
 | Conductance / bottleneck | **M** = degree-normalized post-softmax | `cheeger` | Cheeger σ₂ bracket is a theorem about the *normalized* operator | transport bottleneck bracket `(1−σ₂)/2 ≤ φ ≤ √(2(1−σ₂))` |
 | Hodge asymmetry / gradient–curl | **P** = row-stochastic post-softmax | `asymmetry`, `routing` (Hodge part) | degree normalization is an *asymmetric* scaling that inflates the antisymmetric rank; P keeps the clean structure | total asymmetry G, gradient (hierarchical) vs curl (circulatory) split, per-token witness |
-| Cyclic triangles / tournament | **S = QKᵀ** pre-softmax (unmasked) | `\|T_cyc\|` (planned) | causal post-softmax is transitive ⇒ `\|T_cyc\|=0`; the real tournament is in the raw scores | count of non-transitive (cyclic) attention triangles |
+| Orientation / tournament (discrete) | **S = QKᵀ** pre-softmax (unmasked) | `cyclic` (`\|T_cyc\|`, #42) | causal post-softmax is transitive ⇒ `\|T_cyc\|=0`; the real tournament is in the raw scores | count of non-transitive (cyclic) attention triangles |
+| Orientation / frustration (spectral) | **S = QKᵀ** pre-softmax (unmasked) | `magnetic` (λ₁ + phase-curl, #41/#68) | same post-softmax vacuity; magnetic Laplacian `L_φ=D−A⊙e^{iθ}` encodes the preference orientation as a U(1) phase | spectral frustration `λ₁` (0 ⟺ balanced) + streamable phase-curl energy |
 | Score geometry / rank | **S = QKᵀ** pre-softmax | `spectral` | pre-activation spectrum | singular-value structure of the scores |
 
 ## The three operators
@@ -62,13 +63,25 @@ accordingly. It is genuinely informative for *non-causal* attention (encoder / c
 what `zero-shot-cheeger` and the `routing` signal report). The dedicated **`asymmetry` signal
 computes G on P**, the operator of the Hodge/circulation program.
 
-## Cyclic triangles |T_cyc| → pre-softmax S (planned)
+## Orientation family → pre-softmax S
 
-`|T_cyc|` (the count of non-transitive / cyclic attention triangles) must be computed on the
-**pre-softmax scores** `sgn(qᵢ·kⱼ − qⱼ·kᵢ)`, never on post-softmax causal attention: a causal P is
-lower-triangular ⇒ its sign tournament is the transitive position order ⇒ `|T_cyc| = 0` identically.
-The pre-softmax q·k tournament is never causally masked, so it survives. Matches
-`streaming-cyclic-triangles`.
+Both orientation diagnostics live on the **unmasked pre-softmax scores** and are vacuous on the
+causal post-softmax operator (a causal P is lower-triangular ⇒ its tournament is the transitive
+position order ⇒ no cycles, no frustration). They are the **discrete** and **spectral** readouts
+of the same antisymmetric preference structure `qᵢ·kⱼ − qⱼ·kᵢ`:
+
+- **`|T_cyc|` (discrete, #42)** — the count of non-transitive / cyclic triangles via
+  `sgn(qᵢ·kⱼ − qⱼ·kᵢ)`. Streamable exactly (Kendall–Babington-Smith out-degree update). Matches
+  `streaming-cyclic-triangles`.
+- **`magnetic` frustration `λ₁` (spectral, #41)** — the smallest eigenvalue of the Hermitian
+  magnetic Laplacian `L_φ = D − A⊙e^{iθ}`, `W=(|S_ij|+|S_ji|)/2`,
+  `θ=arctan((S_ij−S_ji)/(S_ij+S_ji))`. `λ₁ = 0 ⟺` the orientation is balanced (a pure gauge
+  gradient); `λ₁ > 0 ⟺` frustration (preference loops that cannot be gauged away). Gauge-invariant,
+  so degree normalization (M vs P) leaves it unchanged — which is *why* it sits on S, not on M/P.
+  The exact `λ₁` is batch-only; its **faithful streamable companion is the phase-curl energy**
+  `‖θ‖²−2‖r_θ‖²/L` (the Hodge curl of the phase field θ, computed by the same row-sum identity as
+  the asymmetry curl — additive, exact-streamable; `0 ⟺ balanced`; brackets `λ₁`, #68). See
+  [streaming-modes](streaming-modes.md).
 
 ## References
 
@@ -79,3 +92,7 @@ SHADE papers:
 - *streaming-asym-operators* — Hodge decomposition on the row-stochastic P.
 - *zero-shot-cheeger* — conductance on M; asymmetry-is-mask-artifact under causal masking.
 - *streaming-cyclic-triangles* — cyclic-triangle tournament on the pre-softmax q·k scores.
+- *directed-attention-geometry* — magnetic Laplacian of attention, frustration index, and the
+  gauge invariance of `λ₁` (why frustration is normalization-independent).
+- *structural-streaming-attention* — the streaming diagnostic suite; magnetic frustration as the
+  spectral orientation member on pre-softmax S.
