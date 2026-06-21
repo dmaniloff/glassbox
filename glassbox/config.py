@@ -3,17 +3,17 @@ from __future__ import annotations
 from typing import Literal
 
 import click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
-SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
+SIGNAL_NAMES: list[str] = ["spectral", "routing", "asymmetry", "tracker", "selfattn", "laplacian"]
 
 # Signals that use SVD rank/method
 SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
-THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian"}
+THRESHOLD_SIGNALS: set[str] = {"routing", "asymmetry", "tracker", "selfattn", "laplacian"}
 
 
 def parse_signal_names(ctx, param, value):
@@ -75,6 +75,30 @@ class RoutingConfig(SignalConfigBase):
     hodge_min_samples: int = 200
 
 
+class AsymmetryConfig(SignalConfigBase):
+    """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P.
+
+    Hodge G signal.  Computed on the post-softmax attention P (NOT the degree-normalized
+    M — see docs/operator-choice.md).  Matrix-free Hutchinson estimator (Route B, direct
+    ||P_asym z||^2) above ``threshold``, exact materialized below.  When ``streaming`` is
+    set, the per-window sufficient statistics (||P_asym||_F^2, ||P||_F^2) are accumulated
+    into a global G — unbiased only under disjoint (tumbling) windowing.
+    """
+
+    # Bounds guard against crashes / silent NaN: block_size=0 raises in range(),
+    # n_hutchinson=0 divides by zero, negative threshold forces the noisy path for all L.
+    threshold: int = Field(512, ge=0)
+    block_size: int = Field(256, ge=1)
+    causal: bool = True
+    n_hutchinson: int = Field(32, ge=1)
+    seed: int = 42
+    streaming: bool = False
+    # incremental: exact full-operator G, folding only delta tokens per fire (causal,
+    # unbounded buffer). O(1) scalars but an O(N) row-sum vector r per (layer, head);
+    # see _incremental_reduce. See docs/operator-choice.md.
+    incremental: bool = False
+
+
 class TrackerConfig(SignalConfigBase):
     """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
 
@@ -134,6 +158,7 @@ class GlassboxConfig(BaseSettings):
 
     spectral: SpectralConfig = SpectralConfig()
     routing: RoutingConfig = RoutingConfig()
+    asymmetry: AsymmetryConfig = AsymmetryConfig()
     tracker: TrackerConfig = TrackerConfig()
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()

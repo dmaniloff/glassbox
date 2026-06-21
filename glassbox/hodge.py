@@ -531,3 +531,73 @@ def compute_routing_features_materialized(
         sigma2_asym=sigma2_asym,
         commutator_norm=commutator_norm,
     )
+
+
+# ---------------------------------------------------------------------------
+# Asymmetry coefficient G = ||A_asym||_F / ||A||_F via direct Hutchinson (Route B)
+# ---------------------------------------------------------------------------
+
+
+def _asymmetry_probe_accumulate(
+    Q, K, d_k_inv_sqrt, scale, block_size, n_hutchinson, seed, causal, per_row=False
+):
+    """Hutchinson estimate of ||A_asym||_F^2 from m = n_hutchinson Rademacher probes.
+
+    All m probes are stacked into a single [L, m] right-hand side and pushed through ONE
+    multi-RHS ``matvec_Masym_blocked`` (one blocked softmax pass for all probes instead of
+    m serial passes — ~m x fewer kernel launches).  Sums-of-squares accumulate in float32
+    for precision under fp16/bf16 Q/K.
+
+    Returns (s_asym, row_sq): s_asym ~ ||A_asym||_F^2 = (1/m) sum_i ||A_asym z_i||^2,
+    row_sq[i] ~ per-row mass with sum(row_sq) == s_asym (None if per_row=False).
+    The operator A is selected by ``d_k_inv_sqrt``: the real key-degree vector gives the
+    degree-normalized M; a unit vector gives the row-stochastic attention P.  Seeding makes
+    the scalar and witness paths draw identical probes, so ||witness||_2 == G.
+    """
+    L = Q.shape[0]
+    device = Q.device
+    dtype = Q.dtype
+    gen = torch.Generator(device=device).manual_seed(seed)
+    # Z: [L, m] Rademacher (+-1). One matvec returns W = A_asym @ Z, shape [L, m].
+    Z = torch.randint(0, 2, (L, n_hutchinson), device=device, generator=gen).to(dtype) * 2 - 1
+    W = matvec_Masym_blocked(Q, K, Z, d_k_inv_sqrt, scale, block_size, causal=causal)
+    sq = W.to(torch.float32).square()  # [L, m]; fp32 sums-of-squares accumulation
+    s_asym = sq.sum() / n_hutchinson
+    row_sq = (sq.sum(dim=1) / n_hutchinson) if per_row else None
+    return s_asym, row_sq
+
+
+def asymmetry_partials_and_witness_matrix_free(
+    Q,
+    K,
+    d_k_inv_sqrt,
+    scale,
+    M_fro_norm=None,
+    block_size=256,
+    n_hutchinson=32,
+    seed=42,
+    causal=False,
+):
+    """Additive sufficient statistics + per-row witness for the asymmetry coefficient.
+
+    Returns (S_asym, S_den, row_sq, r): S_asym ~ ||A_asym||_F^2 (direct Hutchinson on
+    ||A_asym z||^2, Route B — non-negative, cancellation-free), S_den = ||A||_F^2
+    (exact), row_sq[i] ~ per-row asymmetry mass, and r = A_asym @ 1 (exact row-sum vector,
+    one matvec) for the Hodge gradient/curl split — gradient energy = 2||r||^2/L.  The
+    operator A is set by ``d_k_inv_sqrt`` (a unit vector => the row-stochastic attention P).
+    The sum-of-squares partials are additive over a disjoint partition of windows:
+    G = sqrt(sum S_asym / sum S_den).
+    """
+    if M_fro_norm is None:
+        M_fro_norm = compute_M_fro_norm_blocked(
+            Q, K, d_k_inv_sqrt, scale, block_size, causal=causal
+        ).item()
+    s_asym, row_sq = _asymmetry_probe_accumulate(
+        Q, K, d_k_inv_sqrt, scale, block_size, n_hutchinson, seed, causal, per_row=True
+    )
+    S_asym = float(s_asym.clamp(min=0.0).item())
+    S_den = float(M_fro_norm) ** 2
+    # r = A_asym @ 1: exact gradient row-sum (one matvec), not a Hutchinson estimate.
+    ones_vec = torch.ones(Q.shape[0], device=Q.device, dtype=Q.dtype)
+    r = matvec_Masym_blocked(Q, K, ones_vec, d_k_inv_sqrt, scale, block_size, causal=causal)
+    return S_asym, S_den, row_sq, r

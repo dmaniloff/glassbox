@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SPECTRAL_FEATURE_NAMES = ["sv_ratio", "sv1", "sv_entropy"]
 
@@ -109,6 +109,37 @@ class RoutingFeatures(BaseModel):
             for k, v in _spectral_from_svs(values["singular_values"]).items():
                 values.setdefault(k, v)
         return values
+
+
+class AsymmetryFeatures(BaseModel):
+    """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P,
+    with its Hodge gradient/curl split G^2 = Gamma^2 + C^2.
+
+    Hodge G signal.  Computed on the post-softmax attention P (NOT the degree-normalized
+    M — see docs/operator-choice.md).  G is estimated matrix-free via a direct Hutchinson
+    estimator on ||P_asym z||^2 (Route B) above the threshold, exactly below it.  The
+    gradient energy is exact via the row-sum identity ||A_grad||^2 = 2||r||^2/L,
+    r = A_asym @ 1 (the hierarchical / potential part); the curl C is the divergence-free
+    residual (circulatory part).  The per-token asymmetry profile is the snapshot witness.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    G: float | None = Field(None, description="Total asymmetry: ||P_asym||_F / ||P||_F.")
+    Gamma: float | None = Field(
+        None, description="Gradient (hierarchical) part: ||A_grad||_F / ||P||_F."
+    )
+    C: float | None = Field(
+        None, description="Curl (circulatory) part: ||A_curl||_F / ||P||_F; G^2 = Gamma^2 + C^2."
+    )
+
+    @field_validator("G", "Gamma", "C")
+    @classmethod
+    def _scrub_nonfinite(cls, v: float | None) -> float | None:
+        # NaN/inf must never reach the sink: the upstream max(x, 0.0) guards do NOT scrub
+        # NaN (max(nan, 0.0) == nan), so a poisoned estimate would otherwise be emitted
+        # silently. Coerce non-finite to None so downstream sees "no value", not garbage.
+        return v if v is None or math.isfinite(v) else None
 
 
 class TrackerFeatures(BaseModel):
@@ -213,7 +244,12 @@ class SVDSnapshot(BaseModel):
     tier: str | None = None  # "materialized" | "matrix_free"
     witness: list[float] | None = None
     features: (
-        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
+        SpectralFeatures
+        | RoutingFeatures
+        | AsymmetryFeatures
+        | TrackerFeatures
+        | SelfAttnFeatures
+        | LaplacianFeatures
     )
 
     def __repr__(self) -> str:
@@ -241,6 +277,8 @@ class SVDSnapshot(BaseModel):
         if isinstance(feat_raw, dict):
             if sig == "routing":
                 d["features"] = RoutingFeatures(**feat_raw)
+            elif sig == "asymmetry":
+                d["features"] = AsymmetryFeatures(**feat_raw)
             elif sig == "tracker":
                 d["features"] = TrackerFeatures(**feat_raw)
             elif sig == "selfattn":
