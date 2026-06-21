@@ -61,8 +61,7 @@ class RoutingConfig(SignalConfigBase):
 
     rank: int = 4
     method: Literal["randomized", "lanczos"] = "randomized"
-    # Speed knob, not correctness: materialized path for L <= threshold,
-    # matrix-free above.  Set to 0 for always-matrix-free (no L×L allocation).
+    # Materialize M for L <= threshold, matrix-free above.
     # Crossover ~512 on NVIDIA A10G (bench_hodge.py, 2026-03-24, d=64, rank=4):
     #   L=256: mat 21ms vs mf 39ms (1.8x), L=512: 54ms vs 61ms (1.1x),
     #   L=1024: 174ms vs 110ms (0.6x). Materialized dominated by svdvals ~L^1.6.
@@ -81,7 +80,6 @@ class TrackerConfig(SignalConfigBase):
 
     rank: int = 4
     method: Literal["randomized", "lanczos"] = "randomized"
-    # Speed knob: 0 = always matrix-free (no L×L allocation).
     threshold: int = 512
     block_size: int = 256
     causal: bool = True
@@ -91,7 +89,6 @@ class SelfAttnConfig(SignalConfigBase):
     """Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)."""
 
     top_k: int = 10
-    # Speed knob: 0 = always matrix-free (no L×L allocation).
     threshold: int = 512
     block_size: int = 256
     causal: bool = True
@@ -101,7 +98,6 @@ class LaplacianConfig(SignalConfigBase):
     """Laplacian eigenvalues from attention graphs (LapEigvals, EMNLP 2025)."""
 
     top_k: int = 10
-    # Speed knob: 0 = always matrix-free (no L×L allocation).
     threshold: int = 512
     block_size: int = 256
     causal: bool = True
