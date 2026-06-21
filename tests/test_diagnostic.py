@@ -257,27 +257,41 @@ class TestMagnetic:
 class TestMagneticStreaming:
     """Streamable frustration: phase-field Hodge curl energy (eigensolver-free, issue #68)."""
 
-    def _explicit_curlE(self, Q, K):
+    def _phase_theta_W(self, Q, K):
         scale = 1.0 / (D**0.5)
         S = Q @ K.T * scale
         denom = S + S.T
         safe = torch.where(denom != 0, denom, torch.ones_like(denom))
         theta = torch.where(denom != 0, torch.atan((S - S.T) / safe), torch.zeros_like(denom))
+        W = (S.abs() + S.T.abs()) / 2.0
+        W = W - torch.diag(torch.diagonal(W))
+        return theta, W
+
+    def _explicit_curlE(self, Q, K):  # unweighted Hodge curl oracle
+        theta, _ = self._phase_theta_W(Q, K)
         phi = theta.sum(1) / Q.shape[0]
         grad = phi[:, None] - phi[None, :]
         return float(((theta - grad) ** 2).sum())
 
-    def test_batch_reports_lambda1_and_phase_curl(self, qk):
+    def _explicit_curlE_w(self, Q, K):  # Jacobi W-weighted curl oracle
+        theta, W = self._phase_theta_W(Q, K)
+        Wth = W * theta
+        b = Wth.sum(1)
+        d = W.sum(1)
+        return max(0.0, float((Wth * theta).sum()) - 2 * float((b * b / (d + 1e-10)).sum()))
+
+    def test_batch_reports_lambda1_and_both_curls(self, qk):
         Q, K = qk
         f = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)["features"]
         assert f.frustration is not None and f.frustration >= 0.0
         assert abs(f.phase_curl - self._explicit_curlE(Q, K)) < 1e-2
+        assert abs(f.phase_curl_w - self._explicit_curlE_w(Q, K)) < 1e-2
 
     def test_incremental_matches_batch(self):
         torch.manual_seed(3)
         N = 28
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        batch_pc = MagneticDiagnostic(threshold=1024).reduce(Q, K, N)["features"].phase_curl
+        b = MagneticDiagnostic(threshold=1024).reduce(Q, K, N)["features"]
         diag = MagneticDiagnostic(incremental=True)
         state = None
         for t in range(1, N + 1):  # one token at a time
@@ -285,10 +299,32 @@ class TestMagneticStreaming:
             state = diag.accumulate(r, state)
         assert r["tier"] == "incremental"
         assert r["features"].frustration is None  # eigensolver-free
-        assert abs(r["features"].phase_curl - batch_pc) < 1e-2
+        assert abs(r["features"].phase_curl - b.phase_curl) < 1e-2
+        assert abs(r["features"].phase_curl_w - b.phase_curl_w) < 1e-2  # weighted streams too
 
-    def test_balanced_phase_curl_is_zero(self):
-        # Q=K -> symmetric S -> theta=0 -> phase_curl = 0 (balanced, matches lambda1=0).
+    def test_balanced_curls_are_zero(self):
+        # Q=K -> symmetric S -> theta=0 -> both curls = 0 (balanced, matches lambda1=0).
         torch.manual_seed(1)
         Q = torch.randn(L, D)
-        assert MagneticDiagnostic(incremental=True).reduce(Q, Q, L)["features"].phase_curl < 1e-5
+        f = MagneticDiagnostic(incremental=True).reduce(Q, Q, L)["features"]
+        assert f.phase_curl < 1e-5 and f.phase_curl_w < 1e-5
+
+    def test_phase_curl_w_tracks_lambda1_better(self):
+        # The whole point: the W-weighted curl is a tighter lambda1 proxy than the unweighted.
+        lam, pc, pcw = [], [], []
+        for seed in range(40):
+            torch.manual_seed(seed)
+            Q, K = torch.randn(16, D), torch.randn(16, D)
+            f = MagneticDiagnostic(threshold=1024).reduce(Q, K, 16)["features"]
+            lam.append(f.frustration)
+            pc.append(f.phase_curl)
+            pcw.append(f.phase_curl_w)
+
+        def spearman(a, b):
+            ra = torch.tensor(a).argsort().argsort().float()
+            rb = torch.tensor(b).argsort().argsort().float()
+            ra -= ra.mean()
+            rb -= rb.mean()
+            return float((ra @ rb) / (ra.norm() * rb.norm()))
+
+        assert spearman(lam, pcw) > spearman(lam, pc)

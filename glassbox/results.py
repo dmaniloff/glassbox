@@ -127,12 +127,20 @@ class MagneticFeatures(BaseModel):
     phase_curl: float | None = Field(
         None,
         description=(
-            "Streamable frustration energy: Hodge curl energy of the phase field θ "
-            "(‖θ‖² − 2‖θ·1‖²/L). 0 ⟺ balanced (λ₁=0); brackets λ₁. Eigensolver-free."
+            "Streamable frustration energy: unweighted Hodge curl energy of the phase field θ "
+            "(‖θ‖² − 2‖θ·1‖²/L). 0 ⟺ balanced (λ₁=0). Eigensolver-free."
+        ),
+    )
+    phase_curl_w: float | None = Field(
+        None,
+        description=(
+            "Magnitude-weighted streamable frustration: Σ W_ij θ_ij² − 2 Σ b_i²/d_i "
+            "(b_i=Σ_j W_ij θ_ij, d_i=Σ_j W_ij). Downweights weak/near-symmetric edges; tracks "
+            "λ₁ far more tightly than phase_curl (ρ≈0.97). The faithful λ₁ stream."
         ),
     )
 
-    @field_validator("frustration", "phase_curl")
+    @field_validator("frustration", "phase_curl", "phase_curl_w")
     @classmethod
     def _scrub_nonfinite(cls, v: float | None) -> float | None:
         return v if v is None or math.isfinite(v) else None
