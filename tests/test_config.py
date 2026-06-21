@@ -191,7 +191,7 @@ def test_from_cli_args_threshold_zero():
     (``if threshold:``) would silently drop 0 and fall back to the default 512.
     """
     config = GlassboxConfig.from_cli_args(
-        signals=("routing", "tracker", "selfattn", "laplacian"),
+        signals=tuple(THRESHOLD_SIGNALS),
         threshold=0,
     )
     for sig in THRESHOLD_SIGNALS:
