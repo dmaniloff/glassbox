@@ -44,7 +44,7 @@ class CyclicTrianglesDiagnostic:
         self._cache: tuple | None = None  # (key, (s, D))
 
     def _materialized(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int) -> tuple:
-        """(s, D): out-degree vector s [L] (int64) and antisymmetric Δ = S − Sᵀ [L, L].
+        """(s, beats): out-degree vector s [L] (int64) and the tournament ω [L, L] (bool).
 
         Cleared per reduce() (data_ptr key) so reduce() then witness() share one pass within
         a fire without risking a stale entry from a recycled tensor address.
@@ -55,11 +55,11 @@ class CyclicTrianglesDiagnostic:
         S = Qh @ Kh.T
         D = S - S.T  # Δ_ij = q_i·k_j − q_j·k_i (antisymmetric)
         idx = torch.arange(L, device=D.device)
-        # i beats j (i ≠ j): Δ_ij > 0, or (Δ_ij == 0 and i < j) — ties oriented by index.
+        # ω[i,j] = i beats j (i ≠ j): Δ_ij > 0, or (Δ_ij == 0 and i < j) — ties by index.
         beats = (D > 0) | ((D == 0) & (idx.unsqueeze(1) < idx.unsqueeze(0)))
         beats.fill_diagonal_(False)
         s = beats.sum(dim=1).to(torch.int64)  # out-degree (score) of each vertex
-        val = (s, D)
+        val = (s, beats)
         self._cache = (key, val)
         return val
 
@@ -70,25 +70,27 @@ class CyclicTrianglesDiagnostic:
         sum_c2 = int((s * (s - 1) // 2).sum().item())
         return c_n3 - sum_c2
 
-    def _arrival_increments(self, D: torch.Tensor, L: int) -> torch.Tensor:
-        """witness[t] = #cyclic triangles {i,j,t} closed when token t arrives (i, j < t).
+    def _witness(self, beats: torch.Tensor, L: int) -> torch.Tensor:
+        """witness[t] = #cyclic triangles {i,j,t} closed at token t (i, j < t); Σ = |T_cyc|.
 
-        Σ_t witness[t] == |T_cyc| (each cyclic triangle attributed to its highest-index
-        vertex). Sequential replay, O(L²); only computed on emit_witness.
+        Fully vectorized via a column-cumsum of the tournament ω — no Python loop, exact
+        integer arithmetic. For token t (priors 0..t-1):
+            s_arr[t]    = Σ_{j<t} ω[t,j]           (out-degree of t among priors)
+            prefix[j,t] = Σ_{m<t} ω[j,m]           (out-degree of j restricted to 0..t-1)
+            sigma[t]    = Σ_{j<t, j beats t} prefix[j,t]
+            witness[t]  = C(t,2) − C(s_arr[t],2) − sigma[t]   (the per-arrival increment)
         """
-        device = D.device
-        s = torch.zeros(L, dtype=torch.int64, device=device)
-        w = torch.zeros(L, device=device)
-        for t in range(1, L):
-            # j < t beats t iff Δ_jt > 0, or (Δ_jt == 0 and j < t → always) — in-neighbors B.
-            beats_t = (D[:t, t] > 0) | (D[:t, t] == 0)
-            n_in = int(beats_t.sum().item())
-            s_t = t - n_in  # out-degree of t among the t prior vertices
-            sigma = int(s[:t][beats_t].sum().item())
-            w[t] = t * (t - 1) // 2 - s_t * (s_t - 1) // 2 - sigma
-            s[:t] = torch.where(beats_t, s[:t] + 1, s[:t])
-            s[t] = s_t
-        return w
+        device = beats.device
+        omega = beats.to(torch.int64)
+        ii = torch.arange(L, device=device)
+        lower = (ii.unsqueeze(1) > ii.unsqueeze(0)).to(torch.int64)  # [t,j] = (j < t)
+        upper = (ii.unsqueeze(1) < ii.unsqueeze(0)).to(torch.int64)  # [j,t] = (j < t)
+        s_arr = (omega * lower).sum(dim=1)  # [L] out-degree of t among priors
+        prefix = torch.cumsum(omega, dim=1) - omega  # [L,L] exclusive prefix out-degrees
+        sigma = (omega * prefix * upper).sum(dim=0)  # [L]
+        c_t2 = ii * (ii - 1) // 2
+        c_s2 = s_arr * (s_arr - 1) // 2
+        return (c_t2 - c_s2 - sigma).to(torch.float32)
 
     def _stream(self, Qh, Kh, s: torch.Tensor, count: int, n_prev: int, L: int) -> tuple:
         """Fold tokens [n_prev, L) into the out-degree vector s and running count (exact)."""
@@ -109,14 +111,18 @@ class CyclicTrianglesDiagnostic:
             prior = ctx.get("prior_state") or {}
             st = (prior.get("partials") or {}).get("tcyc")
             if st is not None:
+                # warm: fold only the delta tokens [n_prev, L) (the O(ΔE) streaming update;
+                # one token per fire under interval=1 → the 1-token global-streaming mode).
                 s = st["s"]
                 if s.shape[0] < L:
                     s = torch.cat([s, s.new_zeros(L - s.shape[0])])
-                count, n_prev = st["count"], st["n"]
+                s, count = self._stream(Qh, Kh, s, st["count"], st["n"], L)
             else:
-                s = torch.zeros(L, dtype=torch.int64, device=Qh.device)
-                count, n_prev = 0, 0
-            s, count = self._stream(Qh, Kh, s, count, n_prev, L)
+                # cold start (e.g. a prefill of L tokens at once): initialize the out-degree
+                # vector + count with the vectorized batch path, not an O(L) Python loop.
+                s, _ = self._materialized(Qh, Kh, L)
+                s = s.clone()
+                count = self._kendall(s, L)
             return {
                 "features": CyclicTrianglesFeatures(T_cyc=count),
                 "tier": "incremental",
@@ -130,8 +136,8 @@ class CyclicTrianglesDiagnostic:
         }
 
     def witness(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> torch.Tensor:
-        _, D = self._materialized(Qh, Kh, L)
-        return self._arrival_increments(D, L)
+        _, beats = self._materialized(Qh, Kh, L)
+        return self._witness(beats, L)
 
     def accumulate(self, local: dict, state: dict | None) -> dict:
         # reduce() already folded prior_state into local["partials"] (incremental) or produced

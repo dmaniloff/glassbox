@@ -255,3 +255,31 @@ class TestCyclicTriangles:
         back = SVDSnapshot.from_jsonl_row(json.loads(snap.model_dump_json()))
         assert isinstance(back.features, CyclicTrianglesFeatures)
         assert back.features.T_cyc == 142
+
+    def test_one_token_streaming_matches_batch(self):
+        # Mode 1: global statistic, one token at a time (interval=1). Cold-start at t=1, then
+        # the O(ΔE) per-token update; the running |T_cyc| matches batch at every step.
+        torch.manual_seed(3)
+        N = 24
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        diag = CyclicTrianglesDiagnostic(incremental=True)
+        state = None
+        for t in range(1, N + 1):
+            res = diag.reduce(Q[:t], K[:t], t, prior_state=state)
+            state = diag.accumulate(res, state)
+            assert res["features"].T_cyc == self._brute(Q, K, t)
+
+    def test_block_local_not_additive(self):
+        # Mode 2: block-local per-window counts. |T_cyc| is NOT additive across disjoint
+        # windows (cyclic triangles span boundaries), so per-window counts must NOT be summed
+        # into a global — only the full-sequence count (mode 1) is the true global |T_cyc|.
+        torch.manual_seed(7)
+        N = 30
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        diag = CyclicTrianglesDiagnostic()  # batch = block-local
+        full = diag.reduce(Q, K, N)["features"].T_cyc
+        half = N // 2
+        w1 = diag.reduce(Q[:half], K[:half], half)["features"].T_cyc
+        w2 = diag.reduce(Q[half:], K[half:], N - half)["features"].T_cyc
+        assert full == self._brute(Q, K, N)
+        assert w1 + w2 < full  # block sum undercounts: cross-window triangles are dropped
