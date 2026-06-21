@@ -1,6 +1,6 @@
 import textwrap
 
-from glassbox.config import GlassboxConfig
+from glassbox.config import THRESHOLD_SIGNALS, GlassboxConfig
 
 
 def test_defaults():
@@ -182,6 +182,20 @@ def test_from_cli_args_threshold_block_size():
     config = GlassboxConfig.from_cli_args(signals=("routing",), threshold=1024, block_size=512)
     assert config.routing.threshold == 1024
     assert config.routing.block_size == 512
+
+
+def test_from_cli_args_threshold_zero():
+    """threshold=0 (always-matrix-free) must be kept, not dropped as falsy.
+
+    from_cli_args guards with ``if threshold is not None``; a falsy check
+    (``if threshold:``) would silently drop 0 and fall back to the default 512.
+    """
+    config = GlassboxConfig.from_cli_args(
+        signals=("routing", "tracker", "selfattn", "laplacian"),
+        threshold=0,
+    )
+    for sig in THRESHOLD_SIGNALS:
+        assert getattr(config, sig).threshold == 0
 
 
 def test_from_cli_args_output_otel():
