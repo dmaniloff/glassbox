@@ -49,6 +49,10 @@ def compute_attention_tracker_features_materialized(
     Returns:
         TrackerFeatures with sigma2, sigma2_asym, commutator_norm.
     """
+    # Dense LAPACK svdvals has no fp16/bf16 kernel (CPU or GPU); upcast to float32 for the
+    # materialized linalg. Emitted features are scalars/lists, so no cast-back is needed. (#57)
+    if A.dtype in (torch.float16, torch.bfloat16):
+        A = A.float()
     sigma = torch.linalg.svdvals(A)
     k = min(rank, len(sigma))
     sigma2 = sigma[1].item() if len(sigma) > 1 else 0.0

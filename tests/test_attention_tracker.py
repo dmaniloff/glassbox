@@ -209,3 +209,14 @@ class TestHalfPrecisionDtype:
         assert math.isfinite(f.sigma2)
         assert math.isfinite(f.sigma2_asym)
         assert math.isfinite(f.commutator_norm)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_materialized_half_precision_no_crash(dtype):
+    """fp16/bf16 attention must not crash the dense svdvals path (#57)."""
+    torch.manual_seed(0)
+    A = torch.softmax(torch.randn(16, 16), dim=-1).to(dtype)
+    feats = compute_attention_tracker_features_materialized(A, rank=3)
+    assert feats.sigma2 is not None and math.isfinite(feats.sigma2)
+    assert feats.sigma2_asym is not None and math.isfinite(feats.sigma2_asym)
+    assert feats.commutator_norm is not None and math.isfinite(feats.commutator_norm)
