@@ -5,11 +5,9 @@ Two paths controlled by a sequence-length threshold:
   - Materialized (L <= threshold): dense tensor ops on the L×L matrix M.
   - Matrix-free  (L >  threshold): blocked-streaming matvecs, O(Ld) memory.
 
-Features: asymmetry coefficient G, curl estimate C, Pythagorean decomposition
-Gamma, sigma2_asym, commutator_norm, and curl_ratio.
-
-Triangle sampling for curl estimation uses Bernstein-bound adaptive sizing
-and LRU-cached vectorized sampling (ported from shade.functional.hodge_ops).
+Features: asymmetry coefficient G, the Hodge gradient/curl split (Gamma, C) computed
+exactly from the row-sum identity ||A_grad||^2 = 2||r||^2/L (r = M_asym @ 1), sigma2_asym,
+commutator_norm, and curl_ratio. The Pythagorean split G^2 = Gamma^2 + C^2 is genuine.
 
 References:
     Lim (2020): Hodge Laplacians on Graphs (SIAM Review)
@@ -29,7 +27,6 @@ from glassbox.cheeger import (
 from glassbox.results import RoutingFeatures
 from glassbox.svd import (
     compute_logsumexp_blocked,
-    compute_M_fro_norm_blocked,
     get_M_entries_batch,
     matvec_commutator_blocked,
     matvec_M_blocked,
@@ -137,25 +134,21 @@ def estimate_commutator_norm_matrix_free(
 
     ||C||_F^2 = tr(C^T C) ~ (1/m) sum_i z_i^T C^T C z_i
     where z_i ~ Rademacher(+-1) and C = M_sym @ M_asym - M_asym @ M_sym.
-    Each C @ z costs 8 matvecs.
+
+    All m = n_hutchinson probes are stacked into one [L, m] right-hand side and pushed through
+    a single multi-RHS matvec (one blocked softmax pass for all probes, not m serial passes).
+    The squared-norm accumulates in float32 for precision under fp16/bf16 Q/K.
     """
     L = Q.shape[0]
     device = Q.device
     dtype = Q.dtype
+    n_hutchinson = max(1, n_hutchinson)
 
     gen = torch.Generator(device=device).manual_seed(seed)
-
-    trace_est = torch.tensor(0.0, device=device, dtype=dtype)
-    for _ in range(n_hutchinson):
-        z = torch.where(
-            torch.rand(L, device=device, generator=gen) < 0.5,
-            torch.ones(L, device=device, dtype=dtype),
-            -torch.ones(L, device=device, dtype=dtype),
-        )
-        w = matvec_commutator_blocked(Q, K, z, d_k_inv_sqrt, scale, block_size, causal=causal)
-        trace_est = trace_est + w.dot(w)
-
-    trace_est = trace_est / n_hutchinson
+    # Z: [L, m] Rademacher (+-1); W = C @ Z is [L, m] in one pass.
+    Z = torch.randint(0, 2, (L, n_hutchinson), device=device, generator=gen).to(dtype) * 2 - 1
+    W = matvec_commutator_blocked(Q, K, Z, d_k_inv_sqrt, scale, block_size, causal=causal)
+    trace_est = W.to(torch.float32).square().sum() / n_hutchinson
     comm_fro = torch.sqrt(trace_est.clamp(min=0.0))
     return (comm_fro / (M_fro_norm + EPSILON)).item()
 
@@ -227,12 +220,8 @@ def compute_routing_features_matrix_free(
     else:
         phi_hat = 0.0
 
-    # --- ||M||_F (exact, blocked) ---
-    M_fro_norm = compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
-    M_fro_val = M_fro_norm.item()
-
-    # --- G (exact, blocked) ---
-    G, _ = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
+    # --- G and ||M||_F in one fused blocked pass (compute_G already returns ||M||_F) ---
+    G, M_fro_val = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     # --- Exact Hodge gradient/curl split via the row-sum r = M_asym @ 1 (one matvec; #55) ---
     ones = torch.ones(L, device=device, dtype=Q.dtype)
