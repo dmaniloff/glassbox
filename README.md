@@ -156,7 +156,9 @@ In practice:
 - if `L <= threshold`, use a materialized path
 - if `L > threshold`, use blocked matrix-free operators
 
-That behavior is implemented in `RoutingDiagnostic.reduce()` in `glassbox/diagnostics/routing.py`.
+Both tiers produce equivalent results within numerical tolerance. The materialized path is *faster* for short sequences (~1.8× at L=256 on A10G) and the matrix-free path wins for long ones; the default `512` sits near the crossover. Setting `threshold=0` forces the matrix-free path for every sequence (`L > 0` is always true), guaranteeing no full `L×L` matrix is ever materialized — useful for memory-constrained deployments or streaming with large windows, at the cost of the small-L speedup.
+
+That behavior is implemented in each threshold-based diagnostic's `reduce()` method (routing, tracker, selfattn, laplacian).
 
 ### 5. On-demand entry lookup for curl estimates
 
@@ -446,7 +448,7 @@ Important knobs:
 | `spectral.method` | `randomized` or `lanczos` |
 | `spectral.heads` | Heads to analyze |
 | `routing.enabled` | Turn on routing analysis |
-| `routing.threshold` | Sequence length cutoff for materialized vs matrix-free execution |
+| `routing.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `routing.block_size` | Row-block size for blocked operators |
 | `tracker.enabled` | Turn on raw attention matrix analysis |
 | `tracker.threshold` | Sequence length cutoff for materialized vs matrix-free |
