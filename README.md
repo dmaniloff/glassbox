@@ -155,9 +155,8 @@ In practice:
 
 - if `L <= threshold`, use a materialized path
 - if `L > threshold`, use blocked matrix-free operators
-- if `threshold = 0`, **always** use the matrix-free path (no `L×L` allocation)
 
-The `threshold` setting is a speed knob, not a correctness one — both tiers produce equivalent results within numerical tolerance. Set `threshold=0` when you need a hard guarantee that no full attention matrix is ever materialized (e.g., memory-constrained deployments or streaming with large windows).
+Both tiers produce equivalent results within numerical tolerance. The materialized path is *faster* for short sequences (~1.8× at L=256 on A10G) and the matrix-free path wins for long ones; the default `512` sits near the crossover. Setting `threshold=0` forces the matrix-free path for every sequence (`L > 0` is always true), guaranteeing no full `L×L` matrix is ever materialized — useful for memory-constrained deployments or streaming with large windows, at the cost of the small-L speedup.
 
 That behavior is implemented in each threshold-based diagnostic's `reduce()` method (routing, tracker, selfattn, laplacian).
 
@@ -449,20 +448,20 @@ Important knobs:
 | `spectral.method` | `randomized` or `lanczos` |
 | `spectral.heads` | Heads to analyze |
 | `routing.enabled` | Turn on routing analysis |
-| `routing.threshold` | Sequence length cutoff for materialized vs matrix-free (0 = always matrix-free) |
+| `routing.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `routing.block_size` | Row-block size for blocked operators |
 | `tracker.enabled` | Turn on raw attention matrix analysis |
-| `tracker.threshold` | Sequence length cutoff for materialized vs matrix-free (0 = always matrix-free) |
+| `tracker.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `selfattn.enabled` | Turn on attention diagonal analysis |
 | `selfattn.interval` | Snapshot cadence for diagonal features |
 | `selfattn.heads` | Heads to analyze |
 | `selfattn.top_k` | Number of top diagonal values to keep (0 = omit eigvals) |
-| `selfattn.threshold` | Sequence length cutoff for materialized vs matrix-free (0 = always matrix-free) |
+| `selfattn.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `laplacian.enabled` | Turn on Laplacian eigenvalue analysis |
 | `laplacian.interval` | Snapshot cadence for Laplacian features |
 | `laplacian.heads` | Heads to analyze |
 | `laplacian.top_k` | Number of top eigenvalues to keep |
-| `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free (0 = always matrix-free) |
+| `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free |
 | `output.path` | JSONL output path (feature logging pipeline) |
 | `emit.otel` | Emit snapshots as OpenTelemetry spans (inference pipeline) |
 | `q_buffer_max_tokens` | Max Q-buffer tokens per layer (0 = unbounded). Bounds memory to O(W·H·d) per layer |
