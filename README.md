@@ -65,6 +65,8 @@ This lets you observe attention structure during real generation rather than in 
 
 For long or unbounded sequences, retaining the full Q buffer is impractical (O(L·H·d) per layer). Glassbox supports windowed Q-buffer management via two policies, controlled by `q_buffer_max_tokens` and `q_buffer_mode`:
 
+> **Which streaming mode is sound for which diagnostic?** A *global* streaming statistic is only correct if the statistic's algebra permits it (additive vs spectral/combinatorial) and the window matches. See [docs/streaming-modes.md](docs/streaming-modes.md) for the per-diagnostic matrix; `GlassboxConfig` rejects unsound mode↔window combinations at construction.
+
 ### Sliding window (default)
 
 ```yaml
