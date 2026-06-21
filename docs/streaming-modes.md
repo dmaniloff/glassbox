@@ -55,14 +55,25 @@ update implemented (use *local block* or *full recompute*).
 | Diagnostic | Statistic | Local block | Block-diagonal global (`streaming`) | Exact-full global (`incremental`) |
 |---|---|---|---|---|
 | `spectral` | scores SVD | ✓ | ✗ spectral | — |
-| `routing` | M SVD + Hodge `G` | ✓ | ✗ spectral / SVD | — |
+| `routing` | M SVD + Hodge `G` + conductance (`φ̂`, `σ₂`) | ✓ | ✗ spectral / SVD | — |
+| **conductance / Cheeger** (`φ̂`, `σ₂` bracket on M) | conductance | ✓ | ✗ spectral¹ | —² |
 | `asymmetry` *(in flight, #58/#60/#62)* | Frobenius `G/Γ/C` | ✓ | ✓ **additive** | ✓ |
 | `cyclic` *(in flight, #42)* | `\|T_cyc\|` | ✓ | ✗ non-additive | ✓ |
 | `tracker` | A SVD | ✓ | ✗ spectral | — |
 | `selfattn` | diagonal stats | ✓ | — | — |
 | `laplacian` | Laplacian eigvals | ✓ | ✗ spectral | — |
-| `cheeger` *(planned, #38)* | conductance `σ₂`/`φ` | ✓ | ✗ spectral | — |
 | `magnetic` *(planned, #41)* | frustration `λ₁` | ✓ | ✗ spectral | — |
+
+¹ Conductance is **doubly** unsound as a block-diagonal-global: `σ₂` is an order statistic of
+the *union* of block spectra (not a sum), and the conductance `φ` of a block-diagonal (i.e.
+disconnected) graph is degenerate (the inter-block cut is free, `φ→0`). Use *local block* per
+window. ² No *exact* incremental update; the streaming-Cheeger line (#38/#53) maintains an
+**approximate** `σ₂` via bordered Rayleigh–Ritz — a separate approximate regime outside this
+exact-modes matrix.
+
+Conductance is **already emitted today** by the `routing` signal (`phi_hat`, `sigma2`) on M;
+#38/#53 is the dedicated streaming version. The Cheeger σ₂ bracket is the M-operator family in
+the [operator taxonomy](operator-choice.md) (Cheeger→M, Hodge→P, orientation→pre-softmax S).
 
 **Rule of thumb:** additive (Frobenius/sum) statistics get all four modes; spectral and
 non-additive-combinatorial statistics get *local block* + *full recompute* (and *exact-full
