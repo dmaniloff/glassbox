@@ -28,8 +28,8 @@ from glassbox.hodge import (
 )
 from glassbox.results import TrackerFeatures
 from glassbox.svd import (
-    apply_A_blocked,
     apply_AT_blocked,
+    build_forward_matvec,
     compute_M_fro_norm_blocked,
     randomized_svd,
     svd_via_lanczos,
@@ -79,6 +79,7 @@ def compute_attention_tracker_features_matrix_free(
     method: str = "randomized",
     block_size: int = 256,
     causal: bool = False,
+    matvec_strategy: str = "batched",
 ) -> TrackerFeatures:
     """All AttentionTracker features via matrix-free blocked operations.
 
@@ -104,8 +105,8 @@ def compute_attention_tracker_features_matrix_free(
     # --- SVD of A for sigma2 ---
     k = min(max(rank, 2), L - 1)
 
-    def matvec(v):
-        return apply_A_blocked(Q, K, v, scale, block_size, causal=causal)
+    # Forward A@v may use the fused Triton kernel (non-causal, CUDA); matvec_t stays blocked.
+    matvec = build_forward_matvec(Q, K, scale, block_size, causal, matvec_strategy)
 
     def matvec_t(u):
         return apply_AT_blocked(Q, K, u, scale, block_size, causal=causal)
