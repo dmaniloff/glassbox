@@ -19,6 +19,10 @@ otel = [
     "opentelemetry-api>=1.27.0",
     "opentelemetry-sdk>=1.27.0",
 ]
+# Optional fused Triton kernel for the matrix-free SVD forward matvec (CUDA only).
+# Without it, matvec_strategy falls back to the blocked PyTorch path. See
+# glassbox/triton_kernels.py and docs/signals/.
+triton = ["triton"]
 
 [tool.setuptools.packages.find]
 include = ["glassbox*"]

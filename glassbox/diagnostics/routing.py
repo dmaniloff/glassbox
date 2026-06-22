@@ -92,6 +92,7 @@ class RoutingDiagnostic:
                 min_samples=self.hodge_min_samples,
                 seed=self.hodge_curl_seed,
                 causal=self.causal,
+                matvec_strategy=ctx.get("matvec_strategy", "batched"),
             )
 
         return {

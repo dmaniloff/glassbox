@@ -885,3 +885,22 @@ class TestHermitianLanczos:
             assert evals.dtype == torch.float64
         else:
             assert evals.dtype == torch.float32
+
+
+def test_build_forward_matvec_triton_falls_back_on_cpu():
+    """strategy='triton' on a CPU tensor must return the blocked path (no Triton/CUDA)."""
+    from glassbox.svd import build_forward_matvec, matvec_M_blocked
+
+    torch.manual_seed(0)
+    Q, K = torch.randn(16, 8), torch.randn(16, 8)
+    Omega = torch.randn(16, 4)
+    scale = 1.0 / 8**0.5
+    # A path (no d_k_inv_sqrt) falls back to apply_A_blocked
+    mv = build_forward_matvec(Q, K, scale, 256, False, "triton")
+    assert torch.allclose(
+        mv(Omega), apply_A_blocked(Q, K, Omega, scale, 256, causal=False), atol=1e-6
+    )
+    # M path falls back to matvec_M_blocked
+    dk = torch.rand(16) + 0.5
+    mvM = build_forward_matvec(Q, K, scale, 256, False, "triton", d_k_inv_sqrt=dk)
+    assert torch.allclose(mvM(Omega), matvec_M_blocked(Q, K, Omega, dk, scale, 256), atol=1e-6)

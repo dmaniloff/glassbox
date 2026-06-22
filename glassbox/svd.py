@@ -145,6 +145,46 @@ def matvec_MT_blocked(Q, K, x, d_k_inv_sqrt, scale, block_size=256, causal=False
     return dk * result
 
 
+def build_forward_matvec(
+    Q, K, scale, block_size=256, causal=False, strategy="batched", d_k_inv_sqrt=None
+):
+    """Forward matvec closure ``v -> A @ v`` (or ``M @ v`` when ``d_k_inv_sqrt`` is given).
+
+    With ``strategy="triton"`` (and Triton importable, a CUDA tensor, and ``causal=False``)
+    the fused online-softmax kernel computes ``A @ Omega`` for 2D ``Omega`` without
+    materializing the L×L scores. It is **forward-only and non-causal** (online softmax has no
+    causal mask), so a causal call, a 1D vector, or any kernel runtime error falls back to the
+    blocked PyTorch matvec. ``strategy`` "loop"/"batched" always use the blocked path. The
+    transpose ``matvec_t`` always stays blocked (the kernel cannot transpose).
+    """
+
+    def _blocked(v):
+        if d_k_inv_sqrt is not None:
+            return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal)
+        return apply_A_blocked(Q, K, v, scale, block_size, causal=causal)
+
+    if strategy != "triton" or causal or not Q.is_cuda:
+        return _blocked
+
+    try:
+        from glassbox.triton_kernels import HAS_TRITON, fused_attn_multi_matvec
+    except ImportError:  # pragma: no cover
+        return _blocked
+    if not HAS_TRITON:
+        return _blocked
+
+    def _triton(v):
+        if v.ndim != 2:  # online-softmax kernel is multi-RHS only; 1D -> blocked
+            return _blocked(v)
+        omega = d_k_inv_sqrt.unsqueeze(1) * v if d_k_inv_sqrt is not None else v
+        try:
+            return fused_attn_multi_matvec(Q, K, omega, scale)
+        except Exception:  # pragma: no cover - runtime kernel failure -> safe fallback
+            return _blocked(v)
+
+    return _triton
+
+
 def compute_M_fro_norm_blocked(Q, K, d_k_inv_sqrt, scale, block_size=256, causal=False):
     """Compute ||M||_F without materializing M.
 

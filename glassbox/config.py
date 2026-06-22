@@ -152,6 +152,32 @@ class GlassboxConfig(BaseSettings):
     #   proofs for streaming local→global merges.
     q_buffer_mode: Literal["sliding", "tumbling"] = "sliding"
 
+    # Forward-matvec strategy for the matrix-free SVD paths (routing/tracker/spectral).
+    # "loop"/"batched" both use the blocked PyTorch matvecs in svd.py (already batched +
+    # fused); "triton" uses the optional fused online-softmax kernel (CUDA only, never
+    # materializes the L×L scores); "auto" resolves to "triton" iff available else "batched".
+    matvec_strategy: Literal["loop", "batched", "triton", "auto"] = "auto"
+
+    @classmethod
+    def resolve_matvec_strategy(cls, strategy: str) -> Literal["loop", "batched", "triton"]:
+        """Resolve "auto" to a concrete strategy from runtime capabilities.
+
+        "auto" -> "triton" only when Triton is importable AND a CUDA device is present;
+        otherwise "batched" (the blocked PyTorch path). Explicit strategies pass through.
+        """
+        if strategy != "auto":
+            return strategy  # type: ignore[return-value]
+        try:
+            import torch
+
+            from glassbox.triton_kernels import HAS_TRITON
+
+            if HAS_TRITON and torch.cuda.is_available():
+                return "triton"
+        except ImportError:  # pragma: no cover
+            pass
+        return "batched"
+
     @classmethod
     def settings_customise_sources(
         cls,

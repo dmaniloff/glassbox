@@ -29,11 +29,11 @@ from glassbox.cheeger import (
 )
 from glassbox.results import RoutingFeatures
 from glassbox.svd import (
+    build_forward_matvec,
     compute_logsumexp_blocked,
     compute_M_fro_norm_blocked,
     get_M_entries_batch,
     matvec_commutator_blocked,
-    matvec_M_blocked,
     matvec_Masym_blocked,
     matvec_MT_blocked,
     randomized_svd,
@@ -349,6 +349,7 @@ def compute_routing_features_matrix_free(
     seed=42,
     n_hutchinson=10,
     causal=False,
+    matvec_strategy="batched",
 ):
     """Compute all Hodge routing features matrix-free.
 
@@ -365,8 +366,10 @@ def compute_routing_features_matrix_free(
     # --- SVD of M for sigma2, phi_hat ---
     k = min(max(rank, 2), L - 1)
 
-    def matvec(v):
-        return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal)
+    # Forward M@v may use the fused Triton kernel (non-causal, CUDA); matvec_t stays blocked.
+    matvec = build_forward_matvec(
+        Q, K, scale, block_size, causal, matvec_strategy, d_k_inv_sqrt=d_k_inv_sqrt
+    )
 
     def matvec_t(u):
         return matvec_MT_blocked(Q, K, u, d_k_inv_sqrt, scale, block_size, causal=causal)

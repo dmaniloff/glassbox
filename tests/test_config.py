@@ -1,6 +1,33 @@
 import textwrap
 
+import pydantic
+import pytest
+
 from glassbox.config import THRESHOLD_SIGNALS, GlassboxConfig
+
+
+def test_matvec_strategy_default():
+    assert GlassboxConfig().matvec_strategy == "auto"
+
+
+def test_matvec_strategy_explicit():
+    for s in ("loop", "batched", "triton", "auto"):
+        assert GlassboxConfig(matvec_strategy=s).matvec_strategy == s
+
+
+def test_matvec_strategy_invalid():
+    with pytest.raises(pydantic.ValidationError):
+        GlassboxConfig(matvec_strategy="gpu")
+
+
+def test_resolve_matvec_strategy_passthrough():
+    for s in ("loop", "batched", "triton"):
+        assert GlassboxConfig.resolve_matvec_strategy(s) == s
+
+
+def test_resolve_matvec_strategy_auto():
+    # "auto" -> "triton" only with Triton+CUDA; here (CPU/no-triton) it must be "batched".
+    assert GlassboxConfig.resolve_matvec_strategy("auto") in ("batched", "triton")
 
 
 def test_defaults():
