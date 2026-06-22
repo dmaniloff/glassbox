@@ -67,6 +67,7 @@ class RoutingDiagnostic:
                 block_size=self.block_size,
                 seed=self.hodge_seed,
                 causal=self.causal,
+                matvec_strategy=ctx.get("matvec_strategy", "batched"),
             )
 
         return {

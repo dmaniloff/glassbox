@@ -140,6 +140,9 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             h.close()
         cls._handlers = create_handlers_from_config(config)
         cls._build_diagnostics()
+        # Drop the cached matvec strategy so a new config's choice takes effect.
+        if hasattr(cls, "_resolved_strategy"):
+            del cls._resolved_strategy
 
     @classmethod
     def _build_diagnostics(cls) -> None:
@@ -311,6 +314,15 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             return k_flat.half()
         return k_flat
 
+    def _resolve_strategy(self) -> str:
+        """Resolve the matvec strategy once and cache it on the class."""
+        cls = type(self)
+        if not hasattr(cls, "_resolved_strategy"):
+            cls._resolved_strategy = GlassboxConfig.resolve_matvec_strategy(
+                self.config.matvec_strategy
+            )
+        return cls._resolved_strategy
+
     def _run_svd(
         self,
         layer_name: str,
@@ -369,7 +381,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 if diag is None:
                     continue
 
-                result = diag.reduce(Qh, Kh, L, prior_state=state.accum.get(sig_name))
+                result = diag.reduce(
+                    Qh,
+                    Kh,
+                    L,
+                    prior_state=state.accum.get(sig_name),
+                    matvec_strategy=self._resolve_strategy(),
+                )
                 features = result["features"]
 
                 state.accum[sig_name] = diag.accumulate(result, state.accum.get(sig_name))
