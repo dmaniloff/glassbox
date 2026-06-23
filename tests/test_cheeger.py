@@ -23,7 +23,6 @@ from glassbox.hodge import (
 from glassbox.svd import (
     compute_degree_normalized_M,
     compute_dk_blocked,
-    compute_logsumexp_blocked,
 )
 
 # ---------------------------------------------------------------------------
@@ -305,15 +304,12 @@ class TestPhiHatIntegration:
         for seed in range(10):
             Q, K, scale, _, _, d_k_inv_sqrt = make_M(16, 4, seed=seed)
             _, d_k_mf = compute_dk_blocked(Q, K, scale)
-            lse = compute_logsumexp_blocked(Q, K, scale)
             features = compute_routing_features_matrix_free(
                 Q,
                 K,
                 d_k_mf,
                 scale,
-                lse,
                 rank=4,
-                min_samples=50,
             )
             spectral_gap = 1.0 - features.sigma2
             if abs(features.phi_hat - spectral_gap) > 0.01:
@@ -326,7 +322,6 @@ class TestPhiHatIntegration:
         """phi_hat should agree between materialized and matrix-free paths."""
         Q, K, scale, _, M, d_k_inv_sqrt = make_M(16, 4, seed=42)
         _, d_k_mf = compute_dk_blocked(Q, K, scale)
-        lse = compute_logsumexp_blocked(Q, K, scale)
 
         feat_mat = compute_routing_features_materialized(M, rank=4)
         feat_mf = compute_routing_features_matrix_free(
@@ -334,9 +329,7 @@ class TestPhiHatIntegration:
             K,
             d_k_mf,
             scale,
-            lse,
             rank=4,
-            min_samples=50,
         )
 
         assert abs(feat_mat.phi_hat - feat_mf.phi_hat) < 0.1, (

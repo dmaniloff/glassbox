@@ -116,11 +116,8 @@ class RoutingConfig(SignalConfigBase):
     threshold: int = 512
     block_size: int = 256
     causal: bool = True
-    hodge_target_cv: float = 0.05
-    hodge_curl_seed: int = 42
-    hodge_confidence: float = 0.95
-    hodge_pilot_size: int = 100
-    hodge_min_samples: int = 200
+    # Seed for the matrix-free commutator-norm Hutchinson estimator.
+    hodge_seed: int = 42
 
 
 class TrackerConfig(SignalConfigBase):

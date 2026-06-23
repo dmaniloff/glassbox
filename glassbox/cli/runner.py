@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
     help=(
         "Signals to enable. Repeatable or comma-separated. "
         f"Choices: {', '.join(SIGNAL_NAMES)}. "
-        "Routing Hodge parameters (hodge_target_cv, etc.) are configurable via YAML only."
+        "Routing Hodge parameters are configurable via YAML only."
     ),
 )
 @click.option(
