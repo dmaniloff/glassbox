@@ -911,3 +911,13 @@ class TestHalfPrecisionDtype:
             seed=42,
         )
         assert math.isfinite(cn)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_routing_materialized_half_precision_no_crash(dtype):
+    """fp16/bf16 M must not crash the dense SVD / svdvals path (#57)."""
+    torch.manual_seed(0)
+    M = torch.softmax(torch.randn(16, 16), dim=-1).to(dtype)
+    feats = compute_routing_features_materialized(M, rank=3)
+    for v in (feats.sigma2, feats.G, feats.phi_hat, feats.sigma2_asym):
+        assert v is not None and math.isfinite(v)
