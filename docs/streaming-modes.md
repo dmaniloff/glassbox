@@ -12,7 +12,7 @@ For *which operator* each diagnostic runs on, see [operator-choice.md](operator-
 
 Throughout, **`W` = `q_buffer_max_tokens`** — the per-layer window size (`0` = unbounded).
 
-| Mode | Config | Window | What it reports |
+| Mode (just a made up name) | Config (per-signal diagnostic config) | Window (top-level GlassboxConfig — global per-layer Q-buffer settings) | What it reports |
 |---|---|---|---|
 | **Local block** | default (no streaming flag) | `W` tokens (sliding or tumbling) | the statistic of the **current window** only — per-fire, bounded memory, no accumulation |
 | **Full recompute** | default | `W=0` (unbounded) | the **exact full-sequence** statistic, recomputed from scratch each fire (O(L)-cost per fire) |
