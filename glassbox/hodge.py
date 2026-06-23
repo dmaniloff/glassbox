@@ -494,9 +494,9 @@ def compute_routing_features_materialized(
     Used when L <= threshold. Dense tensor ops are much faster than
     iterative matvec approaches at small sequence lengths.
     """
-    # Dense LAPACK SVD (torch.linalg.svd/svdvals) has no fp16/bf16 kernel on CPU or GPU;
-    # upcast to float32 for all materialized linalg. Emitted features are scalars/lists, so no
-    # cast-back is needed. Same float32-compute pattern as GKL bidiag / hermitian_lanczos. (#57)
+    # Dense SVD/svdvals has no fp16/bf16 kernel (LAPACK on CPU, cuSOLVER on GPU); upcast to
+    # float32 for all materialized linalg. Emitted features are scalars/lists, so no cast-back
+    # is needed. Same float32-compute pattern as GKL bidiag / hermitian_lanczos. (#57)
     if M.dtype in (torch.float16, torch.bfloat16):
         M = M.float()
     U_mat, sigma, Vt = torch.linalg.svd(M, full_matrices=False)
