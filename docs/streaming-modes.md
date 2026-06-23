@@ -10,12 +10,14 @@ For *which operator* each diagnostic runs on, see [operator-choice.md](operator-
 
 ## The modes
 
+Throughout, **`W` = `q_buffer_max_tokens`** — the per-layer window size (`0` = unbounded).
+
 | Mode | Config | Window | What it reports |
 |---|---|---|---|
-| **Local block** | default (no streaming flag) | `q_buffer_max_tokens=W` (sliding or tumbling) | the statistic of the **current window** only — per-fire, bounded memory, no accumulation |
-| **Full recompute** | default | `q_buffer_max_tokens=0` (unbounded) | the **exact full-sequence** statistic, recomputed from scratch each fire (O(L)-cost per fire) |
-| **Block-diagonal global** | `streaming=True` | `q_buffer_mode="tumbling"`, `W>0` | the statistic of the **block-diagonal** operator `blockdiag(W₁…W_k)` over the stream — accumulated cheaply from per-window sufficient statistics (bounded memory). **Drops cross-window structure.** |
-| **Exact-full global** | `incremental=True` | `q_buffer_max_tokens=0` (unbounded) | the **exact full-sequence** statistic, maintained by an O(Δ) per-token update (cheap; no per-fire recompute) |
+| **Local block** | default (no streaming flag) | `W` tokens (sliding or tumbling) | the statistic of the **current window** only — per-fire, bounded memory, no accumulation |
+| **Full recompute** | default | `W=0` (unbounded) | the **exact full-sequence** statistic, recomputed from scratch each fire (O(L)-cost per fire) |
+| **Block-diagonal global** | `streaming=True` | `tumbling`, `W>0` | the statistic of the **block-diagonal** operator `blockdiag(W₁…W_k)` over the stream — accumulated cheaply from per-window sufficient statistics (bounded memory). **Drops cross-window structure.** |
+| **Exact-full global** | `incremental=True` | `W=0` (unbounded) | the **exact full-sequence** statistic, maintained by an O(Δ) per-token update (cheap; no per-fire recompute) |
 
 ## Soundness criterion
 
