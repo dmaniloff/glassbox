@@ -116,9 +116,7 @@ class RoutingConfig(SignalConfigBase):
     threshold: int = 512
     block_size: int = 256
     causal: bool = True
-    # Seed for the matrix-free commutator-norm Hutchinson estimator. (The curl is now exact
-    # via the row-sum Hodge identity — no triangle sampling — so the former hodge_target_cv /
-    # confidence / pilot_size / min_samples knobs were removed.)
+    # Seed for the matrix-free commutator-norm Hutchinson estimator.
     hodge_seed: int = 42
 
 

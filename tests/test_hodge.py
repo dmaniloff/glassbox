@@ -91,7 +91,7 @@ def _matrix_to_edge_flow(M, edges):
 
 
 class TestCurl:
-    """Exact gradient/curl split of M_asym via the row-sum identity (replaces triangle-RMS)."""
+    """Exact gradient/curl split of M_asym via the row-sum identity."""
 
     def _hodge_oracle(self, M):
         # independent split: potential phi = (M_asym @ 1)/n, A_grad[i,j] = phi_i - phi_j

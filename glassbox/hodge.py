@@ -285,12 +285,9 @@ def _gradient_curl_split(asym_fro_sq: float, r: torch.Tensor, n: int, fro: float
     hierarchical) and the curl is the divergence-free residual
     ``C = sqrt(||A_asym||^2 - ||A_grad||^2)/||M||`` (circulatory). Both are derived from r, so
     ``G^2 = Gamma^2 + C^2`` is a genuine split — not the tautology of defining Gamma as
-    sqrt(G^2 - C^2). This replaces the mis-normalized triangle-RMS curl (issue #55), which
-    divided the triangle circulation by the triangle count C(n,3), understating C by ~1/n and
-    silently reabsorbing the curl mass into Gamma. The row-sum form sidesteps that
-    normalization entirely: C is the Pythagorean residual of the exact gradient energy, so no
-    triangle count enters. The gradient identity itself is the load-bearing, formally-verified
-    part (the same one the asymmetry signal uses).
+    sqrt(G^2 - C^2). C is the Pythagorean residual of the exact gradient energy (no triangle
+    count enters); the gradient identity is the load-bearing part, shared with the asymmetry
+    signal.
     """
     grad_energy = 2.0 * float((r * r).sum().item()) / n
     den = fro + EPSILON
