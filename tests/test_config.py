@@ -1,6 +1,9 @@
 import textwrap
 
-from glassbox.config import THRESHOLD_SIGNALS, GlassboxConfig
+import pydantic
+import pytest
+
+from glassbox.config import THRESHOLD_SIGNALS, GlassboxConfig, validate_window_modes
 
 
 def test_defaults():
@@ -228,3 +231,40 @@ def test_from_cli_args_svd_not_set_on_non_svd_signals():
     assert config.selfattn.enabled is True
     # selfattn has no rank field — defaults unchanged
     assert config.spectral.rank == 4  # default, not 8 (spectral disabled)
+
+
+# ── window-mode <-> streaming-mode validator ─────────────────────────────
+
+
+class TestWindowModeValidator:
+    """Guards the mode<->windowing invariants (docs/streaming-modes.md)."""
+
+    def test_default_config_valid(self):
+        GlassboxConfig()  # sliding, unbounded, no streaming signal -> no error
+
+    def test_tumbling_requires_finite_window(self):
+        with pytest.raises(pydantic.ValidationError):
+            GlassboxConfig(q_buffer_mode="tumbling")  # q_buffer_max_tokens defaults to 0
+        GlassboxConfig(q_buffer_mode="tumbling", q_buffer_max_tokens=256)  # ok
+
+    def test_streaming_requires_tumbling_window(self):
+        # block-diagonal global accumulation is only unbiased over disjoint windows
+        with pytest.raises(ValueError):
+            validate_window_modes([("sig", True, True, False)], "sliding", 256)
+        with pytest.raises(ValueError):
+            validate_window_modes([("sig", True, True, False)], "tumbling", 0)
+        validate_window_modes([("sig", True, True, False)], "tumbling", 256)  # ok
+
+    def test_incremental_requires_unbounded_buffer(self):
+        # exact full-operator streaming needs the full sequence; a bounded buffer breaks it
+        with pytest.raises(ValueError):
+            validate_window_modes([("sig", True, False, True)], "sliding", 256)
+        validate_window_modes([("sig", True, False, True)], "sliding", 0)  # ok
+
+    def test_disabled_signal_modes_not_enforced(self):
+        validate_window_modes([("sig", False, True, True)], "sliding", 256)  # disabled -> skip
+
+    def test_plain_signal_any_window(self):
+        # a signal without streaming/incremental is valid under any window
+        validate_window_modes([("sig", True, False, False)], "sliding", 0)
+        validate_window_modes([("sig", True, False, False)], "tumbling", 256)

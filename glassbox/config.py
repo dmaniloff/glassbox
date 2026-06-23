@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 import click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
@@ -14,6 +14,54 @@ SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
 THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian"}
+
+
+def validate_window_modes(
+    modes: list[tuple[str, bool, bool, bool]],
+    q_buffer_mode: str,
+    q_buffer_max_tokens: int,
+) -> None:
+    """Enforce mode <-> windowing invariants so a streaming statistic is never silently wrong.
+
+    ``modes`` is a list of ``(signal_name, enabled, streaming, incremental)``. The soundness
+    of each global streaming mode depends on the window (see docs/streaming-modes.md):
+
+    - ``streaming=True`` (block-diagonal global accumulation) is unbiased ONLY over DISJOINT
+      windows, so it requires ``q_buffer_mode="tumbling"`` with ``q_buffer_max_tokens > 0``.
+      Sliding/overlapping windows double-count the overlap; an unbounded buffer is not a
+      block-diagonal partition. Only additive statistics (e.g. Frobenius sums-of-squares)
+      may set it at all.
+    - ``incremental=True`` (exact full-operator streaming) requires the UNBOUNDED
+      full-sequence buffer ``q_buffer_max_tokens == 0``; a bounded buffer trims priors and
+      breaks exactness.
+
+    Also: ``q_buffer_mode="tumbling"`` is meaningless without a finite window, so it requires
+    ``q_buffer_max_tokens > 0`` regardless of signals.
+
+    Raises ``ValueError`` on any unsound combination.
+    """
+    if q_buffer_mode == "tumbling" and q_buffer_max_tokens <= 0:
+        raise ValueError(
+            "q_buffer_mode='tumbling' requires a finite window (q_buffer_max_tokens > 0); "
+            "got q_buffer_max_tokens=0 (unbounded). Tumbling = non-overlapping fixed windows."
+        )
+    for name, enabled, streaming, incremental in modes:
+        if not enabled:
+            continue
+        if streaming and not (q_buffer_mode == "tumbling" and q_buffer_max_tokens > 0):
+            raise ValueError(
+                f"{name}.streaming=True (block-diagonal global accumulation) requires disjoint "
+                f"windows: q_buffer_mode='tumbling' and q_buffer_max_tokens>0; got "
+                f"q_buffer_mode={q_buffer_mode!r}, q_buffer_max_tokens={q_buffer_max_tokens}. "
+                "Sliding windows double-count overlap; an unbounded buffer is not block-diagonal. "
+                "See docs/streaming-modes.md."
+            )
+        if incremental and q_buffer_max_tokens != 0:
+            raise ValueError(
+                f"{name}.incremental=True (exact full-operator streaming) requires the unbounded "
+                f"buffer q_buffer_max_tokens=0; got {q_buffer_max_tokens}. A bounded buffer trims "
+                "priors and breaks exactness. See docs/streaming-modes.md."
+            )
 
 
 def parse_signal_names(ctx, param, value):
@@ -151,6 +199,26 @@ class GlassboxConfig(BaseSettings):
     #   enabled signals, flush.  Window independence simplifies accumulation
     #   proofs for streaming local→global merges.
     q_buffer_mode: Literal["sliding", "tumbling"] = "sliding"
+
+    @model_validator(mode="after")
+    def _check_window_modes(self) -> GlassboxConfig:
+        """Reject mode<->windowing combinations that would silently mis-report a statistic.
+
+        Generic over SIGNAL_NAMES via getattr, so it is a no-op for signals without
+        streaming modes and automatically guards any signal that adds ``streaming`` /
+        ``incremental`` flags. See docs/streaming-modes.md for the sound-mode matrix.
+        """
+        modes = [
+            (
+                name,
+                bool(getattr(getattr(self, name), "enabled", False)),
+                bool(getattr(getattr(self, name), "streaming", False)),
+                bool(getattr(getattr(self, name), "incremental", False)),
+            )
+            for name in SIGNAL_NAMES
+        ]
+        validate_window_modes(modes, self.q_buffer_mode, self.q_buffer_max_tokens)
+        return self
 
     @classmethod
     def settings_customise_sources(
