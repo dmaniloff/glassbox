@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.triton_attn import (
 from glassbox.config import SIGNAL_NAMES, GlassboxConfig, SignalConfigBase
 from glassbox.diagnostics import DIAGNOSTIC_REGISTRY
 from glassbox.handlers import LoggingHandler, create_handlers_from_config
+from glassbox.qbuffer import QBuffer
 from glassbox.results import SVDSnapshot
 
 logger = logging.getLogger(__name__)
@@ -42,29 +43,16 @@ _LAYER_IDX_RE = re.compile(r"(?:layers|\.h)\.(\d+)")
 
 
 @dataclass
-class PerLayerSVDState:
-    """Accumulates Q slices for a single attention layer."""
+class PerLayerState:
+    """Per-layer streaming state for a single attention layer.
 
-    q_buffer: list[torch.Tensor] = field(default_factory=list)
+    Holds the windowed Q buffer (``qbuf``), the firing-cadence counter
+    (``step``), and the per-signal ``accumulate()`` state (``accum``).
+    """
+
+    qbuf: QBuffer
     step: int = 0
     accum: dict[str, dict] = field(default_factory=dict)
-
-    @property
-    def q_tokens(self) -> int:
-        return sum(t.shape[0] for t in self.q_buffer)
-
-    def trim(self, max_tokens: int) -> None:
-        """Drop oldest Q slices until total tokens <= max_tokens."""
-        if max_tokens <= 0:
-            return
-        total = self.q_tokens
-        while total > max_tokens and self.q_buffer:
-            removed = self.q_buffer.pop(0)
-            total -= removed.shape[0]
-
-    def flush(self) -> None:
-        """Clear the Q buffer (used by tumbling mode after each window fires)."""
-        self.q_buffer = []
 
 
 @dataclass
@@ -106,7 +94,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
     # Class-level layer state; shared mutable.
     # Shared by all impl instances (one per layer or shared).
     # Keyed by layer_name (e.g. "model.layers.0.self_attn").
-    state_dict: dict[str, PerLayerSVDState] = {}
+    state_dict: dict[str, PerLayerState] = {}
 
     # Class-level request tracking; shared mutable.
     req_tracker: ReqTracker = ReqTracker()
@@ -126,19 +114,25 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
 
     @classmethod
     def set_config(cls, config: GlassboxConfig) -> None:
-        """Set config and (re)initialise handlers and the diagnostics cache.
+        """Set config and (re)initialise all config-derived state.
 
-        This is the single entry point for configuration — it keeps
-        ``cls.config``, ``cls._handlers`` and the ``cls._diagnostics`` cache in
-        sync. Always use it; never assign ``cls.config`` directly, or the cached
-        diagnostics (built from config here) would go stale.
+        Single entry point for configuration. Always use it; never assign
+        ``cls.config`` directly, or the caches below go stale. Keeps these in
+        sync with ``config``:
+
+        - ``cls._handlers`` — snapshot sinks, rebuilt from config.
+        - ``cls._diagnostics`` — per-signal Diagnostic objects, rebuilt from config.
+
+        Call this before engine creation: per-layer QBuffers capture the
+        windowing policy (max_tokens/mode) at construction, so the config must
+        be final before any forward() runs.
 
         vLLM forks/spawns subprocesses (API server, engine core, workers) and
         loads this plugin in *every* one of them. Setting ``_config_set_explicitly``
         here is what lets the plugin tell "config was set programmatically" from
         "use defaults": after a fork the child inherits the explicit config (and
         this flag), so the plugin must NOT re-run ``set_config(GlassboxConfig())``
-        and clobber it with defaults. Call this before engine creation.
+        and clobber it with defaults.
         """
         cls.config = config
         cls._config_set_explicitly = True
@@ -206,7 +200,12 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         cls = type(self)
         state = cls.state_dict.get(layer_name)
         if state is None:
-            state = PerLayerSVDState()
+            state = PerLayerState(
+                qbuf=QBuffer(
+                    max_tokens=self.config.q_buffer_max_tokens,
+                    mode=self.config.q_buffer_mode,
+                )
+            )
             cls.state_dict[layer_name] = state
 
         m = _LAYER_IDX_RE.search(layer_name)
@@ -227,25 +226,22 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             # across the 12 layers that all see the same prefill batch.
             if layer_idx == 0:
                 cls.req_tracker.request_id += 1
-            state.q_buffer = []
+            state.qbuf.flush()
             state.step = 0
 
-        state.q_buffer.append(query[q_start:q_end].detach().clone())
+        state.qbuf.append(query[q_start:q_end].detach().clone())
         state.step += 1
 
-        # 4. Determine which signals fire and manage buffer policy
-        tumbling = self.config.q_buffer_mode == "tumbling" and self.config.q_buffer_max_tokens > 0
-
-        if tumbling:
-            # Tumbling: fire all enabled signals when buffer reaches W, then flush.
-            # The window size IS the cadence — per-signal interval is ignored.
-            if state.q_tokens >= self.config.q_buffer_max_tokens:
+        # 4. Determine which signals fire. QBuffer owns the windowing policy:
+        # sliding auto-trims on append; tumbling reports window_complete().
+        if state.qbuf.tumbling:
+            # Window size IS the cadence — per-signal interval is ignored.
+            if state.qbuf.window_complete():
                 due_signals = {s for s in SIGNAL_NAMES if getattr(self.config, s).enabled}
             else:
                 due_signals = set()
         else:
-            # Sliding: per-signal interval check, trim to keep last W tokens.
-            state.trim(self.config.q_buffer_max_tokens)
+            # Sliding: per-signal interval check (buffer already trimmed on append).
             due_signals = set()
             for sig_name in SIGNAL_NAMES:
                 sig_cfg = getattr(self.config, sig_name)
@@ -264,8 +260,8 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 )
             except Exception:
                 logger.exception("[SVD] error in layer %s at step %d", layer_name, state.step)
-            if tumbling:
-                state.flush()
+            if state.qbuf.tumbling:
+                state.qbuf.flush()
 
         return result
 
@@ -316,7 +312,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         self,
         layer_name: str,
         layer_idx: int | None,
-        state: PerLayerSVDState,
+        state: PerLayerState,
         kv_cache: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
         due_signals: set[str],
@@ -333,7 +329,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             )
 
         # Stack accumulated Q: [L_q, num_heads, head_size]
-        Q_all = torch.cat(state.q_buffer, dim=0)
+        Q_all = state.qbuf.window()
         L_q = Q_all.shape[0]
 
         # Extract K: [L_k, num_kv_heads, head_size]
