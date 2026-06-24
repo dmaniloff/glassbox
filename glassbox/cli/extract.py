@@ -460,10 +460,6 @@ def main(
     otel: bool,
 ) -> None:
     """Run prefill-only spectral feature extraction on a labeled dataset."""
-    import vllm
-
-    import glassbox.backends.svd_backend as svd_mod
-
     if not signals:
         raise click.UsageError(
             "At least one signal must be specified. "
@@ -479,9 +475,6 @@ def main(
     else:
         samples = load_dataset_samples(dataset_name, max_samples, hf_org=hf_org)
 
-    # Prefill-only: SVD fires every token, max_tokens=1 (vLLM minimum)
-    max_tokens = 1
-
     # Set up output directory
     if outdir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -489,29 +482,6 @@ def main(
     else:
         outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
-
-    svd_features_path = outdir_path / "svd_features.jsonl"
-
-    # Write config metadata (num_layers added after LLM creation below)
-    extract_metadata = {
-        "model": model,
-        "dataset": dataset_name,
-        "max_samples": max_samples,
-        "svd_interval": 1,
-        "svd_rank": svd_rank,
-        "method": method or "randomized",
-        "heads": list(heads) if heads else [0],
-        "signals": list(signals),
-        "max_tokens": max_tokens,
-    }
-
-    log(f"Results directory: {outdir_path}")
-    log(f"Model: {model}")
-    log(f"Dataset: {dataset_name} ({len(samples)} samples)")
-    log(f"SVD: rank={svd_rank}, method={method or 'randomized'}")
-    log(f"Signals: {', '.join(signals)}")
-    if heads:
-        log(f"Heads: {list(heads)}")
 
     # Configure glassbox backend (interval=1 for prefill-only extraction)
     gb_config = GlassboxConfig.from_cli_args(
@@ -521,10 +491,100 @@ def main(
         method=method,
         heads=heads,
         threshold=threshold,
-        output_path=str(svd_features_path),
+        output_path=str(outdir_path / "svd_features.jsonl"),
         otel=True if otel else None,
     )
-    svd_mod.SVDTritonAttentionImpl.set_config(gb_config)
+
+    run_extraction(
+        samples=samples,
+        model=model,
+        config=gb_config,
+        outdir=outdir_path,
+        dataset_name=dataset_name,
+        parquet=parquet,
+    )
+
+
+def run_extraction(
+    samples: list[dict],
+    model: str,
+    config: GlassboxConfig,
+    outdir: str | Path | None = None,
+    *,
+    dataset_name: str = "unknown",
+    parquet: bool = False,
+    phases: tuple[str, ...] = ("question", "full"),
+    max_model_len: int | None = None,
+) -> Path:
+    """Run prefill-only feature extraction on a list of samples.
+
+    Parameters
+    ----------
+    samples
+        List of dicts, each with ``question``, ``response``, ``label``, ``idx``.
+    model
+        HuggingFace model name.
+    config
+        Glassbox configuration (signals, ranks, heads, thresholds, etc.).
+        ``config.output.path`` must be set to the desired JSONL output path.
+    outdir
+        Output directory for ``samples.jsonl`` and ``config.json``.
+        Auto-generated under ``experiments/results/`` if *None*.
+    dataset_name
+        Label stored in output metadata and per-sample JSONL rows.
+    parquet
+        If *True*, also write a wide ``features.parquet`` file.
+    phases
+        Which prefill phases to run.  Default ``("question", "full")``.
+        Use ``("full",)`` to skip the question-only baseline.
+    max_model_len
+        Cap vLLM's max sequence length (useful on smaller GPUs).
+
+    Returns
+    -------
+    Path
+        The output directory containing ``svd_features.jsonl``,
+        ``samples.jsonl``, ``config.json``, and optionally ``features.parquet``.
+    """
+    # vllm must be imported inside this function, not at module level.
+    # The vllm.general_plugins entry point triggers register_svd_backend()
+    # which calls set_config() — a top-level import would overwrite the
+    # caller's config before the engine even starts.
+    import vllm
+
+    import glassbox.backends.svd_backend as svd_mod
+
+    # Set up output directory
+    if outdir is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        outdir_path = Path("experiments/results") / timestamp
+    else:
+        outdir_path = Path(outdir)
+    outdir_path.mkdir(parents=True, exist_ok=True)
+
+    svd_features_path = Path(config.output.path)
+
+    # Determine enabled signals from config
+    enabled_signals = [s for s in SIGNAL_NAMES if getattr(config, s).enabled]
+
+    log(f"Results directory: {outdir_path}")
+    log(f"Model: {model}")
+    log(f"Dataset: {dataset_name} ({len(samples)} samples)")
+    log(f"Signals: {', '.join(enabled_signals)}")
+
+    # Save extraction metadata
+    extract_metadata = {
+        "model": model,
+        "dataset": dataset_name,
+        "signals": enabled_signals,
+        "phases": list(phases),
+    }
+
+    svd_mod.SVDTritonAttentionImpl.set_config(config)
+
+    # Prefill-only: we want the model to process the prompt without generating.
+    # vLLM requires at least one token of generation, so we set max_tokens=1.
+    prefill_params = vllm.SamplingParams(max_tokens=1)
 
     # Create vLLM engine
     log("Creating vLLM engine with CUSTOM attention backend")
@@ -535,53 +595,51 @@ def main(
     #   uncached suffix (e.g., in evaluate mode the full phase shares the
     #   question prefix, so only the response tokens are forwarded)
     # Disable both until the backend can reconstruct full Q from partial views.
-    llm = vllm.LLM(
+    vllm_kwargs: dict = dict(
         model=model,
         attention_backend="CUSTOM",
         enforce_eager=True,
         enable_chunked_prefill=False,
         enable_prefix_caching=False,
     )
+    if max_model_len is not None:
+        vllm_kwargs["max_model_len"] = max_model_len
+    llm = vllm.LLM(**vllm_kwargs)
 
     # Save num_layers from model config so parquet can be regenerated without HF download
     num_layers = llm.llm_engine.model_config.hf_config.num_hidden_layers
     extract_metadata["num_layers"] = num_layers
     (outdir_path / "config.json").write_text(json.dumps(extract_metadata, indent=2))
 
+    # Build phase prompts
+    phase_prompts = {
+        "question": lambda s: f"Q: {s['question']}\nA:",
+        "full": lambda s: f"Q: {s['question']}\nA: {s['response']}",
+    }
+
     samples_path = outdir_path / "samples.jsonl"
     samples_f = open(samples_path, "w")
 
     request_counter = 0
     for i, sample in enumerate(samples):
-        try:
-            # Two-phase prefill: question-only baseline, then full (prompt + response)
-            prompt_q = f"Q: {sample['question']}\nA:"
-            prompt_full = f"Q: {sample['question']}\nA: {sample['response']}"
-
-            for phase, prompt in [
-                ("question", prompt_q),
-                ("full", prompt_full),
-            ]:
-                outputs = llm.generate(
-                    [prompt],
-                    vllm.SamplingParams(max_tokens=max_tokens),
-                )
-                sample_row = {
-                    "request_id": request_counter,
-                    "sample_id": sample["idx"],
-                    "phase": phase,
-                    "dataset": dataset_name,
-                    **sample,
-                    "prompt_length": len(prompt),
-                    "generated": outputs[0].outputs[0].text,
-                }
-                samples_f.write(json.dumps(sample_row) + "\n")
-                samples_f.flush()
-                request_counter += 1
-
-        except Exception as e:
-            log(f"  [{i + 1}/{len(samples)}] ERROR: {e}")
-            continue
+        for phase in phases:
+            prompt = phase_prompts[phase](sample)
+            outputs = llm.generate(
+                [prompt],
+                prefill_params,
+            )
+            sample_row = {
+                "request_id": request_counter,
+                "sample_id": sample["idx"],
+                "phase": phase,
+                "dataset": dataset_name,
+                **sample,
+                "prompt_length": len(prompt),
+                "generated": outputs[0].outputs[0].text,
+            }
+            samples_f.write(json.dumps(sample_row) + "\n")
+            samples_f.flush()
+            request_counter += 1
 
         label_str = "HALL" if sample["label"] == 1 else "OK"
         if (i + 1) % 10 == 0 or i == 0:
@@ -593,15 +651,18 @@ def main(
     log(f"  svd features: {svd_features_path}")
 
     if parquet:
+        heads = config.spectral.heads
         feature_columns = _build_feature_columns(
             num_layers,
             heads,
-            signals,
-            ad_top_k=gb_config.selfattn.top_k,
-            lap_top_k=gb_config.laplacian.top_k,
+            tuple(enabled_signals),
+            ad_top_k=config.selfattn.top_k,
+            lap_top_k=config.laplacian.top_k,
         )
         parquet_path = outdir_path / "features.parquet"
         _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)
+
+    return outdir_path
 
 
 if __name__ == "__main__":
