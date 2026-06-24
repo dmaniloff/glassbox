@@ -351,3 +351,72 @@ def compute_routing_features_materialized(M, rank, svd_method="randomized") -> R
         sigma2_asym=sigma2_asym,
         commutator_norm=commutator_norm,
     )
+
+
+# ---------------------------------------------------------------------------
+# Asymmetry coefficient G = ||A_asym||_F / ||A||_F via direct Hutchinson (Route B)
+# ---------------------------------------------------------------------------
+
+
+def _asymmetry_probe_accumulate(
+    Q, K, d_k_inv_sqrt, scale, block_size, n_hutchinson, seed, causal, per_row=False
+):
+    """Hutchinson accumulation of A_asym @ z over Rademacher (+-1) probes.
+
+    Returns (s_asym, row_sq): s_asym ~ ||A_asym||_F^2 = (1/m) sum_i ||A_asym z_i||^2,
+    row_sq[i] ~ per-row mass with sum(row_sq) == s_asym (None if per_row=False).
+    The operator A is selected by ``d_k_inv_sqrt``: the real key-degree vector gives the
+    degree-normalized M; a unit vector gives the row-stochastic attention P.  Seeding
+    makes the scalar and witness paths draw identical probes, so ||witness||_2 == G.
+    """
+    L = Q.shape[0]
+    device = Q.device
+    dtype = Q.dtype
+    gen = torch.Generator(device=device).manual_seed(seed)
+    scalar_acc = torch.tensor(0.0, device=device, dtype=dtype)
+    row_acc = torch.zeros(L, device=device, dtype=dtype) if per_row else None
+    for _ in range(n_hutchinson):
+        z = torch.where(
+            torch.rand(L, device=device, generator=gen) < 0.5,
+            torch.ones(L, device=device, dtype=dtype),
+            -torch.ones(L, device=device, dtype=dtype),
+        )
+        w = matvec_Masym_blocked(Q, K, z, d_k_inv_sqrt, scale, block_size, causal=causal)
+        scalar_acc = scalar_acc + w.dot(w)
+        if per_row:
+            row_acc = row_acc + w * w
+    s_asym = scalar_acc / n_hutchinson
+    row_sq = (row_acc / n_hutchinson) if per_row else None
+    return s_asym, row_sq
+
+
+def asymmetry_partials_and_witness_matrix_free(
+    Q,
+    K,
+    d_k_inv_sqrt,
+    scale,
+    M_fro_norm=None,
+    block_size=256,
+    n_hutchinson=32,
+    seed=42,
+    causal=False,
+):
+    """Additive sufficient statistics + per-row witness for the asymmetry coefficient.
+
+    Returns (S_asym, S_den, row_sq): S_asym ~ ||A_asym||_F^2 (direct Hutchinson on
+    ||A_asym z||^2, Route B — non-negative, cancellation-free), S_den = ||A||_F^2
+    (exact), and row_sq[i] ~ per-row asymmetry mass.  The operator A is set by
+    ``d_k_inv_sqrt`` (a unit vector => the row-stochastic attention P).  Both partials
+    are sums-of-squares, hence additive over a disjoint partition of windows:
+    G = sqrt(sum S_asym / sum S_den).
+    """
+    if M_fro_norm is None:
+        M_fro_norm = compute_M_fro_norm_blocked(
+            Q, K, d_k_inv_sqrt, scale, block_size, causal=causal
+        ).item()
+    s_asym, row_sq = _asymmetry_probe_accumulate(
+        Q, K, d_k_inv_sqrt, scale, block_size, n_hutchinson, seed, causal, per_row=True
+    )
+    S_asym = float(s_asym.clamp(min=0.0).item())
+    S_den = float(M_fro_norm) ** 2
+    return S_asym, S_den, row_sq

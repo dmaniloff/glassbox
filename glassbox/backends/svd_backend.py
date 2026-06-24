@@ -186,6 +186,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if not (
             self.config.spectral.enabled
             or self.config.routing.enabled
+            or self.config.asymmetry.enabled
             or self.config.tracker.enabled
             or self.config.selfattn.enabled
             or self.config.laplacian.enabled
@@ -366,7 +367,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
                 if diag is None:
                     continue
 
-                result = diag.reduce(Qh, Kh, L)
+                result = diag.reduce(Qh, Kh, L, prior_state=state.accum.get(sig_name))
                 features = result["features"]
 
                 state.accum[sig_name] = diag.accumulate(result, state.accum.get(sig_name))
