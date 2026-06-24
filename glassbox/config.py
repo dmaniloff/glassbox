@@ -7,13 +7,13 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
-SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
+SIGNAL_NAMES: list[str] = ["spectral", "routing", "magnetic", "tracker", "selfattn", "laplacian"]
 
 # Signals that use SVD rank/method
 SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
-THRESHOLD_SIGNALS: set[str] = {"routing", "tracker", "selfattn", "laplacian"}
+THRESHOLD_SIGNALS: set[str] = {"routing", "magnetic", "tracker", "selfattn", "laplacian"}
 
 
 def validate_window_modes(
@@ -120,6 +120,19 @@ class RoutingConfig(SignalConfigBase):
     hodge_seed: int = 42
 
 
+class MagneticConfig(SignalConfigBase):
+    """Magnetic-Laplacian frustration λ₁ of the pre-softmax tournament ω(QKᵀ).
+
+    Operates on the UNMASKED pre-softmax scores S = QKᵀ (NOT post-softmax — a causal tournament
+    is transitive ⇒ λ₁ = 0; see docs/operator-choice.md). Dense Hermitian eig for L ≤ threshold,
+    complex-Hermitian Lanczos (which="smallest") above. The construction (L_φ = D − A⊙e^{iθ},
+    W=(|S_ij|+|S_ji|)/2, θ=arctan((S_ij−S_ji)/(S_ij+S_ji))) is formally verified in shade-formal.
+    """
+
+    threshold: int = 512
+    block_size: int = 256
+
+
 class TrackerConfig(SignalConfigBase):
     """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
 
@@ -179,6 +192,7 @@ class GlassboxConfig(BaseSettings):
 
     spectral: SpectralConfig = SpectralConfig()
     routing: RoutingConfig = RoutingConfig()
+    magnetic: MagneticConfig = MagneticConfig()
     tracker: TrackerConfig = TrackerConfig()
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()

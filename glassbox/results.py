@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SPECTRAL_FEATURE_NAMES = ["sv_ratio", "sv1", "sv_entropy"]
 
@@ -109,6 +109,26 @@ class RoutingFeatures(BaseModel):
             for k, v in _spectral_from_svs(values["singular_values"]).items():
                 values.setdefault(k, v)
         return values
+
+
+class MagneticFeatures(BaseModel):
+    """Magnetic-Laplacian frustration λ₁ of the pre-softmax tournament ω(QKᵀ).
+
+    λ₁ = smallest eigenvalue of the Hermitian magnetic Laplacian L_φ = D − A⊙e^{iθ} on the
+    unmasked pre-softmax scores (NOT post-softmax: a causal tournament is transitive ⇒ λ₁ = 0).
+    λ₁ = 0 is a balanced / curl-free orientation; λ₁ > 0 is frustration (cyclic preference
+    loops). The bottom-eigenvector per-token magnitudes are emitted as the witness.
+    See docs/operator-choice.md.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    frustration: float | None = Field(None, description="λ₁ of the magnetic Laplacian L_φ.")
+
+    @field_validator("frustration")
+    @classmethod
+    def _scrub_nonfinite(cls, v: float | None) -> float | None:
+        return v if v is None or math.isfinite(v) else None
 
 
 class TrackerFeatures(BaseModel):
@@ -213,7 +233,12 @@ class SVDSnapshot(BaseModel):
     tier: str | None = None  # "materialized" | "matrix_free"
     witness: list[float] | None = None
     features: (
-        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
+        SpectralFeatures
+        | RoutingFeatures
+        | MagneticFeatures
+        | TrackerFeatures
+        | SelfAttnFeatures
+        | LaplacianFeatures
     )
 
     def __repr__(self) -> str:
@@ -241,6 +266,8 @@ class SVDSnapshot(BaseModel):
         if isinstance(feat_raw, dict):
             if sig == "routing":
                 d["features"] = RoutingFeatures(**feat_raw)
+            elif sig == "magnetic":
+                d["features"] = MagneticFeatures(**feat_raw)
             elif sig == "tracker":
                 d["features"] = TrackerFeatures(**feat_raw)
             elif sig == "selfattn":
