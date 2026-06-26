@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SPECTRAL_FEATURE_NAMES = ["sv_ratio", "sv1", "sv_entropy"]
 
@@ -109,6 +109,25 @@ class RoutingFeatures(BaseModel):
             for k, v in _spectral_from_svs(values["singular_values"]).items():
                 values.setdefault(k, v)
         return values
+
+    @field_validator(
+        "G",
+        "Gamma",
+        "C",
+        "curl_ratio",
+        "sigma2",
+        "sigma2_asym",
+        "commutator_norm",
+        "phi_hat",
+        "sv1",
+        "sv_ratio",
+        "sv_entropy",
+    )
+    @classmethod
+    def _scrub_nonfinite(cls, v: float | None) -> float | None:
+        # NaN/inf must never reach the sink: the upstream max(x, 0.0) guards do NOT scrub NaN
+        # (max(nan, 0.0) == nan), so a poisoned M would otherwise emit garbage silently.
+        return v if v is None or math.isfinite(v) else None
 
 
 class TrackerFeatures(BaseModel):
