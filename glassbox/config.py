@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # Canonical signal names (user-facing)
-SIGNAL_NAMES: list[str] = ["spectral", "routing", "tracker", "selfattn", "laplacian"]
+SIGNAL_NAMES: list[str] = ["spectral", "routing", "cyclic", "tracker", "selfattn", "laplacian"]
 
 # Signals that use SVD rank/method
 SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
@@ -123,6 +123,19 @@ class RoutingConfig(SignalConfigBase):
     hodge_seed: int = 42
 
 
+class CyclicTrianglesConfig(SignalConfigBase):
+    """Cyclic-triangle count |T_cyc| of the pre-softmax sign tournament ω(QKᵀ).
+
+    Operates on the UNMASKED pre-softmax scores S = QKᵀ (NOT post-softmax — a causal
+    post-softmax tournament is transitive ⇒ |T_cyc| = 0; see docs/operator-choice.md). The
+    count is exact (Kendall identity); no threshold/estimation. When ``incremental`` is set,
+    the out-degree vector + running count are maintained across fires and only the delta
+    tokens are folded per fire (the O(ΔE) streaming update), requiring the unbounded buffer.
+    """
+
+    incremental: bool = False
+
+
 class TrackerConfig(SignalConfigBase):
     """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
 
@@ -182,6 +195,7 @@ class GlassboxConfig(BaseSettings):
 
     spectral: SpectralConfig = SpectralConfig()
     routing: RoutingConfig = RoutingConfig()
+    cyclic: CyclicTrianglesConfig = CyclicTrianglesConfig()
     tracker: TrackerConfig = TrackerConfig()
     selfattn: SelfAttnConfig = SelfAttnConfig()
     laplacian: LaplacianConfig = LaplacianConfig()

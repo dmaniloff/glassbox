@@ -1,5 +1,6 @@
 """Concrete Diagnostic implementations for each signal."""
 
+from glassbox.diagnostics.cyclic_triangles import CyclicTrianglesDiagnostic
 from glassbox.diagnostics.laplacian import LaplacianDiagnostic
 from glassbox.diagnostics.routing import RoutingDiagnostic
 from glassbox.diagnostics.selfattn import SelfAttnDiagnostic
@@ -9,6 +10,7 @@ from glassbox.diagnostics.tracker import TrackerDiagnostic
 DIAGNOSTIC_REGISTRY: dict[str, type] = {
     "spectral": SpectralDiagnostic,
     "routing": RoutingDiagnostic,
+    "cyclic": CyclicTrianglesDiagnostic,
     "tracker": TrackerDiagnostic,
     "selfattn": SelfAttnDiagnostic,
     "laplacian": LaplacianDiagnostic,
@@ -18,6 +20,7 @@ __all__ = [
     "DIAGNOSTIC_REGISTRY",
     "SpectralDiagnostic",
     "RoutingDiagnostic",
+    "CyclicTrianglesDiagnostic",
     "TrackerDiagnostic",
     "SelfAttnDiagnostic",
     "LaplacianDiagnostic",

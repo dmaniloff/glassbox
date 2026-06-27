@@ -130,6 +130,20 @@ class RoutingFeatures(BaseModel):
         return v if v is None or math.isfinite(v) else None
 
 
+class CyclicTrianglesFeatures(BaseModel):
+    """Cyclic-triangle count |T_cyc| of the pre-softmax sign tournament ω(QKᵀ).
+
+    Counts non-transitive (3-cycle) attention triangles — token i prefers j, j prefers k,
+    k prefers i — on the unmasked pre-softmax scores (NOT post-softmax: a causal post-softmax
+    tournament is transitive ⇒ |T_cyc| = 0). The per-token triangle-participation profile is
+    emitted as the snapshot witness. See docs/operator-choice.md.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    T_cyc: int | None = Field(None, description="Cyclic-triangle count of ω(QKᵀ).")
+
+
 class TrackerFeatures(BaseModel):
     """Features from raw post-softmax attention matrix A.
 
@@ -232,7 +246,12 @@ class SVDSnapshot(BaseModel):
     tier: str | None = None  # "materialized" | "matrix_free"
     witness: list[float] | None = None
     features: (
-        SpectralFeatures | RoutingFeatures | TrackerFeatures | SelfAttnFeatures | LaplacianFeatures
+        SpectralFeatures
+        | RoutingFeatures
+        | CyclicTrianglesFeatures
+        | TrackerFeatures
+        | SelfAttnFeatures
+        | LaplacianFeatures
     )
 
     def __repr__(self) -> str:
@@ -260,6 +279,8 @@ class SVDSnapshot(BaseModel):
         if isinstance(feat_raw, dict):
             if sig == "routing":
                 d["features"] = RoutingFeatures(**feat_raw)
+            elif sig == "cyclic":
+                d["features"] = CyclicTrianglesFeatures(**feat_raw)
             elif sig == "tracker":
                 d["features"] = TrackerFeatures(**feat_raw)
             elif sig == "selfattn":

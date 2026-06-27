@@ -1,5 +1,8 @@
 """Tests for the Diagnostic protocol and concrete implementations."""
 
+import itertools
+import json
+
 import pytest
 import torch
 
@@ -7,13 +10,14 @@ from glassbox.config import GlassboxConfig
 from glassbox.diagnostic import Diagnostic
 from glassbox.diagnostics import (
     DIAGNOSTIC_REGISTRY,
+    CyclicTrianglesDiagnostic,
     LaplacianDiagnostic,
     RoutingDiagnostic,
     SelfAttnDiagnostic,
     SpectralDiagnostic,
     TrackerDiagnostic,
 )
-from glassbox.results import SpectralFeatures, SVDSnapshot
+from glassbox.results import CyclicTrianglesFeatures, SpectralFeatures, SVDSnapshot
 
 L = 16
 D = 8
@@ -32,6 +36,7 @@ class TestRegistry:
         assert set(DIAGNOSTIC_REGISTRY.keys()) == {
             "spectral",
             "routing",
+            "cyclic",
             "tracker",
             "selfattn",
             "laplacian",
@@ -173,3 +178,108 @@ class TestEmitWitnessConfig:
     def test_set_true(self):
         cfg = GlassboxConfig(emit_witness=True)
         assert cfg.emit_witness is True
+
+
+class TestCyclicTriangles:
+    """|T_cyc| on the pre-softmax sign tournament ω(QKᵀ) — exact integer count."""
+
+    def _brute(self, Q, K, n):
+        # O(n^3) reference: a triple is cyclic iff each vertex has out-degree 1 within it.
+        S = Q[:n] @ K[:n].T
+        Dm = S - S.T  # Δ_ij = q_i·k_j − q_j·k_i
+
+        def beats(a, b):
+            return bool(Dm[a, b] > 0) or (float(Dm[a, b]) == 0.0 and a < b)
+
+        c = 0
+        for i, j, k in itertools.combinations(range(n), 3):
+            outs = sorted(sum(beats(a, b) for b in (i, j, k) if b != a) for a in (i, j, k))
+            if outs == [1, 1, 1]:
+                c += 1
+        return c
+
+    def test_signal_name(self):
+        assert CyclicTrianglesDiagnostic.signal_name == "cyclic"
+
+    def test_batch_matches_brute_force(self, qk):
+        Q, K = qk
+        r = CyclicTrianglesDiagnostic().reduce(Q, K, L)
+        assert r["tier"] == "materialized"
+        assert r["features"].T_cyc == self._brute(Q, K, L)
+
+    def test_incremental_matches_batch_at_each_fire(self):
+        torch.manual_seed(1)
+        N = 40
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        diag = CyclicTrianglesDiagnostic(incremental=True)
+        state = None
+        for fire_L in (8, 17, N):
+            res = diag.reduce(Q[:fire_L], K[:fire_L], fire_L, prior_state=state)
+            state = diag.accumulate(res, state)
+            assert res["tier"] == "incremental"
+            assert res["partials"]["tcyc"]["n"] == fire_L
+            assert res["features"].T_cyc == self._brute(Q, K, fire_L)
+
+    def test_witness_sums_to_count(self, qk):
+        Q, K = qk
+        diag = CyclicTrianglesDiagnostic()
+        w = diag.witness(Q, K, L)
+        assert w.shape == (L,)
+        assert int(w.sum().item()) == diag.reduce(Q, K, L)["features"].T_cyc
+
+    def test_transitive_tournament_is_zero(self):
+        # q_i=[a_i,1], k_j=[1,0] ⇒ q_i·k_j = a_i ⇒ Δ_ij = a_i − a_j ⇒ total order ⇒ transitive.
+        a = torch.arange(L, dtype=torch.float32)
+        Q = torch.stack([a, torch.ones(L)], dim=1)
+        K = torch.stack([torch.ones(L), torch.zeros(L)], dim=1)
+        assert CyclicTrianglesDiagnostic().reduce(Q, K, L)["features"].T_cyc == 0
+
+    def test_ties_oriented_by_index(self):
+        # identical tokens ⇒ Δ ≡ 0 ⇒ every pair oriented by index ⇒ transitive ⇒ |T_cyc| = 0.
+        Q = torch.ones(L, D)
+        K = torch.ones(L, D)
+        assert CyclicTrianglesDiagnostic().reduce(Q, K, L)["features"].T_cyc == 0
+
+    def test_serialization_round_trip(self):
+        snap = SVDSnapshot(
+            signal="cyclic",
+            request_id=0,
+            layer="model.layers.0.self_attn",
+            layer_idx=0,
+            head=0,
+            step=8,
+            L=16,
+            tier="materialized",
+            features=CyclicTrianglesFeatures(T_cyc=142),
+        )
+        back = SVDSnapshot.from_jsonl_row(json.loads(snap.model_dump_json()))
+        assert isinstance(back.features, CyclicTrianglesFeatures)
+        assert back.features.T_cyc == 142
+
+    def test_one_token_streaming_matches_batch(self):
+        # Mode 1: global statistic, one token at a time (interval=1). Cold-start at t=1, then
+        # the O(ΔE) per-token update; the running |T_cyc| matches batch at every step.
+        torch.manual_seed(3)
+        N = 24
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        diag = CyclicTrianglesDiagnostic(incremental=True)
+        state = None
+        for t in range(1, N + 1):
+            res = diag.reduce(Q[:t], K[:t], t, prior_state=state)
+            state = diag.accumulate(res, state)
+            assert res["features"].T_cyc == self._brute(Q, K, t)
+
+    def test_block_local_not_additive(self):
+        # Mode 2: block-local per-window counts. |T_cyc| is NOT additive across disjoint
+        # windows (cyclic triangles span boundaries), so per-window counts must NOT be summed
+        # into a global — only the full-sequence count (mode 1) is the true global |T_cyc|.
+        torch.manual_seed(7)
+        N = 30
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        diag = CyclicTrianglesDiagnostic()  # batch = block-local
+        full = diag.reduce(Q, K, N)["features"].T_cyc
+        half = N // 2
+        w1 = diag.reduce(Q[:half], K[:half], half)["features"].T_cyc
+        w2 = diag.reduce(Q[half:], K[half:], N - half)["features"].T_cyc
+        assert full == self._brute(Q, K, N)
+        assert w1 + w2 < full  # block sum undercounts: cross-window triangles are dropped
