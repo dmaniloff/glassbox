@@ -10,13 +10,20 @@ The primary implementation is a custom vLLM attention backend in `glassbox/backe
 
 ## What It Extracts
 
-At configurable intervals during inference, `glassbox` computes features from different stages of the attention computation:
+At configurable intervals during inference, `glassbox` computes features from different stages of the attention computation. Each signal runs on the attention matrix its mathematics requires — see [docs/operator-choice.md](docs/operator-choice.md) for the operator rationale and causal-masking caveats.
 
-1. **spectral** — SVD of the pre-softmax scores matrix `S = QK^T`
-2. **routing** — SVD + Hodge decomposition of the degree-normalized post-softmax matrix `M = D_Q^{-1/2} A D_K^{-1/2}` (Dahlem et al., upcoming)
-3. **tracker** — Span-independent features from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))` — [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348)
-4. **selfattn** — Self-attention features from the diagonal of `A` — [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024)
-5. **laplacian** — Spectral features from the in-degree graph Laplacian `L = D_in - A` — [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals) (EMNLP 2025, [arXiv:2502.17598](https://arxiv.org/abs/2502.17598))
+| Signal | Operator | Key outputs | Source |
+|---|---|---|---|
+| `spectral` | pre-softmax scores `S = QKᵀ` | `sv1`, `sv_ratio`, `sv_entropy` (score-geometry / rank) | — |
+| `routing` | degree-normalized `M = D_Q^{-1/2} A D_K^{-1/2}` | SVD spectrum, `phi_hat` (Cheeger conductance), Hodge `G`/`Gamma`/`C`, `commutator_norm` | Dahlem et al. (upcoming) |
+| `asymmetry` | row-stochastic `P` | `G`, `Gamma`, `C` — Hodge gradient/curl split `G²=Γ²+C²` | Dahlem et al. (upcoming) |
+| `cyclic` | pre-softmax `S` (sign tournament) | `T_cyc` — count of non-transitive (cyclic) triangles | Dahlem et al. (upcoming) |
+| `magnetic` | pre-softmax `S` (magnetic Laplacian `L_φ = D − A⊙e^{iθ}`) | `frustration` (λ₁; `0 ⟺ balanced orientation`) | Dahlem et al. (upcoming) |
+| `tracker` | raw post-softmax `A = softmax(QKᵀ/√d)` | SVD spectrum, `sigma2`, `commutator_norm` | [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348) |
+| `selfattn` | attention diagonal `diag(A)` | `attn_diag_logmean`, `eigvals` | [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024) |
+| `laplacian` | in-degree graph Laplacian `L = D_in − A` | `eigvals` (top-k) | [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals) (EMNLP 2025, [arXiv:2502.17598](https://arxiv.org/abs/2502.17598)) |
+
+Only `spectral` is enabled by default. Enable any signal via `GlassboxConfig` (e.g. `GlassboxConfig(asymmetry={"enabled": True})`) or the `--signal` CLI flag.
 
 For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
 
@@ -175,7 +182,7 @@ Some routing metrics need access to selected entries of `M`. Instead of building
 > [docs/operator-choice.md](docs/operator-choice.md) for the rationale (with paper references)
 > and the causal-masking caveats.
 
-### 1. Spectral signal — scores matrix features (pre-softmax scores)
+### Spectral signal — scores matrix features (pre-softmax scores)
 
 These come from the singular values of the pre-softmax scores matrix `S = QK^T`.
 
@@ -185,7 +192,7 @@ These come from the singular values of the pre-softmax scores matrix `S = QK^T`.
 | `sv_ratio` | `σ₁(S) / σ₂(S)` | Spectral sharpness. High values suggest near-rank-1 structure; low values suggest multiple competing modes |
 | `sv_entropy` | `-Σ pᵢ log pᵢ`, with `pᵢ = σᵢ / Σⱼ σⱼ` | Entropy of the normalized singular-value distribution. Measures how concentrated or diffuse the spectrum is |
 
-### 2. Routing signal — degree-normalized matrix features (post-softmax attention) — Dahlem et al. (upcoming)
+### Routing signal — degree-normalized matrix features (post-softmax attention) — Dahlem et al. (upcoming)
 
 These come from the singular values and routing decomposition of the normalized operator `M`.
 
@@ -197,15 +204,47 @@ These come from the singular values and routing decomposition of the normalized 
 | `sigma2` | `σ₂(M)` | Second singular value of `M`. Raw spectral-gap measure and persistence of non-dominant routing structure |
 | `phi_hat` | `1 - σ₂(M)` | Conductance-like bottleneck score. High `φ̂` means attention concentrates through a single dominant mode; low `φ̂` means multiple competing routing paths |
 | `G` | `‖M_asym‖_F / ‖M‖_F` | Total asymmetry. Fraction of `M`'s energy in the antisymmetric part, where `M_asym = (M - Mᵀ) / 2` |
-| `Gamma` | `√(G² - C²)` | Gradient coefficient. The portion of asymmetry that is potential-driven rather than circulatory |
-| `C` | `curl_RMS / (√2 · ‖M‖_F)` | Curl coefficient. The portion of asymmetry due to irreversible circulation, estimated by triangle sampling in the matrix-free path |
+| `Gamma` | `‖A_grad‖_F / ‖M‖_F`, with `‖A_grad‖² = 2‖r‖²/L`, `r = M_asym·1` | Gradient coefficient. The potential-driven (hierarchical) part of the asymmetry — exact via the row-sum identity, not an estimate |
+| `C` | `‖A_curl‖_F / ‖M‖_F` (the Pythagorean residual, `G² = Γ² + C²`) | Curl coefficient. The divergence-free (circulatory) part of the asymmetry |
 | `curl_ratio` | `C / (G + ε)` | Curl fraction. What share of total asymmetry is circulatory versus gradient-driven |
 | `sigma2_asym` | `σ₂(M_asym)` | Second singular value of the antisymmetric part. Captures whether the irreversible component has multiple significant modes |
 | `commutator_norm` | `‖[M_sym, M_asym]‖_F / ‖M‖_F` | Commutator norm. Measures how much the symmetric and antisymmetric parts interfere with each other, where `[A, B] = AB - BA` |
 
 The routing and Hodge-style metrics live in `glassbox/hodge.py`. The feature schemas are defined in `glassbox/results.py`.
 
-### 3. Tracker signal — AttentionTracker features (raw post-softmax attention) — [arXiv:2411.00348](https://arxiv.org/abs/2411.00348)
+### Asymmetry signal — Hodge gradient/curl split on row-stochastic attention (Dahlem et al., upcoming)
+
+The directed-routing asymmetry and its Hodge decomposition, computed on the **row-stochastic post-softmax attention `P`** (not the degree-normalized `M` — the normalization is an asymmetric scaling that distorts the antisymmetric structure; see [operator-choice](docs/operator-choice.md)). `A = (P - Pᵀ) / 2`.
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `G` | `‖P_asym‖_F / ‖P‖_F` | Total asymmetry. Fraction of `P`'s energy in the antisymmetric part |
+| `Gamma` | `‖A_grad‖_F / ‖P‖_F`, with `‖A_grad‖² = 2‖r‖²/L`, `r = A_asym·1` | Gradient (hierarchical) coefficient — exact via the row-sum identity in every tier |
+| `C` | `‖A_curl‖_F / ‖P‖_F` (the Pythagorean residual, `G² = Γ² + C²`) | Curl (circulatory) coefficient — the divergence-free part |
+
+Matrix-free above the threshold via a direct Hutchinson estimator on `‖P_asym z‖²` (Route B, non-negative); exact materialized below. Supports an exact incremental (delta-token) mode and block-diagonal streaming. Implementation: `glassbox/diagnostics/asymmetry.py`.
+
+### Cyclic signal — cyclic-triangle count on the pre-softmax tournament (Dahlem et al., upcoming)
+
+Counts non-transitive (3-cycle) preference triangles in the sign tournament `ω(S)_ij = sgn(qᵢ·kⱼ - qⱼ·kᵢ)` on the **unmasked pre-softmax scores** `S`. Vacuous on causal post-softmax attention (lower-triangular ⇒ transitive ⇒ `T_cyc = 0`), so it must run on the raw scores.
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `T_cyc` | `C(n,3) - Σᵢ C(sᵢ, 2)` (Kendall identity, `sᵢ` = out-degree) | Number of cyclic triples `{i,j,k}` — how non-transitive the head's directional preferences are |
+
+Exact integer count in O(n) state (no SVD); supports exact one-token-at-a-time streaming. Implementation: `glassbox/diagnostics/cyclic_triangles.py`.
+
+### Magnetic signal — magnetic-Laplacian frustration on the pre-softmax tournament (Dahlem et al., upcoming)
+
+The spectral partner of `cyclic`: the frustration of the Hermitian **magnetic Laplacian** `L_φ = D - A⊙e^{iθ}` on the unmasked pre-softmax scores, with magnitude `W = (|S_ij| + |S_ji|)/2` and phase `θ = arctan((S_ij - S_ji)/(S_ij + S_ji))`.
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `frustration` (`λ₁`) | smallest eigenvalue of `L_φ` (≥ 0) | `0 ⟺` balanced orientation (a coherent global ranking exists); `> 0 ⟺` cyclic preference loops that cannot be gauged away |
+
+Dense Hermitian eigendecomposition below the threshold; complex-Hermitian Lanczos above. Gauge-invariant, so it is unchanged by degree normalization. Implementation: `glassbox/diagnostics/magnetic.py`.
+
+### Tracker signal — AttentionTracker features (raw post-softmax attention) — [arXiv:2411.00348](https://arxiv.org/abs/2411.00348)
 
 These come from the raw post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`, without degree normalization. Based on the AttentionTracker paper, which uses these features for mechanistic classification of failure modes (prompt injection vs hallucination).
 
@@ -221,7 +260,7 @@ The computation reuses the same two-tier approach as the degree-normalized opera
 
 The feature computation lives in `glassbox/attention_tracker.py`.
 
-### 4. SelfAttn signal — attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)
+### SelfAttn signal — attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)
 
 These come from the diagonal of the post-softmax attention matrix `A = softmax(QK^T / sqrt(d))`.
 
@@ -241,7 +280,7 @@ Two additional LLM-Check extractors require signals the attention backend cannot
 
 These will require either `torch.compile` passes (see `glassbox/passes/`) or vLLM observation hooks.
 
-### 5. Laplacian signal — eigenvalue features (LapEigvals, EMNLP 2025) — [arXiv:2502.17598](https://arxiv.org/abs/2502.17598)
+### Laplacian signal — eigenvalue features (LapEigvals, EMNLP 2025) — [arXiv:2502.17598](https://arxiv.org/abs/2502.17598)
 
 These come from the in-degree graph Laplacian of the attention matrix: `L = D_in - A`, where `D_in[i,i] = Σ_j A[j,i]` (column sums of `A`). Treating attention as a weighted directed graph, the Laplacian diagonal captures how much attention each token receives from other tokens (in-degree minus self-attention).
 
