@@ -12,12 +12,18 @@ from glassbox.diagnostics import (
     DIAGNOSTIC_REGISTRY,
     CyclicTrianglesDiagnostic,
     LaplacianDiagnostic,
+    MagneticDiagnostic,
     RoutingDiagnostic,
     SelfAttnDiagnostic,
     SpectralDiagnostic,
     TrackerDiagnostic,
 )
-from glassbox.results import CyclicTrianglesFeatures, SpectralFeatures, SVDSnapshot
+from glassbox.results import (
+    CyclicTrianglesFeatures,
+    MagneticFeatures,
+    SpectralFeatures,
+    SVDSnapshot,
+)
 
 L = 16
 D = 8
@@ -37,6 +43,7 @@ class TestRegistry:
             "spectral",
             "routing",
             "cyclic",
+            "magnetic",
             "tracker",
             "selfattn",
             "laplacian",
@@ -283,3 +290,78 @@ class TestCyclicTriangles:
         w2 = diag.reduce(Q[half:], K[half:], N - half)["features"].T_cyc
         assert full == self._brute(Q, K, N)
         assert w1 + w2 < full  # block sum undercounts: cross-window triangles are dropped
+
+
+class TestMagnetic:
+    """Magnetic-Laplacian frustration λ₁ on the pre-softmax tournament (unmasked S=QKᵀ)."""
+
+    def _dense_lambda1(self, Q, K):
+        # Independent dense oracle: L_φ = D − A⊙e^{iθ}, λ₁ = smallest eigenvalue (clamped ≥0).
+        scale = 1.0 / (D**0.5)
+        S = Q @ K.T * scale
+        St = S.T
+        W = (S.abs() + St.abs()) / 2.0
+        W = W - torch.diag(torch.diagonal(W))
+        denom = S + St
+        safe = torch.where(denom != 0, denom, torch.ones_like(denom))
+        theta = torch.where(denom != 0, torch.atan((S - St) / safe), torch.zeros_like(denom))
+        A = torch.complex(W * torch.cos(theta), W * torch.sin(theta))
+        A = A - torch.diag(torch.diagonal(A))
+        Lphi = torch.diag(W.sum(1)).to(A.dtype) - A
+        return max(0.0, float(torch.linalg.eigvalsh(Lphi)[0].item()))
+
+    def test_signal_name(self):
+        assert MagneticDiagnostic.signal_name == "magnetic"
+
+    def test_psd_and_frustrated(self, qk):
+        Q, K = qk
+        f = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)["features"]
+        assert f.frustration >= 0.0  # L_φ is PSD
+        assert f.frustration > 1e-4  # generic asymmetric scores are frustrated
+
+    def test_matches_dense_oracle(self, qk):
+        Q, K = qk
+        r = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)
+        assert r["tier"] == "materialized"
+        assert abs(r["features"].frustration - self._dense_lambda1(Q, K)) < 1e-5
+
+    def test_balanced_symmetric_is_zero(self):
+        # Q=K -> S=Q@Qᵀ symmetric -> θ=0 -> L_φ is the real graph Laplacian -> λ₁=0 (balanced).
+        torch.manual_seed(1)
+        Q = torch.randn(L, D)
+        f = MagneticDiagnostic(threshold=1024).reduce(Q, Q, L)["features"]
+        assert f.frustration < 1e-4
+
+    def test_matrix_free_matches_materialized(self):
+        torch.manual_seed(2)
+        Q, K = torch.randn(L, D), torch.randn(L, D)
+        mat = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)
+        mf = MagneticDiagnostic(threshold=4, block_size=8).reduce(Q, K, L)
+        assert mf["tier"] == "matrix_free"
+        assert abs(mat["features"].frustration - mf["features"].frustration) < 1e-3
+
+    def test_witness_is_bottom_eigenvector_magnitude(self, qk):
+        Q, K = qk
+        w = MagneticDiagnostic(threshold=1024).witness(Q, K, L)
+        assert w.shape == (L,)
+        assert bool(torch.isfinite(w).all()) and float(w.min()) >= 0.0
+
+    def test_nonfinite_scrubbed(self):
+        assert MagneticFeatures(frustration=float("nan")).frustration is None
+        assert MagneticFeatures(frustration=2.5).frustration == 2.5
+
+    def test_serialization_round_trip(self):
+        snap = SVDSnapshot(
+            signal="magnetic",
+            request_id=0,
+            layer="model.layers.0.self_attn",
+            layer_idx=0,
+            head=0,
+            step=8,
+            L=16,
+            tier="materialized",
+            features=MagneticFeatures(frustration=0.73),
+        )
+        back = SVDSnapshot.from_jsonl_row(json.loads(snap.model_dump_json()))
+        assert isinstance(back.features, MagneticFeatures)
+        assert back.features.frustration == 0.73

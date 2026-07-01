@@ -144,6 +144,26 @@ class CyclicTrianglesFeatures(BaseModel):
     T_cyc: int | None = Field(None, description="Cyclic-triangle count of ω(QKᵀ).")
 
 
+class MagneticFeatures(BaseModel):
+    """Magnetic-Laplacian frustration λ₁ of the pre-softmax tournament ω(QKᵀ).
+
+    λ₁ = smallest eigenvalue of the Hermitian magnetic Laplacian L_φ = D − A⊙e^{iθ} on the
+    unmasked pre-softmax scores (NOT post-softmax: a causal tournament is transitive ⇒ λ₁ = 0).
+    λ₁ = 0 is a balanced / curl-free orientation; λ₁ > 0 is frustration (cyclic preference
+    loops). The bottom-eigenvector per-token magnitudes are emitted as the witness.
+    See docs/operator-choice.md.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    frustration: float | None = Field(None, description="λ₁ of the magnetic Laplacian L_φ.")
+
+    @field_validator("frustration")
+    @classmethod
+    def _scrub_nonfinite(cls, v: float | None) -> float | None:
+        return v if v is None or math.isfinite(v) else None
+
+
 class TrackerFeatures(BaseModel):
     """Features from raw post-softmax attention matrix A.
 
@@ -249,6 +269,7 @@ class SVDSnapshot(BaseModel):
         SpectralFeatures
         | RoutingFeatures
         | CyclicTrianglesFeatures
+        | MagneticFeatures
         | TrackerFeatures
         | SelfAttnFeatures
         | LaplacianFeatures
@@ -281,6 +302,8 @@ class SVDSnapshot(BaseModel):
                 d["features"] = RoutingFeatures(**feat_raw)
             elif sig == "cyclic":
                 d["features"] = CyclicTrianglesFeatures(**feat_raw)
+            elif sig == "magnetic":
+                d["features"] = MagneticFeatures(**feat_raw)
             elif sig == "tracker":
                 d["features"] = TrackerFeatures(**feat_raw)
             elif sig == "selfattn":
