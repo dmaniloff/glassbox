@@ -464,3 +464,41 @@ class TestAsymmetrySerialization:
         back = SVDSnapshot.from_jsonl_row(json.loads(snap.model_dump_json()))
         assert isinstance(back.features, AsymmetryFeatures)
         assert back.features.G == 0.42 and back.tier == "matrix_free" and back.witness == [0.1] * 16
+
+
+class TestAsymmetryIncremental:
+    """Incremental exact-full G: fold delta tokens per fire; matches batch full-operator G."""
+
+    def _batch_g_causal(self, Q, K, n):
+        scale = 1.0 / (D**0.5)
+        scores = Q[:n] @ K[:n].T * scale
+        scores = scores.masked_fill(~torch.tril(torch.ones(n, n, dtype=torch.bool)), float("-inf"))
+        P = torch.softmax(scores, dim=-1)
+        return (((P - P.T) / 2).norm() / P.norm()).item()
+
+    def test_incremental_matches_batch_at_each_fire(self):
+        torch.manual_seed(0)
+        N = 24
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        diag = AsymmetryDiagnostic(causal=True, incremental=True)
+        state = None
+        for fire_L in (4, 9, 16, N):  # growing full-sequence buffer
+            r = diag.reduce(Q[:fire_L], K[:fire_L], fire_L, prior_state=state)
+            state = diag.accumulate(r, state)
+            assert r["tier"] == "incremental"
+            assert r["partials"]["incr"]["n"] == fire_L  # folded up to current length
+            assert abs(r["features"].G - self._batch_g_causal(Q, K, fire_L)) < 1e-6
+
+    def test_delta_fold_equals_single_shot(self):
+        # folding in chunks == folding the whole sequence at once (delta composition)
+        torch.manual_seed(1)
+        N = 20
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        chunked = AsymmetryDiagnostic(causal=True, incremental=True)
+        state = None
+        for fire_L in (5, 11, N):
+            r = chunked.reduce(Q[:fire_L], K[:fire_L], fire_L, prior_state=state)
+            state = chunked.accumulate(r, state)
+        fresh = AsymmetryDiagnostic(causal=True, incremental=True)
+        one_shot = fresh.reduce(Q, K, N, prior_state=None)
+        assert abs(r["features"].G - one_shot["features"].G) < 1e-9
