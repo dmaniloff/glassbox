@@ -186,6 +186,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if not (
             self.config.spectral.enabled
             or self.config.routing.enabled
+            or self.config.asymmetry.enabled
             or self.config.cyclic.enabled
             or self.config.magnetic.enabled
             or self.config.tracker.enabled

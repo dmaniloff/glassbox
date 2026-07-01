@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettin
 SIGNAL_NAMES: list[str] = [
     "spectral",
     "routing",
+    "asymmetry",
     "cyclic",
     "magnetic",
     "tracker",
@@ -21,7 +22,14 @@ SIGNAL_NAMES: list[str] = [
 SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
 
 # Signals that use threshold/block_size (materialized vs matrix-free two-tier)
-THRESHOLD_SIGNALS: set[str] = {"routing", "magnetic", "tracker", "selfattn", "laplacian"}
+THRESHOLD_SIGNALS: set[str] = {
+    "routing",
+    "asymmetry",
+    "magnetic",
+    "tracker",
+    "selfattn",
+    "laplacian",
+}
 
 
 def validate_window_modes(
@@ -150,11 +158,29 @@ class MagneticConfig(SignalConfigBase):
     Operates on the UNMASKED pre-softmax scores S = QKᵀ (NOT post-softmax — a causal tournament
     is transitive ⇒ λ₁ = 0; see docs/operator-choice.md). Dense Hermitian eig for L ≤ threshold,
     complex-Hermitian Lanczos (which="smallest") above. The construction (L_φ = D − A⊙e^{iθ},
-    W=(|S_ij|+|S_ji|)/2, θ=arctan((S_ij−S_ji)/(S_ij+S_ji))) is formally verified in shade-formal.
+    W=(|S_ij|+|S_ji|)/2, θ=arctan((S_ij−S_ji)/(S_ij+S_ji))); see *directed-attention-geometry*.
     """
 
     threshold: int = 512
     block_size: int = 256
+
+
+class AsymmetryConfig(SignalConfigBase):
+    """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P.
+
+    Hodge G signal.  Computed on the post-softmax attention P (NOT the degree-normalized
+    M — see docs/operator-choice.md).  Matrix-free Hutchinson estimator (Route B, direct
+    ||P_asym z||^2) above ``threshold``, exact materialized below.  When ``streaming`` is
+    set, the per-window sufficient statistics (||P_asym||_F^2, ||P||_F^2) are accumulated
+    into a global G — unbiased only under disjoint (tumbling) windowing.
+    """
+
+    threshold: int = 512
+    block_size: int = 256
+    causal: bool = True
+    n_hutchinson: int = 32
+    seed: int = 42
+    streaming: bool = False
 
 
 class TrackerConfig(SignalConfigBase):
@@ -216,6 +242,7 @@ class GlassboxConfig(BaseSettings):
 
     spectral: SpectralConfig = SpectralConfig()
     routing: RoutingConfig = RoutingConfig()
+    asymmetry: AsymmetryConfig = AsymmetryConfig()
     cyclic: CyclicTrianglesConfig = CyclicTrianglesConfig()
     magnetic: MagneticConfig = MagneticConfig()
     tracker: TrackerConfig = TrackerConfig()
