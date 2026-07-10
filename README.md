@@ -246,22 +246,21 @@ Both the randomized SVD and Lanczos implementations consume only these matvecs.
 `glassbox/svd.py` provides:
 
 - `randomized_svd()`
-- `svd_via_lanczos()`
+- `svd_via_lanczos()` (Golub–Kahan–Lanczos bidiagonalization)
+- `hermitian_lanczos()` (real- or complex-Hermitian eigenpairs; used by the `magnetic` signal)
 
-Both operate on callables `matvec` and `matvec_t`, so they never require the full matrix to exist in memory.
+All operate on matvec callables, so they never require the full matrix to exist in memory.
 
 ### 3. Blocked row streaming for post-softmax attention
 
 For the degree-normalized operator, some quantities depend on softmaxed attention. When sequence length is large, `glassbox` uses blocked streaming:
 
-- `apply_A_blocked()`
-- `apply_AT_blocked()`
-- `compute_dk_blocked()`
-- `compute_logsumexp_blocked()`
-- `matvec_M_blocked()`
-- `matvec_MT_blocked()`
+- `apply_A_blocked()` / `apply_AT_blocked()`
+- `compute_dk_blocked()` / `compute_logsumexp_blocked()` / `compute_M_fro_norm_blocked()`
+- `matvec_M_blocked()` / `matvec_MT_blocked()`
+- `matvec_Masym_blocked()` / `matvec_Msym_blocked()` / `matvec_commutator_blocked()` (the Hodge/asymmetry operators)
 
-These compute the effect of `A` or `M` in row blocks, keeping memory bounded by the block size instead of `L^2`.
+These compute the effect of `A`, `M`, or their symmetric/antisymmetric parts in row blocks, keeping memory bounded by the block size instead of `L^2`.
 
 ### 4. Two-tier execution for the normalized operator
 
@@ -274,7 +273,7 @@ In practice:
 
 Both tiers produce equivalent results within numerical tolerance. The materialized path is *faster* for short sequences (~1.8× at L=256 on A10G) and the matrix-free path wins for long ones; the default `512` sits near the crossover. Setting `threshold=0` forces the matrix-free path for every sequence (`L > 0` is always true), guaranteeing no full `L×L` matrix is ever materialized — useful for memory-constrained deployments or streaming with large windows, at the cost of the small-L speedup.
 
-That behavior is implemented in each threshold-based diagnostic's `reduce()` method (routing, tracker, selfattn, laplacian).
+That behavior is implemented in each threshold-based diagnostic's `reduce()` method (routing, asymmetry, magnetic, tracker, selfattn, laplacian).
 
 ### 5. On-demand entry lookup for transpose access
 
@@ -344,6 +343,7 @@ The backend emits one JSON object per observation. Each row contains:
 - `singular_values`
 - `tier`: `materialized` or `matrix_free` for signals that use the two-tier approach
 - `features`: derived metrics for that observation
+- `witness`: per-token localization vector, when `emit_witness` is on
 
 This format is designed to feed downstream systems directly. You can:
 
@@ -363,21 +363,11 @@ The `glassbox-extract` CLI can also write a wide Parquet file.
 
 ## Installation
 
-This repository expects vLLM to be installed separately.
-
-```bash
-# using a Ubuntu 24.04 Deep Learning AMI, I just needed to
-source /opt/pytorch/bin/activate
-pip install vllm==0.15.1
-pip install huggingface-hub==0.36.0
-pip install pydantic-settings==2.12.0
-```
-
-Once you have vLLM installed, you can install the package:
-
 ```bash
 pip install -e .
 ```
+
+This pulls the declared dependencies (`vllm>=0.15.1`, `pydantic-settings[yaml]`, `click`). If you already have a working vLLM environment (e.g. a GPU image with a prebuilt vLLM), install into that environment and your existing vLLM is used as-is.
 
 For local development:
 
@@ -413,8 +403,30 @@ routing:
   heads: [0]
   threshold: 2048
   block_size: 256
-  hodge_target_cv: 0.05
-  hodge_curl_seed: 42
+  hodge_seed: 42
+
+asymmetry:
+  enabled: true
+  interval: 32
+  heads: [0]
+  threshold: 512
+  block_size: 256
+  n_hutchinson: 32
+  streaming: false     # block-diagonal global accumulation (tumbling windows only)
+  incremental: false   # exact full-operator delta-fold (unbounded buffer only)
+
+cyclic:
+  enabled: true
+  interval: 32
+  heads: [0]
+  incremental: false
+
+magnetic:
+  enabled: true
+  interval: 32
+  heads: [0]
+  threshold: 512
+  block_size: 256
 
 tracker:
   enabled: true
@@ -453,34 +465,7 @@ q_buffer_mode: sliding       # "sliding" or "tumbling"
 emit_witness: false          # attach per-token localization vectors
 ```
 
-Important knobs:
-
-| Setting | Description |
-|---|---|
-| `spectral.interval` | Snapshot cadence for `S = QK^T` |
-| `spectral.rank` | Number of singular values to keep |
-| `spectral.method` | `randomized` or `lanczos` |
-| `spectral.heads` | Heads to analyze |
-| `routing.enabled` | Turn on routing analysis |
-| `routing.threshold` | Sequence length cutoff for materialized vs matrix-free |
-| `routing.block_size` | Row-block size for blocked operators |
-| `tracker.enabled` | Turn on raw attention matrix analysis |
-| `tracker.threshold` | Sequence length cutoff for materialized vs matrix-free |
-| `selfattn.enabled` | Turn on attention diagonal analysis |
-| `selfattn.interval` | Snapshot cadence for diagonal features |
-| `selfattn.heads` | Heads to analyze |
-| `selfattn.top_k` | Number of top diagonal values to keep (0 = omit eigvals) |
-| `selfattn.threshold` | Sequence length cutoff for materialized vs matrix-free |
-| `laplacian.enabled` | Turn on Laplacian eigenvalue analysis |
-| `laplacian.interval` | Snapshot cadence for Laplacian features |
-| `laplacian.heads` | Heads to analyze |
-| `laplacian.top_k` | Number of top eigenvalues to keep |
-| `laplacian.threshold` | Sequence length cutoff for materialized vs matrix-free |
-| `output.path` | JSONL output path (feature logging pipeline) |
-| `emit.otel` | Emit snapshots as OpenTelemetry spans (inference pipeline) |
-| `q_buffer_max_tokens` | Max Q-buffer tokens per layer (0 = unbounded). Bounds memory to O(W·H·d) per layer |
-| `q_buffer_mode` | `sliding` (overlapping, trim oldest) or `tumbling` (non-overlapping, flush after fire) |
-| `emit_witness` | Attach per-token localization vectors to snapshots (O(L) per snapshot when on) |
+Every signal shares the orchestration fields (`enabled`, `interval`, `heads`); the rest are signal-specific. The full schema — every knob, its bounds, and its default — is `GlassboxConfig` in `glassbox/config.py`, and unsound streaming/windowing combinations are rejected at construction (see [The Diagnostic Protocol](#the-diagnostic-protocol)).
 
 ## Running Glassbox
 
@@ -524,7 +509,7 @@ glassbox-run \
   --prompt "The future of artificial intelligence is"
 ```
 
-Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports all CLI flags (`--signal`, `--interval`, `--rank`, `--heads`, `--otel`, `--output`, `--q-buffer-max-tokens`, `--q-buffer-mode`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`. Settings can also be loaded from a `glassbox.yaml` in the working directory.
+Launches vLLM with `attention_backend="CUSTOM"` and `enforce_eager=True`. Supports the config surface as flags — `--signal`, `--interval`, `--rank`, `--method`, `--heads`, `--threshold`, `--block-size`, `--otel`, `--output`, `--q-buffer-max-tokens`, `--q-buffer-mode` (see `glassbox-run --help`). The `--output` flag writes JSONL and is available for debugging/archival, but the typical runner use case is `--otel`. Settings can also be loaded from a `glassbox.yaml` in the working directory.
 
 ### `glassbox-extract` — offline feature extraction
 
@@ -533,7 +518,7 @@ glassbox-extract \
   --model Qwen/Qwen2-7B-Instruct \
   --dataset halueval_hallucination \
   --max-samples 200 \
-  --signal spectral,routing,tracker,selfattn,laplacian \
+  --signal spectral,routing,asymmetry,cyclic,magnetic,tracker,selfattn,laplacian \
   --parquet
 ```
 
