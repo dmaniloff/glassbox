@@ -189,53 +189,39 @@ At runtime, the backend:
 
 This lets you observe attention structure during real generation rather than in a separate offline re-run.
 
-## Streaming Diagnostics
+## The Diagnostic Protocol
 
-For long or unbounded sequences, retaining the full Q buffer is impractical (O(L·H·d) per layer). Glassbox supports windowed Q-buffer management via two policies, controlled by `q_buffer_max_tokens` and `q_buffer_mode`:
-
-> **Which streaming mode is sound for which diagnostic?** A *global* streaming statistic is only correct if the statistic's algebra permits it (additive vs spectral/combinatorial) and the window matches. See [docs/streaming-modes.md](docs/streaming-modes.md) for the per-diagnostic matrix; `GlassboxConfig` rejects unsound mode↔window combinations at construction.
-
-### Sliding window (default)
-
-```yaml
-q_buffer_max_tokens: 512
-q_buffer_mode: sliding
-```
-
-The buffer keeps the last `W` tokens. Each decode step appends one token and trims the oldest. Diagnostics fire per their configured `interval`, so consecutive observations overlap by `W - interval` tokens. This is the natural mode for continuous monitoring.
-
-### Tumbling window
-
-```yaml
-q_buffer_max_tokens: 512
-q_buffer_mode: tumbling
-```
-
-The buffer accumulates until it reaches `W` tokens, then fires all enabled signals and flushes. The window size is the cadence — per-signal `interval` is ignored. Consecutive windows are non-overlapping, which gives **window independence**: each `reduce()` call sees a disjoint block of the sequence.
-
-This matters for streaming accumulation proofs. Many merge strategies (running means, sketches, decomposition additivity) require that local statistics come from independent blocks. Tumbling mode provides that guarantee at the backend level.
-
-### The Diagnostic protocol
-
-Each signal implements the `Diagnostic` protocol (`glassbox/diagnostic.py`):
+Every signal implements the `Diagnostic` protocol (`glassbox/diagnostic.py`) — it is the single dispatch path for all signal computation, batch or streaming. On each fire, the backend hands the diagnostic a window of per-head `(Q, K)` data and calls:
 
 | Method | Purpose |
 |--------|---------|
-| `reduce(Qh, Kh, L)` | Compute local scalar features from the current window |
-| `witness(Qh, Kh, L)` | Per-token localization vector (optional, `emit_witness=True`) |
-| `accumulate(local, state)` | Merge a local `reduce()` result into a running global state |
+| `reduce(Qh, Kh, L, prior_state=...)` | Compute the window's scalar features (the *detect* readout) |
+| `witness(Qh, Kh, L)` | Per-token localization vector (the *localize* readout; optional, `emit_witness=True`) |
+| `accumulate(local, state)` | Persist per-signal state across fires; the backend threads it back into the next `reduce()` as `prior_state` |
 
-`reduce()` is always correct for the window it sees — the SVD, Hodge decomposition, or Laplacian eigenvalues of the windowed attention submatrix are exact. The question is whether accumulated global statistics are meaningful, which depends on the accumulation strategy.
+`reduce()` is always exact for the window it sees — the SVD, Hodge decomposition, or Laplacian eigenvalues of the windowed attention submatrix. Whether statistics *accumulated across windows* are meaningful depends on each signal's algebra; the streaming modes below make that explicit.
 
-Currently `accumulate()` returns the latest local result (no merge). The actual merge logic — proving that specific local→global strategies are correct for each signal — is the contribution of companion streaming papers. The backend provides the windowing modes and accumulation plumbing those papers need.
+### Q-buffer windowing
 
-### When to use which mode
+For long or unbounded sequences, retaining the full Q buffer is impractical (O(L·H·d) per layer). The window each `reduce()` sees is controlled by `q_buffer_max_tokens` and `q_buffer_mode`:
 
-| Scenario | Mode | Why |
-|----------|------|-----|
-| Online monitoring, sliding-window anomaly detection | `sliding` | Overlapping windows give smoother signal, per-signal intervals allow different cadences |
-| Training streaming accumulators, local→global correctness proofs | `tumbling` | Non-overlapping windows give independence, simplifies merge math |
-| Unbounded (full sequence) | Either with `q_buffer_max_tokens=0` | Buffer grows with sequence length, statistics are global |
+- **`sliding` (default)** — keep the last `W` tokens: append one, trim the oldest, each decode step. Signals fire on their own `interval`, so consecutive observations overlap by `W − interval` tokens. The natural mode for continuous monitoring.
+- **`tumbling`** — accumulate `W` tokens, fire *all* enabled signals, flush. The window size is the cadence (per-signal `interval` is ignored). Consecutive windows are disjoint — the **window independence** that additive local→global accumulation requires.
+- **`q_buffer_max_tokens: 0`** — unbounded: the buffer grows with the sequence and every fire sees the full prefix.
+
+```yaml
+q_buffer_max_tokens: 512
+q_buffer_mode: sliding   # or "tumbling"
+```
+
+### Streaming modes
+
+By default each fire reports its own window, and `accumulate()` keeps only the latest result. Signals whose algebra permits it expose streaming flags on their config:
+
+- **`streaming: true`** (block-diagonal global) — sum additive sufficient statistics over disjoint windows (e.g. the `asymmetry` signal's `‖P_asym‖²` / `‖P‖²` Frobenius partials). Sound only over tumbling windows.
+- **`incremental: true`** (exact full-operator) — fold only the delta tokens since the last fire into running state, reproducing the full-sequence statistic exactly (`asymmetry` G/Γ/C; the `cyclic` count). Requires the unbounded buffer.
+
+A *global* streaming statistic is only correct if the statistic's algebra permits it (additive vs spectral/combinatorial) and the window matches. See [docs/streaming-modes.md](docs/streaming-modes.md) for the per-diagnostic matrix; `GlassboxConfig` rejects unsound mode↔window combinations at construction.
 
 ## How We Avoid Materializing The Full `L x L` Matrix
 
