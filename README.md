@@ -31,7 +31,7 @@ At configurable intervals during inference, `glassbox` computes features from di
 | `routing` | degree-normalized `M = D_Q^{-1/2} A D_K^{-1/2}` | SVD spectrum, `phi_hat` (Cheeger conductance), Hodge `G`/`Gamma`/`C`, `commutator_norm` | Dahlem et al. (upcoming) |
 | `asymmetry` | row-stochastic `P` | `G`, `Gamma`, `C` — Hodge gradient/curl split `G²=Γ²+C²` | Dahlem et al. (upcoming) |
 | `cyclic` | pre-softmax `S` (sign tournament) | `T_cyc` — count of non-transitive (cyclic) triangles | Dahlem et al. (upcoming) |
-| `magnetic` | pre-softmax `S` (magnetic Laplacian `L_φ = D − A⊙e^{iθ}`) | `frustration` (λ₁; `0 ⟺ balanced orientation`) | Dahlem et al. (upcoming) |
+| `magnetic` | pre-softmax `S` (magnetic Laplacian `L_φ = D − A⊙e^{iθ}`) | `frustration` (λ₁; `0 ⟺ balanced orientation`), `phase_curl` / `phase_curl_w` (streamable frustration energy) | Dahlem et al. (upcoming) |
 | `tracker` | raw post-softmax `A = softmax(QKᵀ/√d)` | SVD spectrum, `sigma2`, `commutator_norm` | [AttentionTracker](https://arxiv.org/abs/2411.00348) (arXiv:2411.00348) |
 | `selfattn` | attention diagonal `diag(A)` | `attn_diag_logmean`, `eigvals` | [LLM-Check](https://github.com/GaurangSriramanan/LLM_Check_Hallucination_Detection) (NeurIPS 2024) |
 | `laplacian` | in-degree graph Laplacian `L = D_in − A` | `eigvals` (top-k) | [LapEigvals](https://github.com/graphml-lab-pwr/lapeigvals) (EMNLP 2025, [arXiv:2502.17598](https://arxiv.org/abs/2502.17598)) |
@@ -99,8 +99,10 @@ The spectral partner of `cyclic`: the frustration of the Hermitian **magnetic La
 | Feature | Formula | Meaning |
 |---|---|---|
 | `frustration` (`λ₁`) | smallest eigenvalue of `L_φ` (≥ 0) | `0 ⟺` balanced orientation (a coherent global ranking exists); `> 0 ⟺` cyclic preference loops that cannot be gauged away |
+| `phase_curl` | `‖θ‖² − 2‖θ·1‖²/L` (Hodge curl energy of θ) | Streamable frustration energy — eigensolver-free, `0 ⟺` balanced; the same row-sum identity as the asymmetry curl |
+| `phase_curl_w` | `Σ W_ij θ_ij² − 2 Σ b_i²/d_i` (magnitude-weighted curl) | The faithful streamable `λ₁` proxy — downweights weak/near-symmetric edges; the one to monitor in real time |
 
-Dense Hermitian eigendecomposition below the threshold; complex-Hermitian Lanczos above. Gauge-invariant, so it is unchanged by degree normalization. Implementation: `glassbox/diagnostics/magnetic.py`.
+Dense Hermitian eigendecomposition below the threshold; complex-Hermitian Lanczos above. In `incremental` mode the phase-curls stream exactly (delta-token fold, no eigensolve; `frustration` is left `None`). Gauge-invariant, so it is unchanged by degree normalization. Implementation: `glassbox/diagnostics/magnetic.py`; full guide: [docs/magnetic-laplacian.md](docs/magnetic-laplacian.md).
 
 ### Tracker signal — AttentionTracker features (raw post-softmax attention) — [arXiv:2411.00348](https://arxiv.org/abs/2411.00348)
 
@@ -427,6 +429,7 @@ magnetic:
   heads: [0]
   threshold: 512
   block_size: 256
+  incremental: false   # stream the exact phase-curls, skip the eigensolve (unbounded buffer only)
 
 tracker:
   enabled: true
