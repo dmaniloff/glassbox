@@ -8,6 +8,19 @@ The main use case is online or offline analysis of failure modes in LLM generati
 
 The primary implementation is a custom vLLM attention backend in `glassbox/backends/`. There is also an experimental `torch.compile` / FX instrumentation path in `glassbox/passes/`, but the custom backend is the working path.
 
+## Why This Exists
+
+Transformer internals can reveal a great deal about model behavior. They are useful for monitoring, debugging, and failure analysis, but most of the underlying objects are too large to inspect directly in a practical inference setting.
+
+Raw activations and full attention matrices are expensive to retain, and modern attention systems are specifically engineered to avoid materializing the full `L x L` object during efficient inference. Because of that, many tools for inspecting transformer internals live in research harnesses around HuggingFace models rather than in production-grade inference stacks.
+
+That creates a gap between interpretability results in papers and practical deployment in real systems. `glassbox` is built to close that gap by efficiently extracting compact signals of how attention is behaving:
+
+- Is one mode dominating, or are multiple modes active?
+- Is routing bottlenecked through a narrow channel?
+- Is behavior becoming more asymmetric or circulatory over time?
+- Do certain layers or heads shift sharply when the model starts to drift or hallucinate?
+
 ## What It Extracts
 
 At configurable intervals during inference, `glassbox` computes features from different stages of the attention computation. Each signal runs on the attention matrix its mathematics requires — see [docs/operator-choice.md](docs/operator-choice.md) for the operator rationale and causal-masking caveats.
@@ -25,162 +38,7 @@ At configurable intervals during inference, `glassbox` computes features from di
 
 Only `spectral` is enabled by default. Enable any signal via `GlassboxConfig` (e.g. `GlassboxConfig(asymmetry={"enabled": True})`) or the `--signal` CLI flag.
 
-For each tracked `(request, layer, head, step)`, it emits a JSONL record with:
-
-- request metadata
-- layer and head identifiers
-- sequence length `L`
-- top singular values
-- derived spectral features
-- optional routing / Hodge-style features for the normalized operator
-- optional attention tracker features for the raw attention matrix
-
-Those snapshots are represented by `SVDSnapshot` in `glassbox/results.py`.
-
-## Why This Exists
-
-Transformer internals can reveal a great deal about model behavior. They are useful for monitoring, debugging, and failure analysis, but most of the underlying objects are too large to inspect directly in a practical inference setting.
-
-Raw activations and full attention matrices are expensive to retain, and modern attention systems are specifically engineered to avoid materializing the full `L x L` object during efficient inference. Because of that, many tools for inspecting transformer internals live in research harnesses around HuggingFace models rather than in production-grade inference stacks.
-
-That creates a gap between interpretability results in papers and practical deployment in real systems. `glassbox` is built to close that gap by efficiently extracting compact signals of how attention is behaving:
-
-- Is one mode dominating, or are multiple modes active?
-- Is routing bottlenecked through a narrow channel?
-- Is behavior becoming more asymmetric or circulatory over time?
-- Do certain layers or heads shift sharply when the model starts to drift or hallucinate?
-
-
-## How It Integrates With vLLM
-
-The package registers itself through vLLM's plugin entrypoint and exposes a `CUSTOM` attention backend:
-
-- Entry point: `glassbox.vllm_plugin:register_svd_backend`
-- Backend: `glassbox.backends.svd_backend.SVDTritonAttentionBackend`
-
-At runtime, the backend:
-
-1. Calls the normal Triton attention implementation unchanged.
-2. Captures and accumulates `Q` slices across prefill and decode for the active sequence, subject to the configured buffer policy.
-3. Extracts `K` from vLLM's paged KV cache when a snapshot is due.
-4. Dispatches to `Diagnostic.reduce()` for each enabled signal, optionally calling `Diagnostic.accumulate()` to merge local results into a running global state.
-5. Emits snapshots via the handler pipeline (JSONL, OTel, or custom).
-
-This lets you observe attention structure during real generation rather than in a separate offline re-run.
-
-## Streaming Diagnostics
-
-For long or unbounded sequences, retaining the full Q buffer is impractical (O(L·H·d) per layer). Glassbox supports windowed Q-buffer management via two policies, controlled by `q_buffer_max_tokens` and `q_buffer_mode`:
-
-> **Which streaming mode is sound for which diagnostic?** A *global* streaming statistic is only correct if the statistic's algebra permits it (additive vs spectral/combinatorial) and the window matches. See [docs/streaming-modes.md](docs/streaming-modes.md) for the per-diagnostic matrix; `GlassboxConfig` rejects unsound mode↔window combinations at construction.
-
-### Sliding window (default)
-
-```yaml
-q_buffer_max_tokens: 512
-q_buffer_mode: sliding
-```
-
-The buffer keeps the last `W` tokens. Each decode step appends one token and trims the oldest. Diagnostics fire per their configured `interval`, so consecutive observations overlap by `W - interval` tokens. This is the natural mode for continuous monitoring.
-
-### Tumbling window
-
-```yaml
-q_buffer_max_tokens: 512
-q_buffer_mode: tumbling
-```
-
-The buffer accumulates until it reaches `W` tokens, then fires all enabled signals and flushes. The window size is the cadence — per-signal `interval` is ignored. Consecutive windows are non-overlapping, which gives **window independence**: each `reduce()` call sees a disjoint block of the sequence.
-
-This matters for streaming accumulation proofs. Many merge strategies (running means, sketches, decomposition additivity) require that local statistics come from independent blocks. Tumbling mode provides that guarantee at the backend level.
-
-### The Diagnostic protocol
-
-Each signal implements the `Diagnostic` protocol (`glassbox/diagnostic.py`):
-
-| Method | Purpose |
-|--------|---------|
-| `reduce(Qh, Kh, L)` | Compute local scalar features from the current window |
-| `witness(Qh, Kh, L)` | Per-token localization vector (optional, `emit_witness=True`) |
-| `accumulate(local, state)` | Merge a local `reduce()` result into a running global state |
-
-`reduce()` is always correct for the window it sees — the SVD, Hodge decomposition, or Laplacian eigenvalues of the windowed attention submatrix are exact. The question is whether accumulated global statistics are meaningful, which depends on the accumulation strategy.
-
-Currently `accumulate()` returns the latest local result (no merge). The actual merge logic — proving that specific local→global strategies are correct for each signal — is the contribution of companion streaming papers. The backend provides the windowing modes and accumulation plumbing those papers need.
-
-### When to use which mode
-
-| Scenario | Mode | Why |
-|----------|------|-----|
-| Online monitoring, sliding-window anomaly detection | `sliding` | Overlapping windows give smoother signal, per-signal intervals allow different cadences |
-| Training streaming accumulators, local→global correctness proofs | `tumbling` | Non-overlapping windows give independence, simplifies merge math |
-| Unbounded (full sequence) | Either with `q_buffer_max_tokens=0` | Buffer grows with sequence length, statistics are global |
-
-## How We Avoid Materializing The Full `L x L` Matrix
-
-The key design goal is to avoid building full score or attention matrices whenever sequence length grows.
-
-### 1. Matrix-free multiplies for `S = QK^T`
-
-For any vector `v`:
-
-- `Sv = Q(K^T v)`
-- `S^T u = K(Q^T u)`
-
-That means applying `S` or `S^T` only requires two thin `L x d` multiplies instead of constructing an `L x L` matrix. In code, this is implemented by:
-
-- `matvec_S()` in `glassbox/svd.py`
-- `matvec_ST()` in `glassbox/svd.py`
-
-Both the randomized SVD and Lanczos implementations consume only these matvecs.
-
-### 2. Randomized SVD and Lanczos operate on operators, not matrices
-
-`glassbox/svd.py` provides:
-
-- `randomized_svd()`
-- `svd_via_lanczos()`
-
-Both operate on callables `matvec` and `matvec_t`, so they never require the full matrix to exist in memory.
-
-### 3. Blocked row streaming for post-softmax attention
-
-For the degree-normalized operator, some quantities depend on softmaxed attention. When sequence length is large, `glassbox` uses blocked streaming:
-
-- `apply_A_blocked()`
-- `apply_AT_blocked()`
-- `compute_dk_blocked()`
-- `compute_logsumexp_blocked()`
-- `matvec_M_blocked()`
-- `matvec_MT_blocked()`
-
-These compute the effect of `A` or `M` in row blocks, keeping memory bounded by the block size instead of `L^2`.
-
-### 4. Two-tier execution for the normalized operator
-
-For shorter sequences, `glassbox` will materialize the normalized operator because it is simple and exact. For longer sequences, it switches to the matrix-free path.
-
-In practice:
-
-- if `L <= threshold`, use a materialized path
-- if `L > threshold`, use blocked matrix-free operators
-
-Both tiers produce equivalent results within numerical tolerance. The materialized path is *faster* for short sequences (~1.8× at L=256 on A10G) and the matrix-free path wins for long ones; the default `512` sits near the crossover. Setting `threshold=0` forces the matrix-free path for every sequence (`L > 0` is always true), guaranteeing no full `L×L` matrix is ever materialized — useful for memory-constrained deployments or streaming with large windows, at the cost of the small-L speedup.
-
-That behavior is implemented in each threshold-based diagnostic's `reduce()` method (routing, tracker, selfattn, laplacian).
-
-### 5. On-demand entry lookup for curl estimates
-
-Some routing metrics need access to selected entries of `M`. Instead of building all of `M`, the matrix-free path computes only sampled entries on demand with `get_M_entries_batch()` in `glassbox/svd.py`.
-
-## Features We Compute
-
-> **Which operator?** Each diagnostic runs on the attention matrix its mathematics requires —
-> conductance on the degree-normalized **M**, Hodge asymmetry (the `asymmetry` signal, G) on the
-> row-stochastic post-softmax **P**, and cyclic-triangle/tournament signals on the pre-softmax
-> scores **S = QKᵀ**. These are not interchangeable. See
-> [docs/operator-choice.md](docs/operator-choice.md) for the rationale (with paper references)
-> and the causal-masking caveats.
+Each observation is emitted as an `SVDSnapshot` (`glassbox/results.py`) — see [Output Format](#output-format).
 
 ### Spectral signal — scores matrix features (pre-softmax scores)
 
@@ -314,6 +172,128 @@ These summarize how curl-like behavior is distributed across important value dim
 
 These modulate routing features by the effective LayerNorm gain, with the goal of emphasizing heads and layers whose routed signal is more strongly amplified by the surrounding network.
 
+## How It Integrates With vLLM
+
+The package registers itself through vLLM's plugin entrypoint and exposes a `CUSTOM` attention backend:
+
+- Entry point: `glassbox.vllm_plugin:register_svd_backend`
+- Backend: `glassbox.backends.svd_backend.SVDTritonAttentionBackend`
+
+At runtime, the backend:
+
+1. Calls the normal Triton attention implementation unchanged.
+2. Captures and accumulates `Q` slices across prefill and decode for the active sequence, subject to the configured buffer policy.
+3. Extracts `K` from vLLM's paged KV cache when a snapshot is due.
+4. Dispatches to `Diagnostic.reduce()` for each enabled signal, optionally calling `Diagnostic.accumulate()` to merge local results into a running global state.
+5. Emits snapshots via the handler pipeline (JSONL, OTel, or custom).
+
+This lets you observe attention structure during real generation rather than in a separate offline re-run.
+
+## Streaming Diagnostics
+
+For long or unbounded sequences, retaining the full Q buffer is impractical (O(L·H·d) per layer). Glassbox supports windowed Q-buffer management via two policies, controlled by `q_buffer_max_tokens` and `q_buffer_mode`:
+
+> **Which streaming mode is sound for which diagnostic?** A *global* streaming statistic is only correct if the statistic's algebra permits it (additive vs spectral/combinatorial) and the window matches. See [docs/streaming-modes.md](docs/streaming-modes.md) for the per-diagnostic matrix; `GlassboxConfig` rejects unsound mode↔window combinations at construction.
+
+### Sliding window (default)
+
+```yaml
+q_buffer_max_tokens: 512
+q_buffer_mode: sliding
+```
+
+The buffer keeps the last `W` tokens. Each decode step appends one token and trims the oldest. Diagnostics fire per their configured `interval`, so consecutive observations overlap by `W - interval` tokens. This is the natural mode for continuous monitoring.
+
+### Tumbling window
+
+```yaml
+q_buffer_max_tokens: 512
+q_buffer_mode: tumbling
+```
+
+The buffer accumulates until it reaches `W` tokens, then fires all enabled signals and flushes. The window size is the cadence — per-signal `interval` is ignored. Consecutive windows are non-overlapping, which gives **window independence**: each `reduce()` call sees a disjoint block of the sequence.
+
+This matters for streaming accumulation proofs. Many merge strategies (running means, sketches, decomposition additivity) require that local statistics come from independent blocks. Tumbling mode provides that guarantee at the backend level.
+
+### The Diagnostic protocol
+
+Each signal implements the `Diagnostic` protocol (`glassbox/diagnostic.py`):
+
+| Method | Purpose |
+|--------|---------|
+| `reduce(Qh, Kh, L)` | Compute local scalar features from the current window |
+| `witness(Qh, Kh, L)` | Per-token localization vector (optional, `emit_witness=True`) |
+| `accumulate(local, state)` | Merge a local `reduce()` result into a running global state |
+
+`reduce()` is always correct for the window it sees — the SVD, Hodge decomposition, or Laplacian eigenvalues of the windowed attention submatrix are exact. The question is whether accumulated global statistics are meaningful, which depends on the accumulation strategy.
+
+Currently `accumulate()` returns the latest local result (no merge). The actual merge logic — proving that specific local→global strategies are correct for each signal — is the contribution of companion streaming papers. The backend provides the windowing modes and accumulation plumbing those papers need.
+
+### When to use which mode
+
+| Scenario | Mode | Why |
+|----------|------|-----|
+| Online monitoring, sliding-window anomaly detection | `sliding` | Overlapping windows give smoother signal, per-signal intervals allow different cadences |
+| Training streaming accumulators, local→global correctness proofs | `tumbling` | Non-overlapping windows give independence, simplifies merge math |
+| Unbounded (full sequence) | Either with `q_buffer_max_tokens=0` | Buffer grows with sequence length, statistics are global |
+
+## How We Avoid Materializing The Full `L x L` Matrix
+
+The key design goal is to avoid building full score or attention matrices whenever sequence length grows.
+
+### 1. Matrix-free multiplies for `S = QK^T`
+
+For any vector `v`:
+
+- `Sv = Q(K^T v)`
+- `S^T u = K(Q^T u)`
+
+That means applying `S` or `S^T` only requires two thin `L x d` multiplies instead of constructing an `L x L` matrix. In code, this is implemented by:
+
+- `matvec_S()` in `glassbox/svd.py`
+- `matvec_ST()` in `glassbox/svd.py`
+
+Both the randomized SVD and Lanczos implementations consume only these matvecs.
+
+### 2. Randomized SVD and Lanczos operate on operators, not matrices
+
+`glassbox/svd.py` provides:
+
+- `randomized_svd()`
+- `svd_via_lanczos()`
+
+Both operate on callables `matvec` and `matvec_t`, so they never require the full matrix to exist in memory.
+
+### 3. Blocked row streaming for post-softmax attention
+
+For the degree-normalized operator, some quantities depend on softmaxed attention. When sequence length is large, `glassbox` uses blocked streaming:
+
+- `apply_A_blocked()`
+- `apply_AT_blocked()`
+- `compute_dk_blocked()`
+- `compute_logsumexp_blocked()`
+- `matvec_M_blocked()`
+- `matvec_MT_blocked()`
+
+These compute the effect of `A` or `M` in row blocks, keeping memory bounded by the block size instead of `L^2`.
+
+### 4. Two-tier execution for the normalized operator
+
+For shorter sequences, `glassbox` will materialize the normalized operator because it is simple and exact. For longer sequences, it switches to the matrix-free path.
+
+In practice:
+
+- if `L <= threshold`, use a materialized path
+- if `L > threshold`, use blocked matrix-free operators
+
+Both tiers produce equivalent results within numerical tolerance. The materialized path is *faster* for short sequences (~1.8× at L=256 on A10G) and the matrix-free path wins for long ones; the default `512` sits near the crossover. Setting `threshold=0` forces the matrix-free path for every sequence (`L > 0` is always true), guaranteeing no full `L×L` matrix is ever materialized — useful for memory-constrained deployments or streaming with large windows, at the cost of the small-L speedup.
+
+That behavior is implemented in each threshold-based diagnostic's `reduce()` method (routing, tracker, selfattn, laplacian).
+
+### 5. On-demand entry lookup for transpose access
+
+Some asymmetry computations need entries of `Mᵀ` (e.g. `M[j,i]` while streaming row block `i`). Instead of building all of `M`, the matrix-free path computes only the needed entries on demand with `get_M_entries_batch()` in `glassbox/svd.py`.
+
 ## Signal Emission Architecture
 
 Extracted signals flow through a pluggable handler system with two tiers, designed for two downstream use cases: **offline training** of detection models and **real-time inference-time detection**.
@@ -369,7 +349,7 @@ SVDTritonAttentionImpl._handlers.append(MyHandler())
 
 The backend emits one JSON object per observation. Each row contains:
 
-- `signal`: `spectral`, `routing`, `tracker`, `selfattn`, or `laplacian`
+- `signal`: which signal produced the row (`spectral`, `routing`, `asymmetry`, `cyclic`, `magnetic`, `tracker`, `selfattn`, or `laplacian`)
 - `request_id`
 - `layer` and `layer_idx`
 - `head`
