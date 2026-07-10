@@ -147,37 +147,48 @@ class MagneticDiagnostic:
         New token t adds edges (t, j) for j < t. θ is antisymmetric (θ_jt = −θ_tj); W and the
         degree d are symmetric. Maintains the unweighted (r_θ, ‖θ‖²) and W-weighted (b, d, ΣWθ²)
         stats in O(L) state, O((L−n_prev)·L) work. Mirrors the asymmetry incremental fold.
+
+        The delta rows are processed in ``block_size`` chunks so a large fold — the batch
+        matrix-free call folds all L tokens at once — stays O(block·L) memory like ``_degree``,
+        never materializing the full [L, L] θ/W. Chunking cannot change the sums: each unordered
+        pair {j, t} is counted exactly once (at t's chunk, via the global j < t mask) and every
+        update is additive.
         """
         n_prev = stats["n"]
         if L <= n_prev:
             return stats
         scale = 1.0 / math.sqrt(Qh.shape[1])
-        lo = n_prev
-        Sb = (Qh[lo:L] @ Kh.T * scale).to(torch.float32)  # S[t, j]
-        SbT = (Kh[lo:L] @ Qh.T * scale).to(torch.float32)  # S[j, t]
-        W, theta = self._phase_and_magnitude(Sb, SbT)  # [B, L]
-        rows = torch.arange(lo, L, device=Qh.device).unsqueeze(1)
-        cols = torch.arange(L, device=Qh.device).unsqueeze(0)
-        mask = cols < rows  # keep new pairs j < t
-        th = torch.where(mask, theta, torch.zeros_like(theta))
-        Wm = torch.where(mask, W, torch.zeros_like(W))
-        Wth = Wm * th
         r, b, d = stats["r"], stats["b"], stats["d"]
         if r.shape[0] < L:  # grow O(L) vectors to the current width
             pad = L - r.shape[0]
             r = torch.cat([r, r.new_zeros(pad)])
             b = torch.cat([b, b.new_zeros(pad)])
             d = torch.cat([d, d.new_zeros(pad)])
-        # unweighted: r_θ (antisymmetric), ‖θ‖²
-        theta_sq = stats["theta_sq"] + 2.0 * float((th * th).sum().item())
-        r = r - th.sum(dim=0)
-        r[lo:L] = r[lo:L] + th.sum(dim=1)
-        # W-weighted: b = Σ_j W_ij θ_ij (antisymmetric), d = Σ_j W_ij (symmetric), Σ W_ij θ_ij²
-        total_w = stats["total_w"] + 2.0 * float((Wm * th * th).sum().item())
-        b = b - Wth.sum(dim=0)
-        b[lo:L] = b[lo:L] + Wth.sum(dim=1)
-        d = d + Wm.sum(dim=0)
-        d[lo:L] = d[lo:L] + Wm.sum(dim=1)
+        else:  # copy so the caller's prior-state tensors are never mutated
+            r, b, d = r.clone(), b.clone(), d.clone()
+        theta_sq = stats["theta_sq"]
+        total_w = stats["total_w"]
+        cols = torch.arange(L, device=Qh.device).unsqueeze(0)
+        for c0 in range(n_prev, L, self.block_size):
+            c1 = min(c0 + self.block_size, L)
+            Sb = (Qh[c0:c1] @ Kh.T * scale).to(torch.float32)  # S[t, j]
+            SbT = (Kh[c0:c1] @ Qh.T * scale).to(torch.float32)  # S[j, t]
+            W, theta = self._phase_and_magnitude(Sb, SbT)  # [bs, L]
+            rows = torch.arange(c0, c1, device=Qh.device).unsqueeze(1)
+            mask = cols < rows  # keep new pairs j < t
+            th = torch.where(mask, theta, torch.zeros_like(theta))
+            Wm = torch.where(mask, W, torch.zeros_like(W))
+            Wth = Wm * th
+            # unweighted: r_θ (antisymmetric), ‖θ‖²
+            theta_sq = theta_sq + 2.0 * float((th * th).sum().item())
+            r = r - th.sum(dim=0)
+            r[c0:c1] = r[c0:c1] + th.sum(dim=1)
+            # W-weighted: b = Σ_j W_ij θ_ij (antisymmetric), d = Σ_j W_ij (symmetric), Σ W_ij θ_ij²
+            total_w = total_w + 2.0 * float((Wm * th * th).sum().item())
+            b = b - Wth.sum(dim=0)
+            b[c0:c1] = b[c0:c1] + Wth.sum(dim=1)
+            d = d + Wm.sum(dim=0)
+            d[c0:c1] = d[c0:c1] + Wm.sum(dim=1)
         return {"r": r, "theta_sq": theta_sq, "b": b, "d": d, "total_w": total_w, "n": L}
 
     def _matrix_free(self, Qh, Kh, L) -> tuple:

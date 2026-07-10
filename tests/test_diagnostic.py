@@ -635,6 +635,7 @@ class TestAsymmetryRobustness:
         cold = diag.reduce(Q, K, 20, prior_state=None)["features"].G  # no threaded state
         assert abs(warm - cold) < 1e-6
 
+
 class TestMagneticStreaming:
     """Streamable frustration: phase-field Hodge curl energy (eigensolver-free, issue #68)."""
 
@@ -689,6 +690,17 @@ class TestMagneticStreaming:
         Q = torch.randn(L, D)
         f = MagneticDiagnostic(incremental=True).reduce(Q, Q, L)["features"]
         assert f.phase_curl < 1e-5 and f.phase_curl_w < 1e-5
+
+    def test_blocked_fold_matches_single_shot(self):
+        # The fold is chunked by block_size (memory O(block·L), like _degree); chunking
+        # must not change the sums. 33 rows with block 4 exercises an uneven tail chunk.
+        torch.manual_seed(5)
+        N = 33
+        Q, K = torch.randn(N, D), torch.randn(N, D)
+        one = MagneticDiagnostic(incremental=True, block_size=1024).reduce(Q, K, N)["features"]
+        chunked = MagneticDiagnostic(incremental=True, block_size=4).reduce(Q, K, N)["features"]
+        assert abs(one.phase_curl - chunked.phase_curl) < 1e-4
+        assert abs(one.phase_curl_w - chunked.phase_curl_w) < 1e-4
 
     def test_phase_curl_w_tracks_lambda1_better(self):
         # The whole point: the W-weighted curl is a tighter lambda1 proxy than the unweighted.
