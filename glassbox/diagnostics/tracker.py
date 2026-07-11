@@ -54,6 +54,7 @@ class TrackerDiagnostic:
                 method=self.method,
                 block_size=self.block_size,
                 causal=self.causal,
+                matvec_strategy=ctx.get("matvec_strategy", "batched"),
             )
 
         return {
