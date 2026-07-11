@@ -2,7 +2,8 @@
 
 ``fused_attn_multi_matvec``: computes ``softmax(Q @ K^T * scale) @ Omega``
 using online softmax (never materialises full attention rows) and a single
-kernel launch.  Forward direction only — the transpose direction
+kernel launch, with optional causal masking (col > row -> -inf, matching
+``svd._mask_causal``).  Forward direction only — the transpose direction
 (``A^T @ U``) stays PyTorch-batched because online softmax is incompatible
 with transpose accumulation.
 
@@ -47,11 +48,15 @@ if HAS_TRITON:
         N_VECS_PAD: tl.constexpr,
         TILE_Q: tl.constexpr,
         TILE_K: tl.constexpr,
+        CAUSAL: tl.constexpr,
     ):
         """Online-softmax fused attention × multi-vector multiply.
 
         Each program instance handles one TILE_Q-row strip of Q, iterates over
         all K tiles, and writes TILE_Q rows × N_VECS columns of the output.
+        With CAUSAL, scores at col > row are masked to -inf inside the online
+        softmax (same convention as ``svd._mask_causal``: diagonal kept), and
+        K tiles entirely above the strip's diagonal are skipped.
         """
         pid = tl.program_id(0)
         q_start = pid * TILE_Q
@@ -76,7 +81,13 @@ if HAS_TRITON:
         l_i = tl.zeros([TILE_Q], dtype=tl.float32)
         acc = tl.zeros([TILE_Q, N_VECS_PAD], dtype=tl.float32)
 
-        num_k_tiles = tl.cdiv(L_k, TILE_K)
+        # Causal: no row in this strip attends past q_start + TILE_Q - 1, so
+        # K tiles fully above the diagonal are never visited.
+        if CAUSAL:
+            k_end = tl.minimum(q_start + TILE_Q, L_k)
+        else:
+            k_end = L_k
+        num_k_tiles = tl.cdiv(k_end, TILE_K)
         for j in range(num_k_tiles):
             k_start = j * TILE_K
             offs_k = k_start + tl.arange(0, TILE_K)
@@ -92,6 +103,8 @@ if HAS_TRITON:
             # S = Q_tile @ K_tile^T * scale : [TILE_Q, TILE_K]
             S = tl.dot(Q_tile, tl.trans(K_tile)) * scale
             S = tl.where(k_mask[None, :], S, float("-inf"))
+            if CAUSAL:
+                S = tl.where(offs_k[None, :] <= offs_q[:, None], S, float("-inf"))
 
             # Online softmax update
             m_j = tl.maximum(m_i, tl.max(S, axis=1))
@@ -131,6 +144,7 @@ if HAS_TRITON:
         scale: float,
         tile_q: int = 64,
         tile_k: int = 64,
+        causal: bool = False,
     ) -> torch.Tensor:
         """Compute ``softmax(Q @ K^T * scale) @ Omega`` via a fused Triton kernel.
 
@@ -148,6 +162,8 @@ if HAS_TRITON:
             scale: attention scale factor (typically 1/sqrt(d)).
             tile_q: Q-dimension tile size (default 64).
             tile_k: K-dimension tile size (default 64).
+            causal: mask scores at col > row (matches ``svd._mask_causal``);
+                rows are global Q indices, so pass the full Q.
 
         Returns:
             [L_q, n_vecs] result of ``A @ Omega``.
@@ -187,6 +203,7 @@ if HAS_TRITON:
             N_VECS_PAD=N_VECS_PAD,
             TILE_Q=tile_q,
             TILE_K=tile_k,
+            CAUSAL=causal,
         )
 
         return output

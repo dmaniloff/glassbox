@@ -150,12 +150,13 @@ def build_forward_matvec(
 ):
     """Forward matvec closure ``v -> A @ v`` (or ``M @ v`` when ``d_k_inv_sqrt`` is given).
 
-    With ``strategy="triton"`` (and Triton importable, a CUDA tensor, and ``causal=False``)
-    the fused online-softmax kernel computes ``A @ Omega`` for 2D ``Omega`` without
-    materializing the L×L scores. It is **forward-only and non-causal** (online softmax has no
-    causal mask), so a causal call, a 1D vector, or any kernel runtime error falls back to the
-    blocked PyTorch matvec. ``strategy`` "loop"/"batched" always use the blocked path. The
-    transpose ``matvec_t`` always stays blocked (the kernel cannot transpose).
+    With ``strategy="triton"`` (and Triton importable and a CUDA tensor) the fused
+    online-softmax kernel computes ``A @ Omega`` for 2D ``Omega`` without materializing the
+    L×L scores; causal masking is applied inside the kernel (same convention as
+    ``_mask_causal``). It is **forward-only**, so a 1D vector or any kernel runtime error
+    falls back to the blocked PyTorch matvec. ``strategy`` "loop"/"batched" always use the
+    blocked path. The transpose ``matvec_t`` always stays blocked (the kernel cannot
+    transpose).
     """
 
     def _blocked(v):
@@ -163,7 +164,7 @@ def build_forward_matvec(
             return matvec_M_blocked(Q, K, v, d_k_inv_sqrt, scale, block_size, causal=causal)
         return apply_A_blocked(Q, K, v, scale, block_size, causal=causal)
 
-    if strategy != "triton" or causal or not Q.is_cuda:
+    if strategy != "triton" or not Q.is_cuda:
         return _blocked
 
     try:
@@ -178,7 +179,7 @@ def build_forward_matvec(
             return _blocked(v)
         omega = d_k_inv_sqrt.unsqueeze(1) * v if d_k_inv_sqrt is not None else v
         try:
-            return fused_attn_multi_matvec(Q, K, omega, scale)
+            return fused_attn_multi_matvec(Q, K, omega, scale, causal=causal)
         except Exception:  # pragma: no cover - runtime kernel failure -> safe fallback
             return _blocked(v)
 
