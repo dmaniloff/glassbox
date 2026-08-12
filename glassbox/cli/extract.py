@@ -173,9 +173,6 @@ _AD_FEATURE_NAMES = [
 ]
 
 
-_META_COLUMNS = ["request_id", "label", "length", "sample_id", "phase", "prompt_length", "source"]
-
-
 def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
     """Extract scalar features from a snapshot, raising on unexpected types.
 
@@ -265,7 +262,7 @@ def _write_parquet(
 
     Output has one row per request (i.e. per phase) with columns:
         {signal}_{feature}_L{layer}_H{head}  (e.g. spectral_sv_ratio_L0_H0)
-        label, source, length, phase, sample_id
+        request_id, label, length, sample_id, phase, prompt_length, source
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
