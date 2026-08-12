@@ -11,11 +11,13 @@ from glassbox.config import (
     AsymmetryConfig,
     CyclicTrianglesConfig,
     GlassboxConfig,
+    IncrementalMode,
     LaplacianConfig,
     MagneticConfig,
     RoutingConfig,
     SelfAttnConfig,
     SpectralConfig,
+    StreamingMode,
     TrackerConfig,
 )
 from glassbox.diagnostic import Diagnostic
@@ -84,16 +86,34 @@ class TestRegistry:
         columns and no test that could catch it.
         """
         config = GlassboxConfig()
+        torch.manual_seed(0)
         Q = torch.randn(24, 8)
         K = torch.randn(24, 8)
+
+        # Each opt-in mode is a separate return site in reduce(); the default config
+        # reaches only one of them.  Deriving the extra modes from the capability
+        # mixins means a signal that opts into one later is covered without editing
+        # this test -- the same reason #76 replaced the hand-kept signal-name sets.
+        modes = {
+            "incremental": GlassboxConfig.signals_with(IncrementalMode),
+            "streaming": GlassboxConfig.signals_with(StreamingMode),
+        }
+
         for name, cls in DIAGNOSTIC_REGISTRY.items():
             model = getattr(cls, "features_model", None)
             assert isinstance(model, type), f"{name} does not declare a features_model"
-            produced = cls(config.signals[name]).reduce(Q, K, 24)["features"]
-            assert isinstance(produced, model), (
-                f"{name} declares features_model={model.__name__} "
-                f"but reduce() returned {type(produced).__name__}"
-            )
+
+            variants = {"default": config.signals[name]}
+            for field, owners in modes.items():
+                if name in owners:
+                    variants[field] = config.signals[name].model_copy(update={field: True})
+
+            for label, sig_cfg in variants.items():
+                produced = cls(sig_cfg).reduce(Q, K, 24)["features"]
+                assert isinstance(produced, model), (
+                    f"{name} ({label} mode) declares features_model={model.__name__} "
+                    f"but reduce() returned {type(produced).__name__}"
+                )
 
     def test_registry_keys_are_the_diagnostics_own_signal_name(self):
         """The registry is derived from ``signal_name``, so the two cannot disagree."""
