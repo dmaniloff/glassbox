@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
 )
 
-from glassbox.config import SIGNAL_NAMES, GlassboxConfig, SignalConfigBase
+from glassbox.config import GlassboxConfig, SignalConfigBase
 from glassbox.diagnostics import DIAGNOSTIC_REGISTRY
 from glassbox.handlers import LoggingHandler, create_handlers_from_config
 from glassbox.qbuffer import QBuffer
@@ -149,7 +149,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         """Instantiate Diagnostic objects from config for each signal."""
         cls._diagnostics = {}
         for sig_name, diag_cls in DIAGNOSTIC_REGISTRY.items():
-            sig_cfg = getattr(cls.config, sig_name)
+            sig_cfg = cls.config.signals[sig_name]
             # Strip orchestration fields (enabled/interval/heads); the rest are
             # the diagnostic's algorithm params. Derived from the base so adding
             # an orchestration field there keeps it out of the constructor.
@@ -186,16 +186,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             return result
 
         # Skip if no signals enabled
-        if not (
-            self.config.spectral.enabled
-            or self.config.routing.enabled
-            or self.config.asymmetry.enabled
-            or self.config.cyclic.enabled
-            or self.config.magnetic.enabled
-            or self.config.tracker.enabled
-            or self.config.selfattn.enabled
-            or self.config.laplacian.enabled
-        ):
+        if not any(cfg.enabled for cfg in self.config.signals.values()):
             return result
 
         # 3. Accumulate Q for the first sequence in the batch
@@ -243,16 +234,16 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         if state.qbuf.tumbling:
             # Window size IS the cadence — per-signal interval is ignored.
             if state.qbuf.window_complete():
-                due_signals = {s for s in SIGNAL_NAMES if getattr(self.config, s).enabled}
+                due_signals = {n for n, cfg in self.config.signals.items() if cfg.enabled}
             else:
                 due_signals = set()
         else:
             # Sliding: per-signal interval check (buffer already trimmed on append).
-            due_signals = set()
-            for sig_name in SIGNAL_NAMES:
-                sig_cfg = getattr(self.config, sig_name)
-                if sig_cfg.enabled and state.step % sig_cfg.interval == 0:
-                    due_signals.add(sig_name)
+            due_signals = {
+                name
+                for name, sig_cfg in self.config.signals.items()
+                if sig_cfg.enabled and state.step % sig_cfg.interval == 0
+            }
 
         if due_signals:
             try:
@@ -363,7 +354,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         # Union of active heads for due signals
         heads: set[int] = set()
         for sig_name in due_signals:
-            heads.update(getattr(self.config, sig_name).heads)
+            heads.update(self.config.signals[sig_name].heads)
 
         for head_idx in sorted(heads):
             if head_idx >= Q_all.shape[1]:
@@ -374,7 +365,7 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
             Kh = K_all[:, kv_head_idx, :]
 
             for sig_name in due_signals:
-                sig_cfg = getattr(self.config, sig_name)
+                sig_cfg = self.config.signals[sig_name]
                 if head_idx not in sig_cfg.heads:
                     continue
                 diag = cls._diagnostics.get(sig_name)
