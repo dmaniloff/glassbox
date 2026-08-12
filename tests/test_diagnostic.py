@@ -7,7 +7,19 @@ import pydantic
 import pytest
 import torch
 
-from glassbox.config import AsymmetryConfig, GlassboxConfig
+from glassbox.config import (
+    AsymmetryConfig,
+    CyclicTrianglesConfig,
+    GlassboxConfig,
+    IncrementalMode,
+    LaplacianConfig,
+    MagneticConfig,
+    RoutingConfig,
+    SelfAttnConfig,
+    SpectralConfig,
+    StreamingMode,
+    TrackerConfig,
+)
 from glassbox.diagnostic import Diagnostic
 from glassbox.diagnostics import (
     DIAGNOSTIC_REGISTRY,
@@ -54,15 +66,76 @@ class TestRegistry:
         }
 
     def test_protocol_conformance(self):
+        """Every registered diagnostic builds from its own config and satisfies the Protocol.
+
+        Constructing via ``config.signals[name]`` is the production path (see
+        ``SVDTritonAttentionImpl._build_diagnostics``), so this also pins that a
+        diagnostic accepts the config class paired with it by the registry.
+        """
+        config = GlassboxConfig()
         for name, cls in DIAGNOSTIC_REGISTRY.items():
-            instance = cls()
+            instance = cls(config.signals[name])
             assert isinstance(instance, Diagnostic), f"{name} does not satisfy Diagnostic protocol"
+
+    def test_every_diagnostic_declares_its_features_model(self):
+        """``features_model`` must be declared, and must be what ``reduce`` actually returns.
+
+        Declaring it lets a caller ask which columns a signal produces without running it.
+        The pairing used to be written by hand in ``cli/extract.py``; the three signals added
+        after that code was written were never added to it, leaving them with no parquet
+        columns and no test that could catch it.
+        """
+        config = GlassboxConfig()
+        torch.manual_seed(0)
+        Q = torch.randn(24, 8)
+        K = torch.randn(24, 8)
+
+        # Each opt-in mode is a separate return site in reduce(); the default config
+        # reaches only one of them.  Deriving the extra modes from the capability
+        # mixins means a signal that opts into one later is covered without editing
+        # this test -- the same reason #76 replaced the hand-kept signal-name sets.
+        modes = {
+            "incremental": GlassboxConfig.signals_with(IncrementalMode),
+            "streaming": GlassboxConfig.signals_with(StreamingMode),
+        }
+
+        for name, cls in DIAGNOSTIC_REGISTRY.items():
+            model = getattr(cls, "features_model", None)
+            assert isinstance(model, type), f"{name} does not declare a features_model"
+
+            variants = {"default": config.signals[name]}
+            for field, owners in modes.items():
+                if name in owners:
+                    variants[field] = config.signals[name].model_copy(update={field: True})
+
+            for label, sig_cfg in variants.items():
+                produced = cls(sig_cfg).reduce(Q, K, 24)["features"]
+                assert isinstance(produced, model), (
+                    f"{name} ({label} mode) declares features_model={model.__name__} "
+                    f"but reduce() returned {type(produced).__name__}"
+                )
+
+    def test_registry_keys_are_the_diagnostics_own_signal_name(self):
+        """The registry is derived from ``signal_name``, so the two cannot disagree."""
+        for name, cls in DIAGNOSTIC_REGISTRY.items():
+            assert cls.signal_name == name
+
+    def test_construction_enforces_config_bounds(self):
+        """Taking the config means the field bounds apply.
+
+        Loose kwargs bypassed them entirely: ``AsymmetryDiagnostic(n_hutchinson=0)`` used to
+        build fine and then divide by zero.
+        """
+        with pytest.raises(pydantic.ValidationError):
+            AsymmetryDiagnostic(AsymmetryConfig(n_hutchinson=0))
+        with pytest.raises(pydantic.ValidationError):
+            AsymmetryDiagnostic(AsymmetryConfig(threshold=-1))
 
 
 class TestSpectralDiagnostic:
     def test_reduce_returns_features(self, qk):
         Q, K = qk
-        diag = SpectralDiagnostic(rank=2, method="randomized")
+        diag = SpectralDiagnostic(SpectralConfig(rank=2, method="randomized"))
         result = diag.reduce(Q, K, L)
         assert "features" in result
         assert "singular_values" in result
@@ -70,12 +143,12 @@ class TestSpectralDiagnostic:
 
     def test_witness_not_implemented(self, qk):
         Q, K = qk
-        diag = SpectralDiagnostic()
+        diag = SpectralDiagnostic(SpectralConfig())
         with pytest.raises(NotImplementedError):
             diag.witness(Q, K, L)
 
     def test_accumulate_returns_local(self):
-        diag = SpectralDiagnostic()
+        diag = SpectralDiagnostic(SpectralConfig())
         local = {"features": "test"}
         assert diag.accumulate(local, None) is local
         assert diag.accumulate(local, {"old": True}) is local
@@ -84,7 +157,7 @@ class TestSpectralDiagnostic:
 class TestRoutingDiagnostic:
     def test_reduce_materialized(self, qk):
         Q, K = qk
-        diag = RoutingDiagnostic(rank=2, threshold=1024)
+        diag = RoutingDiagnostic(RoutingConfig(rank=2, threshold=1024))
         result = diag.reduce(Q, K, L)
         assert "features" in result
         assert result["tier"] == "materialized"
@@ -92,7 +165,7 @@ class TestRoutingDiagnostic:
 
     def test_reduce_matrix_free(self, qk):
         Q, K = qk
-        diag = RoutingDiagnostic(rank=2, threshold=4, block_size=4)
+        diag = RoutingDiagnostic(RoutingConfig(rank=2, threshold=4, block_size=4))
         result = diag.reduce(Q, K, L)
         assert "features" in result
         assert result["tier"] == "matrix_free"
@@ -104,14 +177,14 @@ class TestRoutingDiagnostic:
 class TestTrackerDiagnostic:
     def test_reduce_materialized(self, qk):
         Q, K = qk
-        diag = TrackerDiagnostic(rank=2, threshold=1024)
+        diag = TrackerDiagnostic(TrackerConfig(rank=2, threshold=1024))
         result = diag.reduce(Q, K, L)
         assert "features" in result
         assert result["tier"] == "materialized"
 
     def test_reduce_matrix_free(self, qk):
         Q, K = qk
-        diag = TrackerDiagnostic(rank=2, threshold=4, block_size=4)
+        diag = TrackerDiagnostic(TrackerConfig(rank=2, threshold=4, block_size=4))
         result = diag.reduce(Q, K, L)
         assert result["tier"] == "matrix_free"
 
@@ -119,14 +192,14 @@ class TestTrackerDiagnostic:
 class TestSelfAttnDiagnostic:
     def test_reduce_materialized(self, qk):
         Q, K = qk
-        diag = SelfAttnDiagnostic(top_k=5, threshold=1024)
+        diag = SelfAttnDiagnostic(SelfAttnConfig(top_k=5, threshold=1024))
         result = diag.reduce(Q, K, L)
         assert "features" in result
         assert result["tier"] == "materialized"
 
     def test_reduce_matrix_free(self, qk):
         Q, K = qk
-        diag = SelfAttnDiagnostic(top_k=5, threshold=4, block_size=4)
+        diag = SelfAttnDiagnostic(SelfAttnConfig(top_k=5, threshold=4, block_size=4))
         result = diag.reduce(Q, K, L)
         assert result["tier"] == "matrix_free"
 
@@ -134,14 +207,14 @@ class TestSelfAttnDiagnostic:
 class TestLaplacianDiagnostic:
     def test_reduce_materialized(self, qk):
         Q, K = qk
-        diag = LaplacianDiagnostic(top_k=5, threshold=1024)
+        diag = LaplacianDiagnostic(LaplacianConfig(top_k=5, threshold=1024))
         result = diag.reduce(Q, K, L)
         assert "features" in result
         assert result["tier"] == "materialized"
 
     def test_reduce_matrix_free(self, qk):
         Q, K = qk
-        diag = LaplacianDiagnostic(top_k=5, threshold=4, block_size=4)
+        diag = LaplacianDiagnostic(LaplacianConfig(top_k=5, threshold=4, block_size=4))
         result = diag.reduce(Q, K, L)
         assert result["tier"] == "matrix_free"
 
@@ -214,7 +287,7 @@ class TestCyclicTriangles:
 
     def test_batch_matches_brute_force(self, qk):
         Q, K = qk
-        r = CyclicTrianglesDiagnostic().reduce(Q, K, L)
+        r = CyclicTrianglesDiagnostic(CyclicTrianglesConfig()).reduce(Q, K, L)
         assert r["tier"] == "materialized"
         assert r["features"].T_cyc == self._brute(Q, K, L)
 
@@ -222,7 +295,7 @@ class TestCyclicTriangles:
         torch.manual_seed(1)
         N = 40
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        diag = CyclicTrianglesDiagnostic(incremental=True)
+        diag = CyclicTrianglesDiagnostic(CyclicTrianglesConfig(incremental=True))
         state = None
         for fire_L in (8, 17, N):
             res = diag.reduce(Q[:fire_L], K[:fire_L], fire_L, prior_state=state)
@@ -233,7 +306,7 @@ class TestCyclicTriangles:
 
     def test_witness_sums_to_count(self, qk):
         Q, K = qk
-        diag = CyclicTrianglesDiagnostic()
+        diag = CyclicTrianglesDiagnostic(CyclicTrianglesConfig())
         w = diag.witness(Q, K, L)
         assert w.shape == (L,)
         assert int(w.sum().item()) == diag.reduce(Q, K, L)["features"].T_cyc
@@ -243,13 +316,19 @@ class TestCyclicTriangles:
         a = torch.arange(L, dtype=torch.float32)
         Q = torch.stack([a, torch.ones(L)], dim=1)
         K = torch.stack([torch.ones(L), torch.zeros(L)], dim=1)
-        assert CyclicTrianglesDiagnostic().reduce(Q, K, L)["features"].T_cyc == 0
+        assert (
+            CyclicTrianglesDiagnostic(CyclicTrianglesConfig()).reduce(Q, K, L)["features"].T_cyc
+            == 0
+        )
 
     def test_ties_oriented_by_index(self):
         # identical tokens ⇒ Δ ≡ 0 ⇒ every pair oriented by index ⇒ transitive ⇒ |T_cyc| = 0.
         Q = torch.ones(L, D)
         K = torch.ones(L, D)
-        assert CyclicTrianglesDiagnostic().reduce(Q, K, L)["features"].T_cyc == 0
+        assert (
+            CyclicTrianglesDiagnostic(CyclicTrianglesConfig()).reduce(Q, K, L)["features"].T_cyc
+            == 0
+        )
 
     def test_serialization_round_trip(self):
         snap = SVDSnapshot(
@@ -273,7 +352,7 @@ class TestCyclicTriangles:
         torch.manual_seed(3)
         N = 24
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        diag = CyclicTrianglesDiagnostic(incremental=True)
+        diag = CyclicTrianglesDiagnostic(CyclicTrianglesConfig(incremental=True))
         state = None
         for t in range(1, N + 1):
             res = diag.reduce(Q[:t], K[:t], t, prior_state=state)
@@ -287,7 +366,7 @@ class TestCyclicTriangles:
         torch.manual_seed(7)
         N = 30
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        diag = CyclicTrianglesDiagnostic()  # batch = block-local
+        diag = CyclicTrianglesDiagnostic(CyclicTrianglesConfig())  # batch = block-local
         full = diag.reduce(Q, K, N)["features"].T_cyc
         half = N // 2
         w1 = diag.reduce(Q[:half], K[:half], half)["features"].T_cyc
@@ -319,13 +398,13 @@ class TestMagnetic:
 
     def test_psd_and_frustrated(self, qk):
         Q, K = qk
-        f = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)["features"]
+        f = MagneticDiagnostic(MagneticConfig(threshold=1024)).reduce(Q, K, L)["features"]
         assert f.frustration >= 0.0  # L_φ is PSD
         assert f.frustration > 1e-4  # generic asymmetric scores are frustrated
 
     def test_matches_dense_oracle(self, qk):
         Q, K = qk
-        r = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)
+        r = MagneticDiagnostic(MagneticConfig(threshold=1024)).reduce(Q, K, L)
         assert r["tier"] == "materialized"
         assert abs(r["features"].frustration - self._dense_lambda1(Q, K)) < 1e-5
 
@@ -333,20 +412,20 @@ class TestMagnetic:
         # Q=K -> S=Q@Qᵀ symmetric -> θ=0 -> L_φ is the real graph Laplacian -> λ₁=0 (balanced).
         torch.manual_seed(1)
         Q = torch.randn(L, D)
-        f = MagneticDiagnostic(threshold=1024).reduce(Q, Q, L)["features"]
+        f = MagneticDiagnostic(MagneticConfig(threshold=1024)).reduce(Q, Q, L)["features"]
         assert f.frustration < 1e-4
 
     def test_matrix_free_matches_materialized(self):
         torch.manual_seed(2)
         Q, K = torch.randn(L, D), torch.randn(L, D)
-        mat = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)
-        mf = MagneticDiagnostic(threshold=4, block_size=8).reduce(Q, K, L)
+        mat = MagneticDiagnostic(MagneticConfig(threshold=1024)).reduce(Q, K, L)
+        mf = MagneticDiagnostic(MagneticConfig(threshold=4, block_size=8)).reduce(Q, K, L)
         assert mf["tier"] == "matrix_free"
         assert abs(mat["features"].frustration - mf["features"].frustration) < 1e-3
 
     def test_witness_is_bottom_eigenvector_magnitude(self, qk):
         Q, K = qk
-        w = MagneticDiagnostic(threshold=1024).witness(Q, K, L)
+        w = MagneticDiagnostic(MagneticConfig(threshold=1024)).witness(Q, K, L)
         assert w.shape == (L,)
         assert bool(torch.isfinite(w).all()) and float(w.min()) >= 0.0
 
@@ -388,7 +467,7 @@ class TestAsymmetryDiagnostic:
 
     def test_reduce_materialized_matches_oracle(self, qk):
         Q, K = qk
-        diag = AsymmetryDiagnostic(threshold=1024, causal=False)
+        diag = AsymmetryDiagnostic(AsymmetryConfig(threshold=1024, causal=False))
         result = diag.reduce(Q, K, L)
         assert result["tier"] == "materialized"
         assert abs(result["features"].G - self._g_on_p(Q, K)) < 1e-6
@@ -396,7 +475,7 @@ class TestAsymmetryDiagnostic:
     def test_reduce_matrix_free_matches_oracle(self, qk):
         Q, K = qk
         diag = AsymmetryDiagnostic(
-            threshold=4, block_size=4, n_hutchinson=128, seed=0, causal=False
+            AsymmetryConfig(threshold=4, block_size=4, n_hutchinson=128, seed=0, causal=False)
         )
         result = diag.reduce(Q, K, L)
         assert result["tier"] == "matrix_free"
@@ -404,7 +483,7 @@ class TestAsymmetryDiagnostic:
 
     def test_causal_materialized_matches_oracle(self, qk):
         Q, K = qk
-        diag = AsymmetryDiagnostic(threshold=1024, causal=True)
+        diag = AsymmetryDiagnostic(AsymmetryConfig(threshold=1024, causal=True))
         r = diag.reduce(Q, K, L)
         w = diag.witness(Q, K, L)
         g = self._g_on_p(Q, K, causal=True)
@@ -414,7 +493,9 @@ class TestAsymmetryDiagnostic:
 
     def test_witness_consistency(self, qk):
         Q, K = qk
-        diag = AsymmetryDiagnostic(threshold=4, block_size=4, n_hutchinson=64, seed=0, causal=False)
+        diag = AsymmetryDiagnostic(
+            AsymmetryConfig(threshold=4, block_size=4, n_hutchinson=64, seed=0, causal=False)
+        )
         w = diag.witness(Q, K, L)
         assert w.shape == (L,)
         assert abs(w.norm().item() - diag.reduce(Q, K, L)["features"].G) < 1e-5
@@ -422,12 +503,12 @@ class TestAsymmetryDiagnostic:
     def test_seeded_determinism(self, qk):
         Q, K = qk
         diag = AsymmetryDiagnostic(
-            threshold=4, block_size=4, n_hutchinson=32, seed=11, causal=False
+            AsymmetryConfig(threshold=4, block_size=4, n_hutchinson=32, seed=11, causal=False)
         )
         assert diag.reduce(Q, K, L)["features"].G == diag.reduce(Q, K, L)["features"].G
 
     def test_accumulate_latest_only(self):
-        diag = AsymmetryDiagnostic()
+        diag = AsymmetryDiagnostic(AsymmetryConfig())
         local = {"features": "x", "partials": {"S_asym": 1.0, "S_den": 2.0, "n_windows": 1}}
         assert diag.accumulate(local, None) is local
 
@@ -435,13 +516,15 @@ class TestAsymmetryDiagnostic:
         torch.manual_seed(7)
         Q1, K1 = torch.randn(L, D), torch.randn(L, D)
         Q2, K2 = torch.randn(L, D), torch.randn(L, D)
-        diag = AsymmetryDiagnostic(threshold=1024, causal=False, streaming=True)
+        diag = AsymmetryDiagnostic(AsymmetryConfig(threshold=1024, causal=False, streaming=True))
         r1 = diag.reduce(Q1, K1, L, prior_state=None)
         st = diag.accumulate(r1, None)
         r2 = diag.reduce(Q2, K2, L, prior_state=st)
         p1, p2 = r1["partials"], r2["partials"]
         assert p1["n_windows"] == 1 and p2["n_windows"] == 2
-        solo2 = AsymmetryDiagnostic(threshold=1024, causal=False).reduce(Q2, K2, L)["partials"]
+        solo2 = AsymmetryDiagnostic(AsymmetryConfig(threshold=1024, causal=False)).reduce(
+            Q2, K2, L
+        )["partials"]
         assert abs(p2["S_asym"] - (p1["S_asym"] + solo2["S_asym"])) < 1e-6
         assert abs(p2["S_den"] - (p1["S_den"] + solo2["S_den"])) < 1e-6
         g_global = (p2["S_asym"] ** 0.5) / (p2["S_den"] ** 0.5 + 1e-10)
@@ -481,7 +564,7 @@ class TestAsymmetryIncremental:
         torch.manual_seed(0)
         N = 24
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        diag = AsymmetryDiagnostic(causal=True, incremental=True)
+        diag = AsymmetryDiagnostic(AsymmetryConfig(causal=True, incremental=True))
         state = None
         for fire_L in (4, 9, 16, N):  # growing full-sequence buffer
             r = diag.reduce(Q[:fire_L], K[:fire_L], fire_L, prior_state=state)
@@ -495,12 +578,12 @@ class TestAsymmetryIncremental:
         torch.manual_seed(1)
         N = 20
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        chunked = AsymmetryDiagnostic(causal=True, incremental=True)
+        chunked = AsymmetryDiagnostic(AsymmetryConfig(causal=True, incremental=True))
         state = None
         for fire_L in (5, 11, N):
             r = chunked.reduce(Q[:fire_L], K[:fire_L], fire_L, prior_state=state)
             state = chunked.accumulate(r, state)
-        fresh = AsymmetryDiagnostic(causal=True, incremental=True)
+        fresh = AsymmetryDiagnostic(AsymmetryConfig(causal=True, incremental=True))
         one_shot = fresh.reduce(Q, K, N, prior_state=None)
         # fp32 block reductions sum in different orders chunked vs single-shot (~1e-8)
         assert abs(r["features"].G - one_shot["features"].G) < 1e-6
@@ -523,7 +606,9 @@ class TestAsymmetryCurlSplit:
 
     def test_materialized_matches_hodge_oracle(self, qk):
         Q, K = qk
-        f = AsymmetryDiagnostic(threshold=1024, causal=True).reduce(Q, K, L)["features"]
+        f = AsymmetryDiagnostic(AsymmetryConfig(threshold=1024, causal=True)).reduce(Q, K, L)[
+            "features"
+        ]
         g, gamma, c = self._oracle(Q, K, L)
         assert abs(f.G - g) < 1e-6
         assert abs(f.Gamma - gamma) < 1e-6
@@ -531,7 +616,9 @@ class TestAsymmetryCurlSplit:
 
     def test_pythagorean_identity(self, qk):
         Q, K = qk
-        f = AsymmetryDiagnostic(threshold=1024, causal=True).reduce(Q, K, L)["features"]
+        f = AsymmetryDiagnostic(AsymmetryConfig(threshold=1024, causal=True)).reduce(Q, K, L)[
+            "features"
+        ]
         assert abs(f.G**2 - (f.Gamma**2 + f.C**2)) < 1e-9
         assert f.Gamma >= 0.0 and f.C >= 0.0
 
@@ -539,7 +626,9 @@ class TestAsymmetryCurlSplit:
         # Gamma uses r = A_asym @ 1 (one exact matvec), so it is exact even matrix-free;
         # only G and C carry Hutchinson noise from S_asym.
         Q, K = qk
-        diag = AsymmetryDiagnostic(threshold=4, block_size=4, n_hutchinson=128, seed=0, causal=True)
+        diag = AsymmetryDiagnostic(
+            AsymmetryConfig(threshold=4, block_size=4, n_hutchinson=128, seed=0, causal=True)
+        )
         f = diag.reduce(Q, K, L)["features"]
         g, gamma, c = self._oracle(Q, K, L)
         assert f.G > 0 and diag.reduce(Q, K, L)["tier"] == "matrix_free"
@@ -550,7 +639,7 @@ class TestAsymmetryCurlSplit:
         torch.manual_seed(0)
         N = 24
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        diag = AsymmetryDiagnostic(causal=True, incremental=True)
+        diag = AsymmetryDiagnostic(AsymmetryConfig(causal=True, incremental=True))
         state = None
         for fire_L in (4, 9, 16, N):
             res = diag.reduce(Q[:fire_L], K[:fire_L], fire_L, prior_state=state)
@@ -601,7 +690,7 @@ class TestAsymmetryRobustness:
         # Simulate a data_ptr address reused by a freed tensor of the same shape: a poisoned
         # entry whose KEY matches this input. The per-reduce clear must discard it.
         Q, K = qk
-        diag = AsymmetryDiagnostic(threshold=1024, causal=True)
+        diag = AsymmetryDiagnostic(AsymmetryConfig(threshold=1024, causal=True))
         real = diag.reduce(Q, K, L)["features"].G
         key = (Q.data_ptr(), K.data_ptr(), tuple(Q.shape), tuple(K.shape), L, diag.n_hutchinson)
         diag._cache = (key, (999.0, 1.0, 0.0, torch.zeros(L), "materialized"))
@@ -615,7 +704,9 @@ class TestAsymmetryRobustness:
         Q1, K1 = torch.randn(L, D), torch.randn(L, D)
         Q2, K2 = torch.randn(L, D), torch.randn(L, D)
         diag = AsymmetryDiagnostic(
-            threshold=4, block_size=4, n_hutchinson=64, seed=1, causal=True, streaming=True
+            AsymmetryConfig(
+                threshold=4, block_size=4, n_hutchinson=64, seed=1, causal=True, streaming=True
+            )
         )
         r1 = diag.reduce(Q1, K1, L, prior_state=None)
         st = diag.accumulate(r1, None)
@@ -630,7 +721,7 @@ class TestAsymmetryRobustness:
         # A dropped prior_state restarts at n_prev=0 (full recompute) but stays correct.
         torch.manual_seed(2)
         Q, K = torch.randn(20, D), torch.randn(20, D)
-        diag = AsymmetryDiagnostic(causal=True, incremental=True)
+        diag = AsymmetryDiagnostic(AsymmetryConfig(causal=True, incremental=True))
         warm = diag.reduce(Q, K, 20, prior_state=None)["features"].G
         cold = diag.reduce(Q, K, 20, prior_state=None)["features"].G  # no threaded state
         assert abs(warm - cold) < 1e-6
@@ -664,7 +755,7 @@ class TestMagneticStreaming:
 
     def test_batch_reports_lambda1_and_both_curls(self, qk):
         Q, K = qk
-        f = MagneticDiagnostic(threshold=1024).reduce(Q, K, L)["features"]
+        f = MagneticDiagnostic(MagneticConfig(threshold=1024)).reduce(Q, K, L)["features"]
         assert f.frustration is not None and f.frustration >= 0.0
         assert abs(f.phase_curl - self._explicit_curlE(Q, K)) < 1e-2
         assert abs(f.phase_curl_w - self._explicit_curlE_w(Q, K)) < 1e-2
@@ -673,8 +764,8 @@ class TestMagneticStreaming:
         torch.manual_seed(3)
         N = 28
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        b = MagneticDiagnostic(threshold=1024).reduce(Q, K, N)["features"]
-        diag = MagneticDiagnostic(incremental=True)
+        b = MagneticDiagnostic(MagneticConfig(threshold=1024)).reduce(Q, K, N)["features"]
+        diag = MagneticDiagnostic(MagneticConfig(incremental=True))
         state = None
         for t in range(1, N + 1):  # one token at a time
             r = diag.reduce(Q[:t], K[:t], t, prior_state=state)
@@ -688,7 +779,7 @@ class TestMagneticStreaming:
         # Q=K -> symmetric S -> theta=0 -> both curls = 0 (balanced, matches lambda1=0).
         torch.manual_seed(1)
         Q = torch.randn(L, D)
-        f = MagneticDiagnostic(incremental=True).reduce(Q, Q, L)["features"]
+        f = MagneticDiagnostic(MagneticConfig(incremental=True)).reduce(Q, Q, L)["features"]
         assert f.phase_curl < 1e-5 and f.phase_curl_w < 1e-5
 
     def test_blocked_fold_matches_single_shot(self):
@@ -697,8 +788,12 @@ class TestMagneticStreaming:
         torch.manual_seed(5)
         N = 33
         Q, K = torch.randn(N, D), torch.randn(N, D)
-        one = MagneticDiagnostic(incremental=True, block_size=1024).reduce(Q, K, N)["features"]
-        chunked = MagneticDiagnostic(incremental=True, block_size=4).reduce(Q, K, N)["features"]
+        one = MagneticDiagnostic(MagneticConfig(incremental=True, block_size=1024)).reduce(Q, K, N)[
+            "features"
+        ]
+        chunked = MagneticDiagnostic(MagneticConfig(incremental=True, block_size=4)).reduce(
+            Q, K, N
+        )["features"]
         assert abs(one.phase_curl - chunked.phase_curl) < 1e-4
         assert abs(one.phase_curl_w - chunked.phase_curl_w) < 1e-4
 
@@ -708,7 +803,7 @@ class TestMagneticStreaming:
         for seed in range(40):
             torch.manual_seed(seed)
             Q, K = torch.randn(16, D), torch.randn(16, D)
-            f = MagneticDiagnostic(threshold=1024).reduce(Q, K, 16)["features"]
+            f = MagneticDiagnostic(MagneticConfig(threshold=1024)).reduce(Q, K, 16)["features"]
             lam.append(f.frustration)
             pc.append(f.phase_curl)
             pcw.append(f.phase_curl_w)

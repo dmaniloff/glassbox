@@ -6,15 +6,18 @@ from typing import Any
 
 import torch
 
+from glassbox.config import SpectralConfig
+from glassbox.results import SpectralFeatures
 from glassbox.svd import compute_scores_matrix_features
 
 
 class SpectralDiagnostic:
     signal_name = "spectral"
+    features_model = SpectralFeatures
 
-    def __init__(self, rank: int = 4, method: str = "randomized"):
-        self.rank = rank
-        self.method = method
+    def __init__(self, config: SpectralConfig):
+        self.rank = config.rank
+        self.method = config.method
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
         features = compute_scores_matrix_features(

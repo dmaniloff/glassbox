@@ -22,11 +22,40 @@ import torch
 
 @runtime_checkable
 class Diagnostic(Protocol):
-    """Interface for streaming attention diagnostics."""
+    """Interface for streaming attention diagnostics.
+
+    A diagnostic declares the three things that identify a signal, so that generic
+    code -- the backend building diagnostics, a schema builder asking what columns a
+    signal produces -- never has to pair them up by hand:
+
+    ``signal_name``    the canonical name, and the key it registers under.
+    ``features_model`` the Features model ``reduce`` returns, declared rather than
+                       left implicit in the ``{"features": XFeatures(...)}`` literal,
+                       so the columns can be read without running the diagnostic.
+    ``__init__``       takes the signal's own config object.
+
+    Note ``runtime_checkable`` only checks that the members *exist*; it cannot check
+    the constructor's parameter type.  ``tests/test_diagnostic.py`` covers what the
+    Protocol cannot.
+    """
 
     @property
     def signal_name(self) -> str:
         """Canonical signal name (e.g. 'spectral', 'routing')."""
+        ...
+
+    @property
+    def features_model(self) -> type:
+        """The Features model returned under ``reduce()['features']``."""
+        ...
+
+    def __init__(self, config: Any) -> None:
+        """Build from the signal's config object (e.g. ``SpectralConfig``).
+
+        Taking the config rather than loose kwargs keeps each parameter's default and
+        bounds in one place -- the config class -- and means a field added there
+        reaches the diagnostic without a matching signature edit.
+        """
         ...
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
@@ -40,8 +69,8 @@ class Diagnostic(Protocol):
 
         Returns:
             Dict of scalar features (the 'detect' readout).  Must include
-            a ``'features'`` key whose value is the appropriate Features
-            pydantic model, and optionally ``'singular_values'`` and
+            a ``'features'`` key whose value is an instance of
+            ``features_model``, and optionally ``'singular_values'`` and
             ``'tier'``.
         """
         ...

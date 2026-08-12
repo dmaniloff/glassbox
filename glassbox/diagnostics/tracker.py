@@ -11,24 +11,20 @@ from glassbox.attention_tracker import (
     compute_attention_tracker_features_materialized,
     compute_attention_tracker_features_matrix_free,
 )
+from glassbox.config import TrackerConfig
+from glassbox.results import TrackerFeatures
 
 
 class TrackerDiagnostic:
     signal_name = "tracker"
+    features_model = TrackerFeatures
 
-    def __init__(
-        self,
-        rank: int = 4,
-        method: str = "randomized",
-        threshold: int = 512,
-        block_size: int = 256,
-        causal: bool = True,
-    ):
-        self.rank = rank
-        self.method = method
-        self.threshold = threshold
-        self.block_size = block_size
-        self.causal = causal
+    def __init__(self, config: TrackerConfig):
+        self.rank = config.rank
+        self.method = config.method
+        self.threshold = config.threshold
+        self.block_size = config.block_size
+        self.causal = config.causal
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
         scale = 1.0 / math.sqrt(Qh.shape[1])

@@ -55,6 +55,7 @@ def test_signal_features_match_across_strategies():
     """End-to-end at the signal level: routing and tracker features computed with
     matvec_strategy='triton' must match 'batched' (same seed -> identical SVD sketch;
     both diagnostics default causal=True, so this exercises the causal kernel path)."""
+    from glassbox.config import RoutingConfig, TrackerConfig
     from glassbox.diagnostics.routing import RoutingDiagnostic
     from glassbox.diagnostics.tracker import TrackerDiagnostic
 
@@ -63,10 +64,14 @@ def test_signal_features_match_across_strategies():
     Q = torch.randn(L, d, device="cuda")
     K = torch.randn(L, d, device="cuda")
 
-    for diag_cls in (RoutingDiagnostic, TrackerDiagnostic):
+    for diag_cls, conf_cls in (
+        (RoutingDiagnostic, RoutingConfig),
+        (TrackerDiagnostic, TrackerConfig),
+    ):
         feats = {}
         for strategy in ("batched", "triton"):
-            diag = diag_cls(rank=4, threshold=64, block_size=128)  # L > threshold -> matrix-free
+            # L > threshold -> matrix-free
+            diag = diag_cls(conf_cls(rank=4, threshold=64, block_size=128))
             torch.manual_seed(11)  # identical randomized-SVD sketch across strategies
             feats[strategy] = diag.reduce(Q, K, L, matvec_strategy=strategy)["features"]
         fb = feats["batched"].model_dump()

@@ -29,18 +29,20 @@ from typing import Any
 
 import torch
 
+from glassbox.config import CyclicTrianglesConfig
 from glassbox.results import CyclicTrianglesFeatures
 
 
 class CyclicTrianglesDiagnostic:
     signal_name = "cyclic"
+    features_model = CyclicTrianglesFeatures
 
-    def __init__(self, incremental: bool = False):
+    def __init__(self, config: CyclicTrianglesConfig):
         # incremental: maintain the out-degree vector + running count across fires and fold
         # only the delta tokens per fire (the O(ΔE) streaming update); requires the unbounded
         # full-sequence buffer. Else each fire counts the current window from scratch (both
         # exact — there is no estimation, only integer counting).
-        self.incremental = incremental
+        self.incremental = config.incremental
         self._cache: tuple | None = None  # (key, (s, D))
 
     def _materialized(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int) -> tuple:

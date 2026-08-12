@@ -7,31 +7,26 @@ from typing import Any
 
 import torch
 
+from glassbox.config import RoutingConfig
 from glassbox.hodge import (
     compute_routing_features_materialized,
     compute_routing_features_matrix_free,
 )
+from glassbox.results import RoutingFeatures
 from glassbox.svd import compute_degree_normalized_M, compute_dk_blocked
 
 
 class RoutingDiagnostic:
     signal_name = "routing"
+    features_model = RoutingFeatures
 
-    def __init__(
-        self,
-        rank: int = 4,
-        method: str = "randomized",
-        threshold: int = 512,
-        block_size: int = 256,
-        causal: bool = True,
-        hodge_seed: int = 42,
-    ):
-        self.rank = rank
-        self.method = method
-        self.threshold = threshold
-        self.block_size = block_size
-        self.causal = causal
-        self.hodge_seed = hodge_seed
+    def __init__(self, config: RoutingConfig):
+        self.rank = config.rank
+        self.method = config.method
+        self.threshold = config.threshold
+        self.block_size = config.block_size
+        self.causal = config.causal
+        self.hodge_seed = config.hodge_seed
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
         scale = 1.0 / math.sqrt(Qh.shape[1])

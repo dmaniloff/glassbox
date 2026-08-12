@@ -34,35 +34,28 @@ from typing import Any
 
 import torch
 
+from glassbox.config import AsymmetryConfig
 from glassbox.hodge import EPSILON, asymmetry_partials_and_witness_matrix_free
 from glassbox.results import AsymmetryFeatures
 
 
 class AsymmetryDiagnostic:
     signal_name = "asymmetry"
+    features_model = AsymmetryFeatures
 
-    def __init__(
-        self,
-        threshold: int = 512,
-        block_size: int = 256,
-        causal: bool = True,
-        n_hutchinson: int = 32,
-        seed: int = 42,
-        streaming: bool = False,
-        incremental: bool = False,
-    ):
-        self.threshold = threshold
-        self.block_size = block_size
-        self.causal = causal
-        self.n_hutchinson = n_hutchinson
-        self.seed = seed
-        self.streaming = streaming
+    def __init__(self, config: AsymmetryConfig):
+        self.threshold = config.threshold
+        self.block_size = config.block_size
+        self.causal = config.causal
+        self.n_hutchinson = config.n_hutchinson
+        self.seed = config.seed
+        self.streaming = config.streaming
         # incremental: exact full-operator G by folding only the delta tokens since the
         # last fire into running (S_asym, S_den).  Requires the unbounded full-sequence
         # buffer (each fire's Qh/Kh is a superset of the previous) and causal attention
         # (adding a token only *adds* its row).  O(L^2) total vs O(L^3/interval) recompute,
         # O(1) state, exact.  See issue: incremental exact-full Hodge.
-        self.incremental = incremental
+        self.incremental = config.incremental
         self._cache: tuple | None = None  # (key, (S_asym, S_den, row_sq, tier))
 
     def _attention_matrix(
