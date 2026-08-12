@@ -124,12 +124,13 @@ class ThresholdParams(BaseModel):
     Bounds guard against crashes / silent garbage: ``block_size=0`` raises in ``range()``
     on the matrix-free path, and a negative ``threshold`` forces the noisy path for all L.
 
-    ``threshold`` is bounded ``ge=0``, NOT ``ge=1``: ``threshold=0`` is a supported setting
+    ``threshold`` is bounded ``ge=0``: ``threshold=0`` is a supported setting
     meaning *never materialize* (tier selection is ``L <= threshold``, so no L qualifies),
-    guaranteeing no full L x L matrix is ever built.  It is documented in the README for
-    memory-constrained deployments -- do not tighten this bound.
+    guaranteeing no full L x L matrix is ever built.
 
-    Crossover ~512 on NVIDIA A10G (bench_hodge.py, 2026-03-24, d=64, rank=4):
+    If you are unsure about the threshold, use the default of 512.
+    A test (bench_hodge.py, 2026-03-24, d=64, rank=4) showed that the crossover
+    is at ~512 on NVIDIA A10G:
       L=256: mat 21ms vs mf 39ms (1.8x), L=512: 54ms vs 61ms (1.1x),
       L=1024: 174ms vs 110ms (0.6x). Materialized dominated by svdvals ~L^1.6.
     """
