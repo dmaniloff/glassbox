@@ -9,8 +9,9 @@ SHADE papers (see References).
 
 | Diagnostic family | Operator | glassbox signal | Why | What it gives |
 |---|---|---|---|---|
-| Conductance / bottleneck | **M** = degree-normalized post-softmax | `cheeger` | Cheeger σ₂ bracket is a theorem about the *normalized* operator | transport bottleneck bracket `(1−σ₂)/2 ≤ φ ≤ √(2(1−σ₂))` |
-| Hodge asymmetry / gradient–curl | **P** = row-stochastic post-softmax | `asymmetry`, `routing` (Hodge part) | degree normalization is an *asymmetric* scaling that inflates the antisymmetric rank; P keeps the clean structure | total asymmetry G, gradient (hierarchical) vs curl (circulatory) split, per-token witness |
+| Conductance / bottleneck | **M** = degree-normalized post-softmax | `cheeger`, `routing` | Cheeger σ₂ bracket is a theorem about the *normalized* operator | transport bottleneck bracket `(1−σ₂)/2 ≤ φ ≤ √(2(1−σ₂))`; plus `routing`'s `asym_index` transpose-sensitivity scalar |
+| Normalized asymmetry index (circulation ratio) | **M** = degree-normalized post-softmax | `routing` (`asym_index`) | the *Beyond Hodge* circulation ratio (Thm 3.1) is well-posed on M as a scalar; the gradient/curl *split* is **not** (asymmetric scaling distorts it) | degree-invariant scalar `‖M_asym‖_F/‖M‖_F` in the conductance bundle |
+| Hodge asymmetry / gradient–curl | **P** = row-stochastic post-softmax | `asymmetry` | degree normalization is an *asymmetric* scaling that inflates the antisymmetric rank; P keeps the clean structure | total asymmetry G, gradient (hierarchical) vs curl (circulatory) split, per-token witness |
 | Orientation / tournament (discrete) | **S = QKᵀ** pre-softmax (unmasked) | `cyclic` (`\|T_cyc\|`, #42) | causal post-softmax is transitive ⇒ `\|T_cyc\|=0`; the real tournament is in the raw scores | count of non-transitive (cyclic) attention triangles |
 | Orientation / frustration (spectral) | **S = QKᵀ** pre-softmax (unmasked) | `magnetic` (λ₁ + phase-curl, #41/#68) | same post-softmax vacuity; magnetic Laplacian `L_φ=D−A⊙e^{iθ}` encodes the preference orientation as a U(1) phase | spectral frustration `λ₁` (0 ⟺ balanced) + streamable phase-curl energy |
 | Score geometry / rank | **S = QKᵀ** pre-softmax | `spectral` | pre-activation spectrum | singular-value structure of the scores |
@@ -59,9 +60,12 @@ asymmetry axis therefore carries limited diagnostic power for decoder-only model
 accordingly. It is genuinely informative for *non-causal* attention (encoder / cross-attention).
 
 **G on M vs P.** `G = ‖M_asym‖_F/‖M‖_F` on M is the well-posed *Beyond Hodge* circulation ratio
-(Thm 3.1) — fine as a transpose-sensitivity *feature* in the conductance bundle (this is
-what `zero-shot-cheeger` and the `routing` signal report). The dedicated **`asymmetry` signal
-computes G on P**, the operator of the Hodge/circulation program.
+(Thm 3.1) — fine as a scalar transpose-sensitivity *feature* in the conductance bundle (this is
+what `zero-shot-cheeger` and the `routing` signal report, where it is named **`asym_index`**).
+What is **not** well-posed on M is the gradient/curl *split*: the asymmetric scaling inflates the
+antisymmetric rank, so `routing` deliberately reports only the scalar `asym_index` and **no**
+`Γ`/`C`. The dedicated **`asymmetry` signal computes the full `G`/`Γ`/`C` split on P**, the
+operator of the Hodge/circulation program.
 
 ## Orientation family → pre-softmax S
 

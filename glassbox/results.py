@@ -58,11 +58,18 @@ class SpectralFeatures(BaseModel):
 
 
 class RoutingFeatures(BaseModel):
-    """Features from SVD + Hodge decomposition of degree-normalized M.
+    """Features from the SVD + asymmetry analysis of the degree-normalized operator M.
 
     Single source of truth: singular_values are stored directly, and
     spectral features (sv1, sv_ratio, sv_entropy) are derived from them
     automatically on construction.
+
+    Note: the Hodge gradient/curl split (Gamma, C) is deliberately NOT computed
+    here. Degree normalization is an asymmetric scaling (D_Q^{-1/2}(.)D_K^{-1/2},
+    D_Q != D_K) that distorts the antisymmetric structure, so the split is only
+    well-posed on the row-stochastic P — see the ``asymmetry`` signal and
+    docs/operator-choice.md. On M we keep only the scalar circulation ratio
+    ``asym_index``, which is well-posed as a transpose-sensitivity feature.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -83,16 +90,14 @@ class RoutingFeatures(BaseModel):
         description="Cheeger conductance via bipartite sweep cut.",
     )
     sigma2: float | None = Field(None, description="Second singular value of M.")
-    G: float | None = Field(None, description="Total asymmetry: ||M_asym||_F / ||M||_F.")
-    Gamma: float | None = Field(
-        None, description="Gradient coefficient: potential-driven portion of asymmetry."
-    )
-    C: float | None = Field(
+    asym_index: float | None = Field(
         None,
-        description="Curl coefficient: circulatory portion of asymmetry (triangle-sampled).",
-    )
-    curl_ratio: float | None = Field(
-        None, description="C / (G + eps). Share of asymmetry that is circulatory."
+        description=(
+            "Normalized asymmetry index (Beyond Hodge circulation ratio): "
+            "||M_asym||_F / ||M||_F on the degree-normalized operator. Degree-invariant "
+            "transpose sensitivity; a conductance-bundle scalar alongside phi_hat. The "
+            "gradient/curl Hodge split lives in the asymmetry signal (G/Gamma/C on P)."
+        ),
     )
     sigma2_asym: float | None = Field(None, description="Second singular value of M_asym.")
     commutator_norm: float | None = Field(
@@ -111,10 +116,7 @@ class RoutingFeatures(BaseModel):
         return values
 
     @field_validator(
-        "G",
-        "Gamma",
-        "C",
-        "curl_ratio",
+        "asym_index",
         "sigma2",
         "sigma2_asym",
         "commutator_norm",

@@ -28,7 +28,7 @@ At configurable intervals during inference, `glassbox` computes features from di
 | Signal | Operator | Key outputs | Source |
 |---|---|---|---|
 | `spectral` | pre-softmax scores `S = QKᵀ` | `sv1`, `sv_ratio`, `sv_entropy` (score-geometry / rank) | — |
-| `routing` | degree-normalized `M = D_Q^{-1/2} A D_K^{-1/2}` | SVD spectrum, `phi_hat` (Cheeger conductance), Hodge `G`/`Gamma`/`C`, `commutator_norm` | Dahlem et al. (upcoming) |
+| `routing` | degree-normalized `M = D_Q^{-1/2} A D_K^{-1/2}` | SVD spectrum, `phi_hat` (Cheeger conductance), `asym_index` (normalized asymmetry / circulation ratio), `commutator_norm` | Dahlem et al. (upcoming) |
 | `asymmetry` | row-stochastic `P` | `G`, `Gamma`, `C` — Hodge gradient/curl split `G²=Γ²+C²` | Dahlem et al. (upcoming) |
 | `cyclic` | pre-softmax `S` (sign tournament) | `T_cyc` — count of non-transitive (cyclic) triangles | Dahlem et al. (upcoming) |
 | `magnetic` | pre-softmax `S` (magnetic Laplacian `L_φ = D − A⊙e^{iθ}`) | `frustration` (λ₁; `0 ⟺ balanced orientation`), `phase_curl` / `phase_curl_w` (streamable frustration energy) | Dahlem et al. (upcoming) |
@@ -52,7 +52,7 @@ These come from the singular values of the pre-softmax scores matrix `S = QK^T`.
 
 ### Routing signal — degree-normalized matrix features (post-softmax attention) — Dahlem et al. (upcoming)
 
-These come from the singular values and routing decomposition of the normalized operator `M`.
+These come from the singular values and asymmetry analysis of the normalized operator `M`.
 
 | Feature | Formula | Meaning |
 |---|---|---|
@@ -61,14 +61,11 @@ These come from the singular values and routing decomposition of the normalized 
 | `sv_entropy` | `-Σ pᵢ log pᵢ`, with `pᵢ = σᵢ / Σⱼ σⱼ` | Entropy of the normalized singular-value distribution. Spread of routing mass across modes |
 | `sigma2` | `σ₂(M)` | Second singular value of `M`. Raw spectral-gap measure and persistence of non-dominant routing structure |
 | `phi_hat` | `1 - σ₂(M)` | Conductance-like bottleneck score. High `φ̂` means attention concentrates through a single dominant mode; low `φ̂` means multiple competing routing paths |
-| `G` | `‖M_asym‖_F / ‖M‖_F` | Total asymmetry. Fraction of `M`'s energy in the antisymmetric part, where `M_asym = (M - Mᵀ) / 2` |
-| `Gamma` | `‖A_grad‖_F / ‖M‖_F`, with `‖A_grad‖² = 2‖r‖²/L`, `r = M_asym·1` | Gradient coefficient. The potential-driven (hierarchical) part of the asymmetry — exact via the row-sum identity, not an estimate |
-| `C` | `‖A_curl‖_F / ‖M‖_F` (the Pythagorean residual, `G² = Γ² + C²`) | Curl coefficient. The divergence-free (circulatory) part of the asymmetry |
-| `curl_ratio` | `C / (G + ε)` | Curl fraction. What share of total asymmetry is circulatory versus gradient-driven |
+| `asym_index` | `‖M_asym‖_F / ‖M‖_F` | Normalized asymmetry index (the *Beyond Hodge* circulation ratio), where `M_asym = (M - Mᵀ) / 2`. Degree-invariant transpose-sensitivity — a conductance-bundle scalar alongside `phi_hat`. **Not** the Hodge gradient/curl split: on the degree-normalized `M` the split is ill-posed (asymmetric scaling distorts the antisymmetric structure), so `Γ`/`C` are computed only in the `asymmetry` signal on `P` — see [operator-choice](docs/operator-choice.md) |
 | `sigma2_asym` | `σ₂(M_asym)` | Second singular value of the antisymmetric part. Captures whether the irreversible component has multiple significant modes |
 | `commutator_norm` | `‖[M_sym, M_asym]‖_F / ‖M‖_F` | Commutator norm. Measures how much the symmetric and antisymmetric parts interfere with each other, where `[A, B] = AB - BA` |
 
-The routing and Hodge-style metrics live in `glassbox/hodge.py`. The feature schemas are defined in `glassbox/results.py`.
+The routing metrics live in `glassbox/hodge.py`. The feature schemas are defined in `glassbox/results.py`.
 
 ### Asymmetry signal — Hodge gradient/curl split on row-stochastic attention (Dahlem et al., upcoming)
 
