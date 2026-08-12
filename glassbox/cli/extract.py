@@ -511,6 +511,7 @@ def run_extraction(
     *,
     samples: list[dict],
     model: str,
+    dataset_name: str,
     signals: tuple[str, ...] = ("spectral",),
     rank: int | None = None,
     method: str | None = None,
@@ -519,7 +520,6 @@ def run_extraction(
     block_size: int | None = None,
     otel: bool | None = None,
     outdir: str | Path | None = None,
-    dataset_name: str = "unknown",
     parquet: bool = False,
     phases: tuple[str, ...] = ("question", "full"),
     prompt_builders: dict[str, Callable[[dict], str]] | None = None,
@@ -540,6 +540,10 @@ def run_extraction(
         List of dicts, each with ``question``, ``response``, ``label``, ``idx``.
     model
         HuggingFace model name.
+    dataset_name
+        Provenance label stored in ``config.json`` and on every ``samples.jsonl``
+        row, and surfaced as the parquet ``source`` column.  Required: a result
+        directory that does not record what it was run on cannot be traced back.
     signals
         Signal names to enable; all others are explicitly disabled.
     rank, method, heads, threshold, block_size, otel
@@ -548,8 +552,6 @@ def run_extraction(
         knob — see the ``from_cli_args`` call below for why it is pinned to 1.
     outdir
         Output directory. Auto-generated under ``experiments/results/`` if *None*.
-    dataset_name
-        Label stored in output metadata and per-sample JSONL rows.
     parquet
         If *True*, also write a wide ``features.parquet`` file.
     phases

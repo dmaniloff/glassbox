@@ -143,6 +143,7 @@ def test_prompt_builders_control_the_prefilled_string(outdir, model_name):
     run_extraction(
         samples=samples,
         model=model_name,
+        dataset_name="prompt_builder_probe",
         signals=("spectral",),
         outdir=outdir,
         phases=("full",),
@@ -169,6 +170,7 @@ def test_unknown_phase_is_rejected(outdir, model_name):
         run_extraction(
             samples=[{"idx": 0, "question": "q", "response": "r", "label": 0}],
             model=model_name,
+            dataset_name="phase_guard_probe",
             outdir=outdir,
             phases=("full", "nonexistent_phase"),
         )
@@ -184,6 +186,7 @@ def test_unknown_signal_is_rejected(outdir, model_name):
         run_extraction(
             samples=[{"idx": 0, "question": "q", "response": "r", "label": 0}],
             model=model_name,
+            dataset_name="signal_guard_probe",
             signals=("spectral", "not_a_signal"),
             outdir=outdir,
         )
