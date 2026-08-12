@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from glassbox.cli.extract import main
+from glassbox.cli.extract import main, run_extraction
 
 pytestmark = pytest.mark.e2e
 
@@ -121,3 +121,103 @@ def test_extract_nondefault_signal_and_rank(outdir, model_name):
     # ...and the non-default rank=3 reached the cached RoutingDiagnostic:
     # singular_values count == min(rank, L-1) == 3 on prefill (L >> 3).
     assert max(len(s["singular_values"]) for s in snap_rows) == 3
+
+
+def test_prompt_builders_control_the_prefilled_string(outdir, model_name):
+    """A custom prompt builder, not the default Q:/A: wrapper, decides what is prefilled.
+
+    Callers whose labels come from the model's own generation must prefill the
+    exact context that produced the response.  The default wrapper would emit
+    ``Q: {question}\\nA: {response}``; here the builder emits a chat-style string
+    that shares no prefix with it, and ``prompt_length`` in samples.jsonl pins
+    down which one actually reached the engine.
+    """
+    samples = [
+        {"idx": 0, "question": "What colour is the sky?", "response": "Blue.", "label": 0},
+        {"idx": 1, "question": "What colour is grass?", "response": "Green.", "label": 0},
+    ]
+
+    def build_full(s: dict) -> str:
+        return f"<|user|>\n{s['question']}<|end|>\n<|assistant|>\n{s['response']}"
+
+    run_extraction(
+        samples=samples,
+        model=model_name,
+        signals=("spectral",),
+        outdir=outdir,
+        phases=("full",),
+        prompt_builders={"full": build_full},
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (outdir / "samples.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 2  # one phase per sample, not two
+
+    for row, sample in zip(rows, samples):
+        assert row["phase"] == "full"
+        assert row["prompt_length"] == len(build_full(sample))
+        # The default wrapper is a different length, so this cannot pass by luck.
+        assert row["prompt_length"] != len(f"Q: {sample['question']}\nA: {sample['response']}")
+
+
+def test_unknown_phase_is_rejected(outdir, model_name):
+    """A phase with no builder fails fast, before an engine is ever created."""
+    with pytest.raises(ValueError, match="No prompt builder for phase"):
+        run_extraction(
+            samples=[{"idx": 0, "question": "q", "response": "r", "label": 0}],
+            model=model_name,
+            outdir=outdir,
+            phases=("full", "nonexistent_phase"),
+        )
+
+
+def test_unknown_signal_is_rejected(outdir, model_name):
+    """An unrecognised signal fails fast rather than emitting an empty features file.
+
+    ``from_cli_args`` enables nothing for a name it does not recognise, so without
+    this guard the run would complete and write zero snapshots.
+    """
+    with pytest.raises(ValueError, match="Unknown signal"):
+        run_extraction(
+            samples=[{"idx": 0, "question": "q", "response": "r", "label": 0}],
+            model=model_name,
+            signals=("spectral", "not_a_signal"),
+            outdir=outdir,
+        )
+
+
+def test_metadata_records_signal_params(outdir, model_name):
+    """config.json keeps the flat keys glassbox-analyze reads, plus the full config.
+
+    ``glassbox-analyze`` reports ``svd_interval``/``svd_rank`` straight out of this
+    file, and regenerating features.parquet needs ``heads`` without an HF download.
+    """
+    main(
+        args=[
+            "--signal",
+            "spectral",
+            "--svd-rank",
+            "3",
+            "--dataset",
+            "halueval_hallucination",
+            "--max-samples",
+            "1",
+            "--model",
+            model_name,
+            "--outdir",
+            str(outdir),
+        ],
+        standalone_mode=False,
+    )
+
+    meta = json.loads((outdir / "config.json").read_text())
+    assert meta["svd_rank"] == 3
+    assert meta["svd_interval"] == 1
+    assert meta["heads"] == [0]
+    assert meta["method"] == "randomized"
+    assert meta["n_samples"] == 1
+    # Full nested config travels alongside the flat keys for provenance.
+    assert meta["config"]["spectral"]["rank"] == 3
