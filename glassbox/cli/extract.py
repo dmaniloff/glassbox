@@ -6,6 +6,9 @@ For each sample, runs two prefill phases through the model:
 SVD features are extracted from attention internals during each prefill.
 No text is generated — max_tokens=1 is a vLLM requirement.
 
+Programmatic callers use :func:`run_extraction`, which takes the same loop with
+the phase list and the sample-to-prompt mapping as parameters.
+
 Datasets are loaded from pre-split HuggingFace repos that contain the
 exact 30% test split produced by shade-train's HashBasedSplitter
 (hash_fields=["prompt"], 70/0/30 ratio).  This ensures glassbox
@@ -22,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +44,22 @@ from glassbox.results import (
 
 DEFAULT_MODEL = "facebook/opt-125m"
 DEFAULT_HF_ORG = "dmaniloff"
+
+# How a sample dict becomes the string the model prefills on, per phase.
+#
+# This is the convention for the labeled datasets in DATASET_REGISTRY: each row
+# arrives as a (prompt, response, label) triple where the response is canned and
+# the label ships with the dataset, so every sample goes through the identical
+# wrapper and nothing depends on a string the model generated itself.
+#
+# Callers whose labels come from the model's *own* generation must override this
+# via ``run_extraction(prompt_builders=...)`` so that the prefill reproduces the
+# exact context that produced the response — otherwise the features describe a
+# forward pass that never happened.  See the ``prompt_builders`` docstring.
+_DEFAULT_PHASE_PROMPTS: dict[str, Callable[[dict], str]] = {
+    "question": lambda s: f"Q: {s['question']}\nA:",
+    "full": lambda s: f"Q: {s['question']}\nA: {s['response']}",
+}
 
 
 def log(msg: str) -> None:
@@ -153,9 +173,6 @@ _AD_FEATURE_NAMES = [
 ]
 
 
-_META_COLUMNS = ["request_id", "label", "length", "sample_id", "phase", "prompt_length", "source"]
-
-
 def _parse_snap_features(snap: SVDSnapshot) -> dict[str, float]:
     """Extract scalar features from a snapshot, raising on unexpected types.
 
@@ -245,7 +262,7 @@ def _write_parquet(
 
     Output has one row per request (i.e. per phase) with columns:
         {signal}_{feature}_L{layer}_H{head}  (e.g. spectral_sv_ratio_L0_H0)
-        label, source, length, phase, sample_id
+        request_id, label, length, sample_id, phase, prompt_length, source
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -460,10 +477,6 @@ def main(
     otel: bool,
 ) -> None:
     """Run prefill-only spectral feature extraction on a labeled dataset."""
-    import vllm
-
-    import glassbox.backends.svd_backend as svd_mod
-
     if not signals:
         raise click.UsageError(
             "At least one signal must be specified. "
@@ -479,8 +492,125 @@ def main(
     else:
         samples = load_dataset_samples(dataset_name, max_samples, hf_org=hf_org)
 
-    # Prefill-only: SVD fires every token, max_tokens=1 (vLLM minimum)
-    max_tokens = 1
+    run_extraction(
+        samples=samples,
+        model=model,
+        signals=signals,
+        rank=svd_rank,
+        method=method,
+        heads=heads,
+        threshold=threshold,
+        otel=True if otel else None,
+        outdir=outdir,
+        dataset_name=dataset_name,
+        parquet=parquet,
+    )
+
+
+def run_extraction(
+    *,
+    samples: list[dict],
+    model: str,
+    dataset_name: str,
+    signals: tuple[str, ...] = ("spectral",),
+    rank: int | None = None,
+    method: str | None = None,
+    heads: tuple[int, ...] | list[int] = (),
+    threshold: int | None = None,
+    block_size: int | None = None,
+    otel: bool | None = None,
+    outdir: str | Path | None = None,
+    parquet: bool = False,
+    phases: tuple[str, ...] = ("question", "full"),
+    prompt_builders: dict[str, Callable[[dict], str]] | None = None,
+) -> Path:
+    """Run prefill-only feature extraction on a list of samples.
+
+    Takes the same flat knobs the CLI exposes and builds the ``GlassboxConfig``
+    internally via :meth:`GlassboxConfig.from_cli_args`, which applies them
+    uniformly to every enabled signal.  That is the only shape the extraction
+    path supports — ``_build_feature_columns`` takes a single head list for all
+    signals — so the signature states it rather than accepting a richer config
+    it would silently flatten.  ``glassbox.yaml`` still applies underneath
+    (precedence: these arguments > yaml > field defaults).
+
+    Parameters
+    ----------
+    samples
+        List of dicts, each with ``question``, ``response``, ``label``, ``idx``.
+    model
+        HuggingFace model name.
+    dataset_name
+        Provenance label stored in ``config.json`` and on every ``samples.jsonl``
+        row, and surfaced as the parquet ``source`` column.  Required: a result
+        directory that does not record what it was run on cannot be traced back.
+    signals
+        Signal names to enable; all others are explicitly disabled.
+    rank, method, heads, threshold, block_size, otel
+        Passed through to :meth:`GlassboxConfig.from_cli_args`.  *None* means
+        "leave at the configured default".  Note there is no ``interval``
+        knob — see the ``from_cli_args`` call below for why it is pinned to 1.
+    outdir
+        Output directory. Auto-generated under ``experiments/results/`` if *None*.
+    parquet
+        If *True*, also write a wide ``features.parquet`` file.
+    phases
+        Which prefill phases to run.  Default ``("question", "full")``.
+        Use ``("full",)`` to skip the question-only baseline.
+    prompt_builders
+        Per-phase overrides for turning a sample into the string the model
+        prefills on, merged over :data:`_DEFAULT_PHASE_PROMPTS`.
+
+        Override this whenever the label is derived from the model's own
+        generation rather than shipped with the dataset.  Features are only
+        comparable to such a label if the prefill reproduces the context that
+        produced the response — same instructions, same chat template, no
+        re-wrapping of text that already carries its own formatting::
+
+            run_extraction(
+                samples=samples,
+                model=model,
+                phases=("full",),
+                prompt_builders={"full": lambda s: s["chat_prompt"] + s["response"]},
+            )
+
+        The default wrapper would instead prefill ``Q: {question}\\nA: {response}``,
+        which for an already-formatted sample can share no prefix at all with what
+        the model actually saw.
+
+    Returns
+    -------
+    Path
+        The output directory containing ``svd_features.jsonl``,
+        ``samples.jsonl``, ``config.json``, and optionally ``features.parquet``.
+    """
+    # Imported lazily: vLLM costs ~10s to import, which the Click CLI would
+    # otherwise pay just to print --help.
+    import vllm
+
+    import glassbox.backends.svd_backend as svd_mod
+
+    phase_prompts = {**_DEFAULT_PHASE_PROMPTS, **(prompt_builders or {})}
+    missing = [p for p in phases if p not in phase_prompts]
+    if missing:
+        raise ValueError(
+            f"No prompt builder for phase(s) {missing}. "
+            f"Known phases: {sorted(phase_prompts)}. "
+            "Pass prompt_builders={'<phase>': lambda sample: ...} to add one."
+        )
+
+    # from_cli_args silently enables nothing for an unrecognised name, which
+    # would run the whole extraction and emit an empty features file.
+    choices = f"Choose from: {', '.join(SIGNAL_NAMES)}."
+    if not signals:
+        raise ValueError(f"At least one signal is required. {choices}")
+    unknown = [s for s in signals if s not in SIGNAL_NAMES]
+    if unknown:
+        raise ValueError(f"Unknown signal(s) {unknown}. {choices}")
+
+    # Prefill-only: we want the model to process the prompt without generating.
+    # vLLM requires at least one token of generation, so we set max_tokens=1.
+    prefill_params = vllm.SamplingParams(max_tokens=1)
 
     # Set up output directory
     if outdir is None:
@@ -492,39 +622,52 @@ def main(
 
     svd_features_path = outdir_path / "svd_features.jsonl"
 
-    # Write config metadata (num_layers added after LLM creation below)
-    extract_metadata = {
-        "model": model,
-        "dataset": dataset_name,
-        "max_samples": max_samples,
-        "svd_interval": 1,
-        "svd_rank": svd_rank,
-        "method": method or "randomized",
-        "heads": list(heads) if heads else [0],
-        "signals": list(signals),
-        "max_tokens": max_tokens,
-    }
+    # Built here rather than by the caller so the output path goes in at
+    # construction time — the config is frozen, and patching it afterwards with
+    # model_copy(update={"output": {...}}) assigns the dict verbatim without
+    # validation, leaving config.output a plain dict that breaks attribute
+    # access downstream.
+    config = GlassboxConfig.from_cli_args(
+        signals=signals,
+        # Pinned, not a parameter. Extraction is prefill-only, so each request is
+        # a single forward pass and the backend gates on `state.step % interval`
+        # with step already incremented to 1. Only interval=1 satisfies that;
+        # any other value emits nothing and the run "succeeds" with no features
+        # file at all.
+        interval=1,
+        rank=rank,
+        method=method,
+        heads=heads,
+        threshold=threshold,
+        block_size=block_size,
+        output_path=str(svd_features_path),
+        otel=otel,
+    )
 
     log(f"Results directory: {outdir_path}")
     log(f"Model: {model}")
     log(f"Dataset: {dataset_name} ({len(samples)} samples)")
-    log(f"SVD: rank={svd_rank}, method={method or 'randomized'}")
     log(f"Signals: {', '.join(signals)}")
-    if heads:
-        log(f"Heads: {list(heads)}")
+    log(f"Params: rank={rank}, method={method}, heads={list(heads) or [0]}")
 
-    # Configure glassbox backend (interval=1 for prefill-only extraction)
-    gb_config = GlassboxConfig.from_cli_args(
-        signals=signals,
-        interval=1,
-        rank=svd_rank,
-        method=method,
-        heads=heads,
-        threshold=threshold,
-        output_path=str(svd_features_path),
-        otel=True if otel else None,
-    )
-    svd_mod.SVDTritonAttentionImpl.set_config(gb_config)
+    # Save extraction metadata.  These are the arguments as given, not values
+    # recovered from the config — `glassbox-analyze` reads svd_interval/svd_rank
+    # for its config banner and regenerating features.parquet needs heads.  The
+    # resolved nested config rides along as the authoritative record.
+    extract_metadata = {
+        "model": model,
+        "dataset": dataset_name,
+        "signals": list(signals),
+        "phases": list(phases),
+        "n_samples": len(samples),
+        "svd_interval": 1,
+        "heads": list(heads) or [0],
+        "svd_rank": rank,
+        "method": method or "randomized",
+        "config": config.model_dump(mode="json"),
+    }
+
+    svd_mod.SVDTritonAttentionImpl.set_config(config)
 
     # Create vLLM engine
     log("Creating vLLM engine with CUSTOM attention backend")
@@ -553,35 +696,24 @@ def main(
 
     request_counter = 0
     for i, sample in enumerate(samples):
-        try:
-            # Two-phase prefill: question-only baseline, then full (prompt + response)
-            prompt_q = f"Q: {sample['question']}\nA:"
-            prompt_full = f"Q: {sample['question']}\nA: {sample['response']}"
-
-            for phase, prompt in [
-                ("question", prompt_q),
-                ("full", prompt_full),
-            ]:
-                outputs = llm.generate(
-                    [prompt],
-                    vllm.SamplingParams(max_tokens=max_tokens),
-                )
-                sample_row = {
-                    "request_id": request_counter,
-                    "sample_id": sample["idx"],
-                    "phase": phase,
-                    "dataset": dataset_name,
-                    **sample,
-                    "prompt_length": len(prompt),
-                    "generated": outputs[0].outputs[0].text,
-                }
-                samples_f.write(json.dumps(sample_row) + "\n")
-                samples_f.flush()
-                request_counter += 1
-
-        except Exception as e:
-            log(f"  [{i + 1}/{len(samples)}] ERROR: {e}")
-            continue
+        for phase in phases:
+            prompt = phase_prompts[phase](sample)
+            outputs = llm.generate(
+                [prompt],
+                prefill_params,
+            )
+            sample_row = {
+                "request_id": request_counter,
+                "sample_id": sample["idx"],
+                "phase": phase,
+                "dataset": dataset_name,
+                **sample,
+                "prompt_length": len(prompt),
+                "generated": outputs[0].outputs[0].text,
+            }
+            samples_f.write(json.dumps(sample_row) + "\n")
+            samples_f.flush()
+            request_counter += 1
 
         label_str = "HALL" if sample["label"] == 1 else "OK"
         if (i + 1) % 10 == 0 or i == 0:
@@ -595,13 +727,15 @@ def main(
     if parquet:
         feature_columns = _build_feature_columns(
             num_layers,
-            heads,
-            signals,
-            ad_top_k=gb_config.selfattn.top_k,
-            lap_top_k=gb_config.laplacian.top_k,
+            list(heads) or [0],
+            tuple(signals),
+            ad_top_k=config.selfattn.top_k,
+            lap_top_k=config.laplacian.top_k,
         )
         parquet_path = outdir_path / "features.parquet"
         _write_parquet(svd_features_path, samples_path, parquet_path, feature_columns)
+
+    return outdir_path
 
 
 if __name__ == "__main__":
