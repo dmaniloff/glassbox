@@ -1,35 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from functools import cached_property
 from typing import Literal
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
-# Canonical signal names (user-facing)
-SIGNAL_NAMES: list[str] = [
-    "spectral",
-    "routing",
-    "asymmetry",
-    "cyclic",
-    "magnetic",
-    "tracker",
-    "selfattn",
-    "laplacian",
-]
-
-# Signals that use SVD rank/method
-SVD_SIGNALS: set[str] = {"spectral", "routing", "tracker"}
-
-# Signals that use threshold/block_size (materialized vs matrix-free two-tier)
-THRESHOLD_SIGNALS: set[str] = {
-    "routing",
-    "asymmetry",
-    "magnetic",
-    "tracker",
-    "selfattn",
-    "laplacian",
-}
+# SIGNAL_NAMES / SVD_SIGNALS / THRESHOLD_SIGNALS are DERIVED from the GlassboxConfig
+# field annotations at the bottom of this module (see ``GlassboxConfig.signal_names``
+# and ``GlassboxConfig.signals_with``).  Registering a signal is therefore two edits --
+# declare its config class, add the field -- and every generic loop picks it up.
 
 
 def validate_window_modes(
@@ -112,113 +94,156 @@ class SignalConfigBase(BaseModel):
     heads: list[int] = [0]
 
 
-class SpectralConfig(SignalConfigBase):
-    """SVD of pre-softmax scores matrix S = QK^T."""
+# --- Capability mixins -------------------------------------------------------------
+#
+# A signal opts into a capability by inheriting the mixin carrying its fields.  Generic
+# code then tests ``issubclass``/``isinstance`` instead of consulting a hand-maintained
+# set of signal names, so a capability and its parameters cannot drift apart.  Two
+# families, distinguished by suffix:
+#
+#   ``*Params`` -- algorithm knobs.
+#   ``*Mode``   -- opt-in behaviours.  StreamingMode/IncrementalMode are policed by
+#                  ``validate_window_modes``; CausalMode is a plain algorithm switch.
 
-    enabled: bool = True
-    rank: int = 4
-    method: Literal["randomized", "lanczos"] = "randomized"
 
+class SVDParams(BaseModel):
+    """Truncated-SVD knobs, for signals whose statistic is a singular triplet.
 
-class RoutingConfig(SignalConfigBase):
-    """SVD of post-softmax degree-normalized operator M = D_Q^{-1/2} A D_K^{-1/2}."""
+    ``rank`` is bounded because a negative rank silently drops singular values rather
+    than failing.
+    """
 
-    # Bounds guard against crashes / silent garbage: block_size=0 raises in range() on the
-    # matrix-free path; negative rank silently drops singular values; negative threshold
-    # forces the noisy path for all L.
     rank: int = Field(4, ge=1)
     method: Literal["randomized", "lanczos"] = "randomized"
-    # Materialize M for L <= threshold, matrix-free above.
-    # Crossover ~512 on NVIDIA A10G (bench_hodge.py, 2026-03-24, d=64, rank=4):
-    #   L=256: mat 21ms vs mf 39ms (1.8x), L=512: 54ms vs 61ms (1.1x),
-    #   L=1024: 174ms vs 110ms (0.6x). Materialized dominated by svdvals ~L^1.6.
+
+
+class ThresholdParams(BaseModel):
+    """Two-tier crossover: materialize the L x L operator for ``L <= threshold``, use
+    the blocked matrix-free path above it.
+
+    Bounds guard against crashes / silent garbage: ``block_size=0`` raises in ``range()``
+    on the matrix-free path, and a negative ``threshold`` forces the noisy path for all L.
+
+    Crossover ~512 on NVIDIA A10G (bench_hodge.py, 2026-03-24, d=64, rank=4):
+      L=256: mat 21ms vs mf 39ms (1.8x), L=512: 54ms vs 61ms (1.1x),
+      L=1024: 174ms vs 110ms (0.6x). Materialized dominated by svdvals ~L^1.6.
+    """
+
     threshold: int = Field(512, ge=0)
     block_size: int = Field(256, ge=1)
+
+
+class CausalMode(BaseModel):
+    """Apply the causal mask when forming the operator.
+
+    Only for signals reading the post-softmax operator.  The orientation signals
+    (``cyclic``, ``magnetic``) deliberately omit this mixin: they live on the UNMASKED
+    pre-softmax scores, where causal masking would make them vacuous.  ``False`` is
+    meaningful for encoder / cross-attention.  See docs/operator-choice.md.
+    """
+
     causal: bool = True
-    # Seed for the matrix-free commutator-norm Hutchinson estimator.
-    hodge_seed: int = 42
 
 
-class CyclicTrianglesConfig(SignalConfigBase):
-    """Cyclic-triangle count |T_cyc| of the pre-softmax sign tournament ω(QKᵀ).
+class StreamingMode(BaseModel):
+    """Opt into *block-diagonal global* accumulation (docs/streaming-modes.md).
 
-    Operates on the UNMASKED pre-softmax scores S = QKᵀ (NOT post-softmax — a causal
-    post-softmax tournament is transitive ⇒ |T_cyc| = 0; see docs/operator-choice.md). The
-    count is exact (Kendall identity); no threshold/estimation. When ``incremental`` is set,
-    the out-degree vector + running count are maintained across fires and only the delta
-    tokens are folded per fire (the O(ΔE) streaming update), requiring the unbounded buffer.
+    Per-window sufficient statistics are summed into one global number, which is
+    unbiased ONLY over disjoint (tumbling) windows -- enforced by
+    ``validate_window_modes``.  Sound only for ADDITIVE statistics (Frobenius
+    sums-of-squares); spectral and combinatorial statistics have no valid
+    block-diagonal mode at all.
+
+    (The doc names this mode "block-diagonal global"; note that "streaming" is also its
+    umbrella term for all four modes, of which this is one.)
+    """
+
+    streaming: bool = False
+
+
+class IncrementalMode(BaseModel):
+    """Opt into *exact-full global* streaming (docs/streaming-modes.md).
+
+    Running state is maintained across fires and only the delta tokens are folded per
+    fire (an O(delta) update), reproducing the exact full-sequence statistic.  Requires
+    the unbounded buffer -- enforced by ``validate_window_modes`` -- because a bounded
+    buffer trims priors and breaks exactness.
     """
 
     incremental: bool = False
 
 
-class MagneticConfig(SignalConfigBase):
+class SpectralConfig(SVDParams, SignalConfigBase):
+    """SVD of pre-softmax scores matrix S = QK^T."""
+
+    enabled: bool = True
+
+
+class RoutingConfig(SVDParams, ThresholdParams, CausalMode, SignalConfigBase):
+    """SVD of post-softmax degree-normalized operator M = D_Q^{-1/2} A D_K^{-1/2}."""
+
+    # Seed for the matrix-free commutator-norm Hutchinson estimator.
+    hodge_seed: int = 42
+
+
+class CyclicTrianglesConfig(IncrementalMode, SignalConfigBase):
+    """Cyclic-triangle count |T_cyc| of the pre-softmax sign tournament ω(QKᵀ).
+
+    Operates on the UNMASKED pre-softmax scores S = QKᵀ (NOT post-softmax — a causal
+    post-softmax tournament is transitive ⇒ |T_cyc| = 0; see docs/operator-choice.md). The
+    count is exact (Kendall identity); no threshold/estimation. Under ``incremental`` the
+    out-degree vector + running count are maintained across fires and only the delta tokens
+    are folded per fire (the O(ΔE) streaming update).
+    """
+
+
+class MagneticConfig(ThresholdParams, IncrementalMode, SignalConfigBase):
     """Magnetic-Laplacian frustration λ₁ of the pre-softmax tournament ω(QKᵀ).
 
     Operates on the UNMASKED pre-softmax scores S = QKᵀ (NOT post-softmax — a causal tournament
     is transitive ⇒ λ₁ = 0; see docs/operator-choice.md). Dense Hermitian eig for L ≤ threshold,
     complex-Hermitian Lanczos (which="smallest") above. The construction (L_φ = D − A⊙e^{iθ},
     W=(|S_ij|+|S_ji|)/2, θ=arctan((S_ij−S_ji)/(S_ij+S_ji))); see *directed-attention-geometry*.
+
+    Under ``incremental`` it reports the streamable phase-curl frustration energy (Hodge curl
+    of θ via the row-sum identity, eigensolver-free) maintained across fires, instead of the
+    dense λ₁ — the exact full-sequence frustration energy. See issue #68.
     """
 
-    threshold: int = 512
-    block_size: int = 256
-    # incremental: report the streamable phase-curl frustration energy (Hodge curl of θ via the
-    # row-sum identity, eigensolver-free) maintained across fires, instead of the dense λ₁.
-    # Exact full-sequence frustration energy; requires the unbounded buffer. See issue #68.
-    incremental: bool = False
 
-
-class AsymmetryConfig(SignalConfigBase):
+class AsymmetryConfig(
+    ThresholdParams, CausalMode, StreamingMode, IncrementalMode, SignalConfigBase
+):
     """Asymmetry coefficient G = ||P_asym||_F / ||P||_F of row-stochastic attention P.
 
     Hodge G signal.  Computed on the post-softmax attention P (NOT the degree-normalized
     M — see docs/operator-choice.md).  Matrix-free Hutchinson estimator (Route B, direct
-    ||P_asym z||^2) above ``threshold``, exact materialized below.  When ``streaming`` is
-    set, the per-window sufficient statistics (||P_asym||_F^2, ||P||_F^2) are accumulated
-    into a global G — unbiased only under disjoint (tumbling) windowing.
+    ||P_asym z||^2) above ``threshold``, exact materialized below.  Under ``streaming`` the
+    per-window sufficient statistics (||P_asym||_F^2, ||P||_F^2) are accumulated into a
+    global G.  Under ``incremental`` it is the exact full-operator G, folding only delta
+    tokens per fire — O(1) scalars but an O(N) row-sum vector r per (layer, head); see
+    ``_incremental_reduce``.
     """
 
-    # Bounds guard against crashes / silent NaN: block_size=0 raises in range(),
-    # n_hutchinson=0 divides by zero, negative threshold forces the noisy path for all L.
-    threshold: int = Field(512, ge=0)
-    block_size: int = Field(256, ge=1)
-    causal: bool = True
+    # n_hutchinson=0 would divide by zero.
     n_hutchinson: int = Field(32, ge=1)
     seed: int = 42
-    streaming: bool = False
-    # incremental: exact full-operator G, folding only delta tokens per fire (causal,
-    # unbounded buffer). O(1) scalars but an O(N) row-sum vector r per (layer, head);
-    # see _incremental_reduce. See docs/operator-choice.md.
-    incremental: bool = False
 
 
-class TrackerConfig(SignalConfigBase):
+class TrackerConfig(SVDParams, ThresholdParams, CausalMode, SignalConfigBase):
     """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
 
-    rank: int = 4
-    method: Literal["randomized", "lanczos"] = "randomized"
-    threshold: int = 512
-    block_size: int = 256
-    causal: bool = True
 
-
-class SelfAttnConfig(SignalConfigBase):
+class SelfAttnConfig(ThresholdParams, CausalMode, SignalConfigBase):
     """Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)."""
 
     top_k: int = 10
-    threshold: int = 512
-    block_size: int = 256
-    causal: bool = True
 
 
-class LaplacianConfig(SignalConfigBase):
+class LaplacianConfig(ThresholdParams, CausalMode, SignalConfigBase):
     """Laplacian eigenvalues from attention graphs (LapEigvals, EMNLP 2025)."""
 
     top_k: int = 10
-    threshold: int = 512
-    block_size: int = 256
-    causal: bool = True
 
 
 class OutputConfig(BaseModel):
@@ -273,22 +298,60 @@ class GlassboxConfig(BaseSettings):
     #   proofs for streaming local→global merges.
     q_buffer_mode: Literal["sliding", "tumbling"] = "sliding"
 
+    @classmethod
+    def signal_names(cls) -> tuple[str, ...]:
+        """Names of the per-signal config fields, in declaration order.
+
+        Derived from the field annotations, so this is the single source of truth for
+        "which signals exist" -- declaring the field is enough to register one.
+        """
+        return tuple(
+            name
+            for name, f in cls.model_fields.items()
+            if isinstance(f.annotation, type) and issubclass(f.annotation, SignalConfigBase)
+        )
+
+    @classmethod
+    def signals_with(cls, capability: type[BaseModel]) -> frozenset[str]:
+        """Names of the signals whose config inherits ``capability`` (a mixin above)."""
+        return frozenset(
+            name
+            for name in cls.signal_names()
+            if issubclass(cls.model_fields[name].annotation, capability)  # type: ignore[arg-type]
+        )
+
+    @cached_property
+    def signals(self) -> Mapping[str, SignalConfigBase]:
+        """Per-signal configs as a name -> config mapping.
+
+        The typed iteration surface for "do X for every signal" -- prefer it to
+        ``getattr(config, name)``.  Cached because the backend consults it per layer per
+        forward step (~1us to rebuild, ~1% of decode at 32 layers); safe to cache because
+        the model is frozen.
+
+        Declared ``Mapping`` so type checkers reject mutation.  It is deliberately a plain
+        dict at runtime rather than a ``MappingProxyType``: the validator populates this
+        cache on every instance, and vLLM both pickles the config into its spawned
+        subprocesses and deepcopies it -- neither of which accepts a ``mappingproxy``.
+        """
+        return {name: getattr(self, name) for name in self.signal_names()}
+
     @model_validator(mode="after")
     def _check_window_modes(self) -> GlassboxConfig:
         """Reject mode<->windowing combinations that would silently mis-report a statistic.
 
-        Generic over SIGNAL_NAMES via getattr, so it is a no-op for signals without
-        streaming modes and automatically guards any signal that adds ``streaming`` /
-        ``incremental`` flags. See docs/streaming-modes.md for the sound-mode matrix.
+        A signal is guarded iff it inherits ``StreamingMode`` / ``IncrementalMode``, so
+        opting into a mode and being policed for it are the same act -- there is no way to
+        add the flag but miss the check.  See docs/streaming-modes.md for the sound matrix.
         """
         modes = [
             (
                 name,
-                bool(getattr(getattr(self, name), "enabled", False)),
-                bool(getattr(getattr(self, name), "streaming", False)),
-                bool(getattr(getattr(self, name), "incremental", False)),
+                cfg.enabled,
+                isinstance(cfg, StreamingMode) and cfg.streaming,
+                isinstance(cfg, IncrementalMode) and cfg.incremental,
             )
-            for name in SIGNAL_NAMES
+            for name, cfg in self.signals.items()
         ]
         validate_window_modes(modes, self.q_buffer_mode, self.q_buffer_max_tokens)
         return self
@@ -371,25 +434,34 @@ class GlassboxConfig(BaseSettings):
 
         signal_set = set(signals)
 
-        for sig_name in SIGNAL_NAMES:
+        # Each flag lands only on the signals whose config actually declares that field, so
+        # "which flag applies where" is answered by the config classes themselves rather
+        # than by a parallel set of signal names.  Note ``is not None``: threshold=0 is
+        # meaningful (forces matrix-free for every L) and must not be dropped as falsy.
+        requested: dict = {
+            "interval": interval,
+            "rank": rank,
+            "method": method,
+            "threshold": threshold,
+            "block_size": block_size,
+            "heads": list(heads) if heads else None,
+        }
+
+        for sig_name in cls.signal_names():
             sig_dict: dict = {"enabled": sig_name in signal_set}
-
             if sig_name in signal_set:
-                if interval is not None:
-                    sig_dict["interval"] = interval
-                if heads:
-                    sig_dict["heads"] = list(heads)
-                if sig_name in SVD_SIGNALS:
-                    if rank is not None:
-                        sig_dict["rank"] = rank
-                    if method is not None:
-                        sig_dict["method"] = method
-                if sig_name in THRESHOLD_SIGNALS:
-                    if threshold is not None:
-                        sig_dict["threshold"] = threshold
-                    if block_size is not None:
-                        sig_dict["block_size"] = block_size
-
+                fields = cls.model_fields[sig_name].annotation.model_fields  # type: ignore[union-attr]
+                sig_dict.update(
+                    {k: v for k, v in requested.items() if v is not None and k in fields}
+                )
             overrides[sig_name] = sig_dict
 
         return cls(**overrides)
+
+
+# Derived registries.  These are the public constants callers import; they are computed
+# from the GlassboxConfig field annotations rather than hand-listed, so they cannot drift
+# out of sync with the config classes they describe.
+SIGNAL_NAMES: tuple[str, ...] = GlassboxConfig.signal_names()
+SVD_SIGNALS: frozenset[str] = GlassboxConfig.signals_with(SVDParams)
+THRESHOLD_SIGNALS: frozenset[str] = GlassboxConfig.signals_with(ThresholdParams)

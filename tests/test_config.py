@@ -1,9 +1,22 @@
+import copy
+import pickle
 import textwrap
 
 import pydantic
 import pytest
 
-from glassbox.config import THRESHOLD_SIGNALS, GlassboxConfig, validate_window_modes
+from glassbox.config import (
+    THRESHOLD_SIGNALS,
+    CausalMode,
+    GlassboxConfig,
+    IncrementalMode,
+    SignalConfigBase,
+    StreamingMode,
+    SVDParams,
+    ThresholdParams,
+    validate_window_modes,
+)
+from glassbox.diagnostics import DIAGNOSTIC_REGISTRY
 
 
 def test_matvec_strategy_default():
@@ -290,3 +303,81 @@ class TestWindowModeValidator:
         # a signal without streaming/incremental is valid under any window
         validate_window_modes([("sig", True, False, False)], "sliding", 0)
         validate_window_modes([("sig", True, False, False)], "tumbling", 256)
+
+
+# ── derived registries ───────────────────────────────────────────────────
+
+
+class TestDerivedRegistries:
+    """The signal registry is derived from the GlassboxConfig field annotations.
+
+    These pin the invariants that make that derivation safe: the one registry that
+    *cannot* be derived (DIAGNOSTIC_REGISTRY, which lives in another module) must agree,
+    and a capability's fields must travel with its mixin rather than be hand-declared.
+    """
+
+    def test_diagnostic_registry_matches_signal_names(self):
+        """The only hand-maintained registry left — a new signal must appear in both."""
+        assert set(DIAGNOSTIC_REGISTRY) == set(GlassboxConfig.signal_names())
+
+    def test_signals_mapping_covers_every_signal(self):
+        config = GlassboxConfig()
+        assert set(config.signals) == set(GlassboxConfig.signal_names())
+        assert all(isinstance(c, SignalConfigBase) for c in config.signals.values())
+
+    def test_config_survives_process_boundaries(self):
+        """vLLM pickles and deepcopies the config into its spawned subprocesses.
+
+        Regression: caching ``signals`` as a ``MappingProxyType`` broke both, and because
+        the validator reads ``signals`` the cache is populated on every single instance.
+        """
+        restored = pickle.loads(pickle.dumps(GlassboxConfig()))
+        assert set(restored.signals) == set(GlassboxConfig.signal_names())
+        assert set(copy.deepcopy(GlassboxConfig()).signals) == set(restored.signals)
+
+    @pytest.mark.parametrize(
+        ("mixin", "fields"),
+        [
+            (SVDParams, ("rank", "method")),
+            (ThresholdParams, ("threshold", "block_size")),
+            (CausalMode, ("causal",)),
+            (StreamingMode, ("streaming",)),
+            (IncrementalMode, ("incremental",)),
+        ],
+    )
+    def test_capability_fields_travel_with_their_mixin(self, mixin, fields):
+        """A config declares a capability's fields iff it inherits that mixin.
+
+        Hand-declaring e.g. ``streaming`` without inheriting StreamingMode would make
+        ``_check_window_modes`` skip the signal — silently unguarded, which is exactly the
+        failure the mixins exist to prevent.
+        """
+        config = GlassboxConfig()
+        for name in GlassboxConfig.signal_names():
+            cfg_cls = type(getattr(config, name))
+            for field in fields:
+                assert (field in cfg_cls.model_fields) is issubclass(cfg_cls, mixin), (
+                    f"{name}: {field!r} present={field in cfg_cls.model_fields} but "
+                    f"issubclass({cfg_cls.__name__}, {mixin.__name__})="
+                    f"{issubclass(cfg_cls, mixin)}"
+                )
+
+    def test_orientation_signals_are_not_causally_masked(self):
+        """cyclic/magnetic live on the UNMASKED pre-softmax scores.
+
+        A causal tournament is transitive, so masking them makes the statistic
+        identically zero — see docs/operator-choice.md.
+        """
+        assert GlassboxConfig.signals_with(CausalMode).isdisjoint({"cyclic", "magnetic"})
+
+    @pytest.mark.parametrize("sig", sorted(THRESHOLD_SIGNALS))
+    @pytest.mark.parametrize(("field", "bad"), [("block_size", 0), ("threshold", -1)])
+    def test_two_tier_bounds_enforced_uniformly(self, sig, field, bad):
+        """Every two-tier signal rejects the same out-of-range values.
+
+        Regression: these bounds used to be hand-declared and only routing/asymmetry had
+        them — magnetic/tracker/selfattn/laplacian accepted block_size=0 (which raises in
+        ``range()`` on the matrix-free path) and negative thresholds.
+        """
+        with pytest.raises(pydantic.ValidationError):
+            GlassboxConfig.from_cli_args(signals=(sig,), **{field: bad})

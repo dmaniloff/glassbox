@@ -19,7 +19,12 @@ import vllm
 
 # Import triggers @register_backend(AttentionBackendEnum.CUSTOM)
 import glassbox.backends.svd_backend as svd_mod
-from glassbox.config import SIGNAL_NAMES, GlassboxConfig, parse_signal_names
+from glassbox.config import (
+    SIGNAL_NAMES,
+    GlassboxConfig,
+    SignalConfigBase,
+    parse_signal_names,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -164,50 +169,27 @@ def main(
 
     logger.info("Creating vLLM engine with CUSTOM attention backend")
     logger.info("Model: %s", model)
+    # Driven by config.signals so every signal is reported; the previous hand-written
+    # block silently omitted asymmetry/cyclic/magnetic.
     logger.info(
-        "Signals: spectral=%s routing=%s tracker=%s selfattn=%s laplacian=%s",
-        "enabled" if config.spectral.enabled else "disabled",
-        "enabled" if config.routing.enabled else "disabled",
-        "enabled" if config.tracker.enabled else "disabled",
-        "enabled" if config.selfattn.enabled else "disabled",
-        "enabled" if config.laplacian.enabled else "disabled",
+        "Signals: %s",
+        " ".join(
+            f"{name}={'enabled' if cfg.enabled else 'disabled'}"
+            for name, cfg in config.signals.items()
+        ),
     )
-    if config.spectral.enabled:
+    orchestration = set(SignalConfigBase.model_fields)
+    for name, cfg in config.signals.items():
+        if not cfg.enabled:
+            continue
+        # Everything past the orchestration fields is that signal's algorithm params.
+        params = " ".join(f"{k}={v}" for k, v in cfg.model_dump().items() if k not in orchestration)
         logger.info(
-            "Spectral: interval=%s rank=%s method=%s heads=%s",
-            config.spectral.interval,
-            config.spectral.rank,
-            config.spectral.method,
-            config.spectral.heads,
-        )
-    if config.routing.enabled:
-        logger.info(
-            "Routing: interval=%s rank=%s method=%s heads=%s",
-            config.routing.interval,
-            config.routing.rank,
-            config.routing.method,
-            config.routing.heads,
-        )
-    if config.tracker.enabled:
-        logger.info(
-            "Tracker: interval=%s rank=%s method=%s heads=%s",
-            config.tracker.interval,
-            config.tracker.rank,
-            config.tracker.method,
-            config.tracker.heads,
-        )
-    if config.selfattn.enabled:
-        logger.info(
-            "SelfAttn: interval=%s heads=%s",
-            config.selfattn.interval,
-            config.selfattn.heads,
-        )
-    if config.laplacian.enabled:
-        logger.info(
-            "Laplacian: interval=%s heads=%s top_k=%s",
-            config.laplacian.interval,
-            config.laplacian.heads,
-            config.laplacian.top_k,
+            "  %s: interval=%s heads=%s %s",
+            name,
+            cfg.interval,
+            cfg.heads,
+            params,
         )
     if config.emit.otel:
         logger.info("OTel emission: enabled")
