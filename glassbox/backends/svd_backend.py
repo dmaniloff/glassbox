@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
 )
 
-from glassbox.config import GlassboxConfig, SignalConfigBase
+from glassbox.config import GlassboxConfig
 from glassbox.diagnostics import DIAGNOSTIC_REGISTRY
 from glassbox.handlers import LoggingHandler, create_handlers_from_config
 from glassbox.qbuffer import QBuffer
@@ -149,12 +149,13 @@ class SVDTritonAttentionImpl(TritonAttentionImpl):
         """Instantiate Diagnostic objects from config for each signal."""
         cls._diagnostics = {}
         for sig_name, diag_cls in DIAGNOSTIC_REGISTRY.items():
-            sig_cfg = cls.config.signals[sig_name]
-            # Strip orchestration fields (enabled/interval/heads); the rest are
-            # the diagnostic's algorithm params. Derived from the base so adding
-            # an orchestration field there keeps it out of the constructor.
-            params = sig_cfg.model_dump(exclude=set(SignalConfigBase.model_fields))
-            cls._diagnostics[sig_name] = diag_cls(**params)
+            # Each Diagnostic takes its own config object and reads what it needs.
+            # Previously this splatted model_dump(exclude=orchestration fields) as
+            # kwargs, which required every constructor signature to mirror its config
+            # class exactly -- 32 (param, default) pairs written twice, a TypeError
+            # whenever a config field was added without updating the constructor, and
+            # a path that bypassed the field bounds entirely.
+            cls._diagnostics[sig_name] = diag_cls(cls.config.signals[sig_name])
 
     def forward(
         self,

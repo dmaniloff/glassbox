@@ -30,6 +30,7 @@ from typing import Any
 
 import torch
 
+from glassbox.config import MagneticConfig
 from glassbox.results import MagneticFeatures
 from glassbox.svd import hermitian_lanczos
 
@@ -38,13 +39,14 @@ EPSILON = 1e-10
 
 class MagneticDiagnostic:
     signal_name = "magnetic"
+    features_model = MagneticFeatures
 
-    def __init__(self, threshold: int = 512, block_size: int = 256, incremental: bool = False):
-        self.threshold = threshold
-        self.block_size = block_size
+    def __init__(self, config: MagneticConfig):
+        self.threshold = config.threshold
+        self.block_size = config.block_size
         # incremental: report the streamable phase-curl frustration energy (Hodge curl of θ via
         # the row-sum identity, eigensolver-free) folded across fires, instead of the dense λ₁.
-        self.incremental = incremental
+        self.incremental = config.incremental
         self._cache: tuple | None = None  # (key, (lambda1, evec, phase_curl, phase_curl_w))
 
     @staticmethod

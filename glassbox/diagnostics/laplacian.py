@@ -7,26 +7,23 @@ from typing import Any
 
 import torch
 
+from glassbox.config import LaplacianConfig
 from glassbox.laplacian_eigvals import (
     compute_laplacian_eigvals_materialized,
     compute_laplacian_eigvals_matrix_free,
 )
+from glassbox.results import LaplacianFeatures
 
 
 class LaplacianDiagnostic:
     signal_name = "laplacian"
+    features_model = LaplacianFeatures
 
-    def __init__(
-        self,
-        top_k: int = 10,
-        threshold: int = 512,
-        block_size: int = 256,
-        causal: bool = True,
-    ):
-        self.top_k = top_k
-        self.threshold = threshold
-        self.block_size = block_size
-        self.causal = causal
+    def __init__(self, config: LaplacianConfig):
+        self.top_k = config.top_k
+        self.threshold = config.threshold
+        self.block_size = config.block_size
+        self.causal = config.causal
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
         scale = 1.0 / math.sqrt(Qh.shape[1])

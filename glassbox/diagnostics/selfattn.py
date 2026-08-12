@@ -11,22 +11,19 @@ from glassbox.attention_diagonal import (
     compute_attention_diagonal_features_materialized,
     compute_attention_diagonal_features_matrix_free,
 )
+from glassbox.config import SelfAttnConfig
+from glassbox.results import SelfAttnFeatures
 
 
 class SelfAttnDiagnostic:
     signal_name = "selfattn"
+    features_model = SelfAttnFeatures
 
-    def __init__(
-        self,
-        top_k: int = 10,
-        threshold: int = 512,
-        block_size: int = 256,
-        causal: bool = True,
-    ):
-        self.top_k = top_k
-        self.threshold = threshold
-        self.block_size = block_size
-        self.causal = causal
+    def __init__(self, config: SelfAttnConfig):
+        self.top_k = config.top_k
+        self.threshold = config.threshold
+        self.block_size = config.block_size
+        self.causal = config.causal
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
         scale = 1.0 / math.sqrt(Qh.shape[1])
