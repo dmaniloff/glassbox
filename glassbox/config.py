@@ -136,10 +136,15 @@ class ThresholdParams(BaseModel):
 class CausalMode(BaseModel):
     """Apply the causal mask when forming the operator.
 
-    Only for signals reading the post-softmax operator.  The orientation signals
-    (``cyclic``, ``magnetic``) deliberately omit this mixin: they live on the UNMASKED
-    pre-softmax scores, where causal masking would make them vacuous.  ``False`` is
-    meaningful for encoder / cross-attention.  See docs/operator-choice.md.
+    Carried by exactly the signals that read a POST-softmax operator (P or M).  The three
+    PRE-softmax signals deliberately omit it, for two different reasons:
+
+    - ``spectral`` reads the raw scores S = QKᵀ, which are never causally masked at all --
+      the mask is applied inside the softmax, not to S.  There is no mask to configure.
+    - ``cyclic`` / ``magnetic`` additionally *must not* be masked: a causal tournament is
+      transitive, so masking makes their statistic identically zero.
+
+    ``False`` is meaningful for encoder / cross-attention.  See docs/operator-choice.md.
     """
 
     causal: bool = True

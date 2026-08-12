@@ -362,13 +362,20 @@ class TestDerivedRegistries:
                     f"{issubclass(cfg_cls, mixin)}"
                 )
 
-    def test_orientation_signals_are_not_causally_masked(self):
-        """cyclic/magnetic live on the UNMASKED pre-softmax scores.
+    def test_causal_mode_tracks_the_post_softmax_operator(self):
+        """CausalMode is carried by exactly the post-softmax signals.
 
-        A causal tournament is transitive, so masking them makes the statistic
-        identically zero — see docs/operator-choice.md.
+        The pre-softmax three omit it for two different reasons (docs/operator-choice.md):
+        ``spectral`` reads raw S = QKᵀ, which is never causally masked — the mask is
+        applied inside the softmax — so there is no mask to configure; ``cyclic`` and
+        ``magnetic`` additionally *must not* be masked, since a causal tournament is
+        transitive and their statistic would be identically zero.
         """
-        assert GlassboxConfig.signals_with(CausalMode).isdisjoint({"cyclic", "magnetic"})
+        pre_softmax = {"spectral", "cyclic", "magnetic"}
+        assert (
+            set(GlassboxConfig.signal_names()) - GlassboxConfig.signals_with(CausalMode)
+            == pre_softmax
+        )
 
     @pytest.mark.parametrize("sig", sorted(THRESHOLD_SIGNALS))
     @pytest.mark.parametrize(("field", "bad"), [("block_size", 0), ("threshold", -1)])
