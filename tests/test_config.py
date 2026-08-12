@@ -345,22 +345,32 @@ class TestDerivedRegistries:
             (IncrementalMode, ("incremental",)),
         ],
     )
-    def test_capability_fields_travel_with_their_mixin(self, mixin, fields):
-        """A config declares a capability's fields iff it inherits that mixin.
+    def test_capability_fields_are_never_hand_declared(self, mixin, fields):
+        """A config carrying a capability's field must inherit that capability's mixin.
 
-        Hand-declaring e.g. ``streaming`` without inheriting StreamingMode would make
-        ``_check_window_modes`` skip the signal — silently unguarded, which is exactly the
-        failure the mixins exist to prevent.
+        Hand-declaring the field instead works fine as far as Python and pydantic are
+        concerned — which is precisely the hazard, because the generic code keys off the
+        *type*, not the field:
+
+        - ``_check_window_modes`` tests ``isinstance(cfg, StreamingMode)``, so a
+          hand-declared ``streaming`` is silently never guarded: ``streaming=True`` over a
+          sliding window would be accepted and report a biased statistic.
+        - a hand-declared ``rank`` / ``threshold`` would miss the mixin's shared bounds and
+          drop out of ``SVD_SIGNALS`` / ``THRESHOLD_SIGNALS``.
+
+        Only this direction is asserted. The converse — inherit the mixin, get its fields —
+        is just how inheritance works, and testing it would say nothing about this design.
         """
         config = GlassboxConfig()
         for name in GlassboxConfig.signal_names():
             cfg_cls = type(getattr(config, name))
             for field in fields:
-                assert (field in cfg_cls.model_fields) is issubclass(cfg_cls, mixin), (
-                    f"{name}: {field!r} present={field in cfg_cls.model_fields} but "
-                    f"issubclass({cfg_cls.__name__}, {mixin.__name__})="
-                    f"{issubclass(cfg_cls, mixin)}"
-                )
+                if field in cfg_cls.model_fields:
+                    assert issubclass(cfg_cls, mixin), (
+                        f"{name} declares {field!r} without inheriting "
+                        f"{mixin.__name__}; generic code tests issubclass and would "
+                        f"silently skip it"
+                    )
 
     def test_causal_mode_tracks_the_post_softmax_operator(self):
         """CausalMode is carried by exactly the post-softmax signals.
