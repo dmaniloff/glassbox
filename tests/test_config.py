@@ -392,9 +392,16 @@ class TestDerivedRegistries:
     def test_two_tier_bounds_enforced_uniformly(self, sig, field, bad):
         """Every two-tier signal rejects the same out-of-range values.
 
-        Regression: these bounds used to be hand-declared and only routing/asymmetry had
-        them — magnetic/tracker/selfattn/laplacian accepted block_size=0 (which raises in
-        ``range()`` on the matrix-free path) and negative thresholds.
+        Not a test that pydantic's ``ge=`` works. It covers the one way a bound can go
+        missing that ``test_capability_fields_are_never_hand_declared`` provably cannot
+        see: a subclass *overriding* the field and dropping the constraint, e.g. writing
+        ``threshold: int = 1024`` rather than ``Field(1024, ge=0)`` while changing a
+        default. That still inherits ThresholdParams and still has the field, so the
+        structural test passes while ``threshold=-1`` is silently accepted again.
+
+        ``block_size=0`` raises in ``range()`` on the matrix-free path; a negative
+        ``threshold`` forces the noisy path for every L. Going through ``from_cli_args``
+        also pins the plumbing: the flag has to reach every two-tier signal.
         """
         with pytest.raises(pydantic.ValidationError):
             GlassboxConfig.from_cli_args(signals=(sig,), **{field: bad})
