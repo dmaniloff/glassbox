@@ -117,6 +117,20 @@ class SVDParams(BaseModel):
     method: Literal["randomized", "lanczos"] = "randomized"
 
 
+class TopKParams(BaseModel):
+    """Top-k truncation, for signals whose statistic is a length-k vector.
+
+    The signal emits a list-valued feature of this length, which the wide feature table
+    expands into ``k`` indexed columns.  Carrying it as a capability lets that table ask
+    ``signals_with(TopKParams)`` instead of naming the signals that happen to have a
+    ``top_k`` field today.
+
+    Bounded ``ge=1``: ``top_k=0`` would emit an empty vector and no columns at all.
+    """
+
+    top_k: int = Field(10, ge=1, description="Number of leading values to keep.")
+
+
 class ThresholdParams(BaseModel):
     """Two-tier crossover: materialize the L x L operator for ``L <= threshold``, use
     the blocked matrix-free path above it.
@@ -256,16 +270,12 @@ class TrackerConfig(SVDParams, ThresholdParams, CausalMode, SignalConfigBase):
     """Features from raw post-softmax attention A (AttentionTracker, arXiv:2411.00348)."""
 
 
-class SelfAttnConfig(ThresholdParams, CausalMode, SignalConfigBase):
+class SelfAttnConfig(TopKParams, ThresholdParams, CausalMode, SignalConfigBase):
     """Attention diagonal features (LLM-Check, NeurIPS 2024 + LapEigvals, EMNLP 2025)."""
 
-    top_k: int = 10
 
-
-class LaplacianConfig(ThresholdParams, CausalMode, SignalConfigBase):
+class LaplacianConfig(TopKParams, ThresholdParams, CausalMode, SignalConfigBase):
     """Laplacian eigenvalues from attention graphs (LapEigvals, EMNLP 2025)."""
-
-    top_k: int = 10
 
 
 class OutputConfig(BaseModel):

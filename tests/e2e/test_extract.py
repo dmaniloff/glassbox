@@ -224,3 +224,44 @@ def test_metadata_records_signal_params(outdir, model_name):
     assert meta["n_samples"] == 1
     # Full nested config travels alongside the flat keys for provenance.
     assert meta["config"]["spectral"]["rank"] == 3
+
+
+def test_parquet_written_for_a_signal_that_had_no_columns(outdir, model_name):
+    """``--parquet`` end to end, on a signal the old column builder had no branch for.
+
+    ``asymmetry`` produced zero columns and made this run fail; nothing exercised
+    ``--parquet`` through the CLI, so the whole path was uncovered.  Also pins the
+    unprefixed column names against the real model's layer count.
+    """
+    pq = pytest.importorskip("pyarrow.parquet")
+    main(
+        args=[
+            "--signal",
+            "asymmetry",
+            "--dataset",
+            "halueval_hallucination",
+            "--max-samples",
+            "2",
+            "--model",
+            model_name,
+            "--outdir",
+            str(outdir),
+            "--parquet",
+        ],
+        standalone_mode=False,
+    )
+
+    table = pq.read_table(outdir / "features.parquet")
+    meta = json.loads((outdir / "config.json").read_text())
+    n_layers = meta["num_layers"]
+
+    # 2 samples x 2 phases
+    assert table.num_rows == 4
+
+    feature_cols = [c for c in table.schema.names if c.startswith("asymmetry_")]
+    assert len(feature_cols) == 3 * n_layers  # G, Gamma, C per layer
+    assert "asymmetry_G_L0_H0" in feature_cols
+    assert not any("hodge" in c for c in feature_cols)  # no inner prefix
+
+    rows = table.to_pylist()
+    assert any(r["asymmetry_G_L0_H0"] is not None for r in rows)
