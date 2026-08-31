@@ -135,8 +135,6 @@ class RoutingConfig(SignalConfigBase):
     threshold: int = Field(512, ge=0)
     block_size: int = Field(256, ge=1)
     causal: bool = True
-    # Seed for the matrix-free commutator-norm Hutchinson estimator.
-    hodge_seed: int = 42
 
 
 class CyclicTrianglesConfig(SignalConfigBase):
