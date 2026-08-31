@@ -38,10 +38,11 @@ from glassbox.svd import (
 # ===========================================================================
 #
 # Note: the Hodge gradient/curl split (Gamma, C) is NOT computed on M — degree
-# normalization distorts the antisymmetric structure, so the split lives only in
-# the asymmetry signal on P (see tests/test_diagnostic.py::TestAsymmetryCurlSplit
-# and docs/operator-choice.md). On M we keep only the scalar circulation ratio
-# asym_index = ||M_asym||_F / ||M||_F, tested here via the low-level compute_G_* funcs.
+# normalization leaks the symmetric routing into the antisymmetric channel entry-wise,
+# so the split lives only in the asymmetry signal on P (see
+# tests/test_diagnostic.py::TestAsymmetryCurlSplit and docs/operator-choice.md). On M we
+# keep only the scalar asymmetry index asym_index = ||M_asym||_F / ||M||_F, tested here
+# via the low-level compute_G_* funcs.
 
 
 class TestAsymmetryG:
@@ -290,8 +291,6 @@ class TestRoutingFeatures:
         assert f.phi_hat is not None
         assert f.sigma2 is not None
         assert f.asym_index is not None
-        assert f.sigma2_asym is not None
-        assert f.commutator_norm is not None
         # Spectral fields populated
         assert f.sv1 is not None
         assert f.sv_ratio is not None
@@ -303,8 +302,6 @@ class TestRoutingFeatures:
         assert 0.0 <= f.sigma2 <= 1.0
         assert 0.0 <= f.phi_hat <= 1.0
         assert f.asym_index >= 0.0
-        assert f.sigma2_asym >= 0.0
-        assert f.commutator_norm >= 0.0
         assert len(f.singular_values) > 0
 
     def test_singular_values_descending(self):
@@ -361,8 +358,6 @@ class TestMaterializedPath:
         assert 0.0 <= f.sigma2 <= 1.0
         assert 0.0 <= f.phi_hat <= 1.0
         assert f.asym_index >= 0.0
-        assert f.sigma2_asym >= 0.0
-        assert f.commutator_norm >= 0.0
 
     def test_symmetric_near_zero(self):
         torch.manual_seed(77)
@@ -425,15 +420,12 @@ class TestMaterializedVsMatrixFree:
                 d_k_mf,
                 scale,
                 rank=4,
-                seed=42,
             )
             for key in ["asym_index"]:
                 assert abs(getattr(f_mat, key) - getattr(f_mf, key)) < 0.05, (
                     f"seed={seed}, {key}: mat={getattr(f_mat, key)}, mf={getattr(f_mf, key)}"
                 )
             assert abs(f_mat.sigma2 - f_mf.sigma2) < 0.1
-            assert abs(f_mat.sigma2_asym - f_mf.sigma2_asym) < 0.1
-            assert abs(f_mat.commutator_norm - f_mf.commutator_norm) < 0.15
 
 
 # ===========================================================================
@@ -465,7 +457,6 @@ class TestHalfPrecisionDtype:
             d_k_mf,
             scale,
             rank=2,
-            seed=42,
         )
         assert f.sigma2 is not None
         assert f.asym_index is not None
@@ -511,5 +502,5 @@ def test_routing_materialized_half_precision_no_crash(dtype):
     torch.manual_seed(0)
     M = torch.softmax(torch.randn(16, 16), dim=-1).to(dtype)
     feats = compute_routing_features_materialized(M, rank=3)
-    for v in (feats.sigma2, feats.asym_index, feats.phi_hat, feats.sigma2_asym):
+    for v in (feats.sigma2, feats.asym_index, feats.phi_hat):
         assert v is not None and math.isfinite(v)

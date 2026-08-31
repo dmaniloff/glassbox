@@ -5,14 +5,28 @@ Two paths controlled by a sequence-length threshold:
   - Materialized (L <= threshold): dense tensor ops on the L×L matrix M.
   - Matrix-free  (L >  threshold): blocked-streaming matvecs, O(Ld) memory.
 
-Features: SVD spectrum, phi_hat (Cheeger conductance), the normalized asymmetry index
-asym_index = ||M_asym||_F / ||M||_F (the Beyond Hodge circulation ratio, Thm 3.1 — a
-degree-invariant transpose-sensitivity feature), sigma2_asym, and commutator_norm.
+Features: SVD spectrum, phi_hat (Cheeger conductance), and the normalized asymmetry index
+asym_index = ||M_asym||_F / ||M||_F — a degree-invariant transpose-sensitivity scalar in
+the conductance bundle (the paper's asymmetry coefficient G, evaluated on M).
 
-The Hodge gradient/curl split (Gamma, C) is deliberately NOT computed on M: degree
-normalization is an asymmetric scaling (D_Q != D_K) that distorts the antisymmetric
-structure, so the split is only well-posed on the row-stochastic P. It lives in the
-``asymmetry`` signal (glassbox/diagnostics/asymmetry.py); see docs/operator-choice.md.
+No Hodge gradient/curl split, and no other M_asym-derived feature, is computed here.
+Degree normalization M = D_Q^{-1/2} P D_K^{-1/2} is an *asymmetric* scaling: for softmax
+attention D_Q = I, so M = P D_K^{-1/2} and, entry-wise (d = key degrees),
+
+    M_asym(i,j) = P_asym(i,j)*sigma(i,j) + P_sym(i,j)*delta(i,j),
+        sigma(i,j) = (d_i^{-1/2} + d_j^{-1/2})/2   (symmetric  — carries the signal)
+        delta(i,j) = (d_j^{-1/2} - d_i^{-1/2})/2   (antisymmetric — injects contamination)
+
+so whenever key degrees differ (d_i != d_j) the *symmetric* routing P_sym leaks into the
+antisymmetric channel. The gradient/curl split of M_asym therefore mixes genuine
+directionality with degree heterogeneity and loses its P-interpretation; no edge/vertex
+reweighting of M recovers the split of P (the contamination is in the flow, not the
+metric). The Hodge program (G, Gamma, C) is run on the row-stochastic attention P
+instead — the ``asymmetry`` signal (glassbox/diagnostics/asymmetry.py); see
+docs/operator-choice.md.
+
+The scalar asym_index is unaffected: ||M_asym||_F / ||M||_F is a well-posed
+degree-invariant transpose-sensitivity measure regardless of the split.
 """
 
 from __future__ import annotations
@@ -166,18 +180,15 @@ def compute_routing_features_matrix_free(
     rank,
     svd_method="randomized",
     block_size=256,
-    seed=42,
-    n_hutchinson=10,
     causal=False,
     matvec_strategy="batched",
 ):
     """Compute all routing features matrix-free.
 
-    Returns a RoutingFeatures with singular_values, spectral features, the normalized
-    asymmetry index (asym_index = ||M_asym||_F / ||M||_F, exact via blocked streaming),
-    sigma2_asym, and commutator_norm. ``seed`` / ``n_hutchinson`` feed only the
-    commutator-norm estimator. The Hodge gradient/curl split is not computed on M —
-    see the module docstring and the ``asymmetry`` signal.
+    Returns a RoutingFeatures with singular_values, spectral features, and the normalized
+    asymmetry index (asym_index = ||M_asym||_F / ||M||_F, exact via blocked streaming).
+    No Hodge gradient/curl split or other M_asym-derived feature is computed on M — see
+    the module docstring and the ``asymmetry`` signal.
     """
     L = Q.shape[0]
     device = Q.device
@@ -222,27 +233,13 @@ def compute_routing_features_matrix_free(
         phi_hat = 0.0
 
     # --- asym_index and ||M||_F in one fused blocked pass (compute_G returns ||M||_F too) ---
-    asym_index, M_fro_val = compute_G_matrix_free(
-        Q, K, d_k_inv_sqrt, scale, block_size, causal=causal
-    )
-
-    # --- sigma2_asym (matrix-free) ---
-    sigma2_asym = compute_sigma2_asym_matrix_free(
-        Q, K, d_k_inv_sqrt, scale, block_size, svd_method, causal=causal
-    )
-
-    # --- commutator_norm (Hutchinson, matrix-free) ---
-    commutator_norm = estimate_commutator_norm_matrix_free(
-        Q, K, d_k_inv_sqrt, scale, M_fro_val, block_size, n_hutchinson, seed, causal=causal
-    )
+    asym_index, _ = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     return RoutingFeatures(
         singular_values=S_sorted[:k].cpu().tolist(),
         phi_hat=phi_hat,
         sigma2=sigma2,
         asym_index=asym_index,
-        sigma2_asym=sigma2_asym,
-        commutator_norm=commutator_norm,
     )
 
 
@@ -263,9 +260,9 @@ def compute_G_materialized(M):
 def compute_routing_features_materialized(M, rank, svd_method="randomized") -> RoutingFeatures:
     """All routing features from materialized M.
 
-    Returns a RoutingFeatures with singular_values, spectral features, the normalized
-    asymmetry index, sigma2_asym, and commutator_norm populated. The Hodge gradient/curl
-    split is not computed on M — see the module docstring and the ``asymmetry`` signal.
+    Returns a RoutingFeatures with singular_values, spectral features, and the normalized
+    asymmetry index populated. No Hodge gradient/curl split or other M_asym-derived feature
+    is computed on M — see the module docstring and the ``asymmetry`` signal.
 
     Used when L <= threshold. Dense tensor ops are much faster than
     iterative matvec approaches at small sequence lengths.
@@ -287,23 +284,13 @@ def compute_routing_features_materialized(M, rank, svd_method="randomized") -> R
     else:
         phi_hat = 0.0
 
-    asym_index, M_fro = compute_G_materialized(M)
-
-    M_sym = (M + M.T) / 2.0
-    M_asym = (M - M.T) / 2.0
-    sigma_asym = torch.linalg.svdvals(M_asym)
-    sigma2_asym = sigma_asym[1].item() if len(sigma_asym) > 1 else 0.0
-
-    comm = M_sym @ M_asym - M_asym @ M_sym
-    commutator_norm = torch.linalg.norm(comm, "fro").item() / (M_fro + EPSILON)
+    asym_index, _ = compute_G_materialized(M)
 
     return RoutingFeatures(
         singular_values=sigma[:k].cpu().tolist(),
         phi_hat=phi_hat,
         sigma2=sigma2,
         asym_index=asym_index,
-        sigma2_asym=sigma2_asym,
-        commutator_norm=commutator_norm,
     )
 
 

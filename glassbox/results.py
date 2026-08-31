@@ -65,11 +65,12 @@ class RoutingFeatures(BaseModel):
     automatically on construction.
 
     Note: the Hodge gradient/curl split (Gamma, C) is deliberately NOT computed
-    here. Degree normalization is an asymmetric scaling (D_Q^{-1/2}(.)D_K^{-1/2},
-    D_Q != D_K) that distorts the antisymmetric structure, so the split is only
-    well-posed on the row-stochastic P — see the ``asymmetry`` signal and
-    docs/operator-choice.md. On M we keep only the scalar circulation ratio
-    ``asym_index``, which is well-posed as a transpose-sensitivity feature.
+    here. Degree normalization injects the symmetric routing P_sym into the
+    antisymmetric channel entry-wise (M_asym = P_asym*sigma + P_sym*delta whenever
+    key degrees differ), and no reweighting of M recovers P's split — so the split
+    is run on the row-stochastic attention P instead (the ``asymmetry`` signal; see
+    docs/operator-choice.md). On M we keep only the scalar asymmetry index
+    ``asym_index``, which stays well-posed as a transpose-sensitivity feature.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -93,17 +94,10 @@ class RoutingFeatures(BaseModel):
     asym_index: float | None = Field(
         None,
         description=(
-            "Normalized asymmetry index (Beyond Hodge circulation ratio): "
-            "||M_asym||_F / ||M||_F on the degree-normalized operator. Degree-invariant "
-            "transpose sensitivity; a conductance-bundle scalar alongside phi_hat. The "
-            "gradient/curl Hodge split lives in the asymmetry signal (G/Gamma/C on P)."
-        ),
-    )
-    sigma2_asym: float | None = Field(None, description="Second singular value of M_asym.")
-    commutator_norm: float | None = Field(
-        None,
-        description=(
-            "||[M_sym, M_asym]||_F / ||M||_F. Entanglement of symmetric and antisymmetric parts."
+            "Normalized asymmetry index ||M_asym||_F / ||M||_F on the degree-normalized "
+            "operator. Degree-invariant transpose sensitivity; a conductance-bundle scalar "
+            "alongside phi_hat. The gradient/curl Hodge split lives in the asymmetry signal "
+            "(G/Gamma/C on the row-stochastic P), not on M."
         ),
     )
 
@@ -118,8 +112,6 @@ class RoutingFeatures(BaseModel):
     @field_validator(
         "asym_index",
         "sigma2",
-        "sigma2_asym",
-        "commutator_norm",
         "phi_hat",
         "sv1",
         "sv_ratio",

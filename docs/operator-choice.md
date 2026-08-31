@@ -10,8 +10,8 @@ SHADE papers (see References).
 | Diagnostic family | Operator | glassbox signal | Why | What it gives |
 |---|---|---|---|---|
 | Conductance / bottleneck | **M** = degree-normalized post-softmax | `cheeger`, `routing` | Cheeger σ₂ bracket is a theorem about the *normalized* operator | transport bottleneck bracket `(1−σ₂)/2 ≤ φ ≤ √(2(1−σ₂))`; plus `routing`'s `asym_index` transpose-sensitivity scalar |
-| Normalized asymmetry index (circulation ratio) | **M** = degree-normalized post-softmax | `routing` (`asym_index`) | the *Beyond Hodge* circulation ratio (Thm 3.1) is well-posed on M as a scalar; the gradient/curl *split* is **not** (asymmetric scaling distorts it) | degree-invariant scalar `‖M_asym‖_F/‖M‖_F` in the conductance bundle |
-| Hodge asymmetry / gradient–curl | **P** = row-stochastic post-softmax | `asymmetry` | degree normalization is an *asymmetric* scaling that inflates the antisymmetric rank; P keeps the clean structure | total asymmetry G, gradient (hierarchical) vs curl (circulatory) split, per-token witness |
+| Normalized asymmetry index | **M** = degree-normalized post-softmax | `routing` (`asym_index`) | the scalar `‖M_asym‖_F/‖M‖_F` is well-posed on M (degree-invariant transpose sensitivity); the gradient/curl *split* is **not** — degree normalization leaks the symmetric routing into the antisymmetric channel | degree-invariant scalar `‖M_asym‖_F/‖M‖_F` in the conductance bundle |
+| Hodge asymmetry / gradient–curl | **P** = row-stochastic post-softmax | `asymmetry` | degree normalization mixes the symmetric routing into `M_asym` entry-wise (and no reweighting of M undoes it); P carries the clean flow | total asymmetry G, gradient (hierarchical) vs curl (circulatory) split, per-token witness |
 | Orientation / tournament (discrete) | **S = QKᵀ** pre-softmax (unmasked) | `cyclic` (`\|T_cyc\|`, #42) | causal post-softmax is transitive ⇒ `\|T_cyc\|=0`; the real tournament is in the raw scores | count of non-transitive (cyclic) attention triangles |
 | Orientation / frustration (spectral) | **S = QKᵀ** pre-softmax (unmasked) | `magnetic` (λ₁ + phase-curl, #41/#68) | same post-softmax vacuity; magnetic Laplacian `L_φ=D−A⊙e^{iθ}` encodes the preference orientation as a U(1) phase | spectral frustration `λ₁` (0 ⟺ balanced) + streamable phase-curl energy |
 | Score geometry / rank | **S = QKᵀ** pre-softmax | `spectral` | pre-activation spectrum | singular-value structure of the scores |
@@ -38,11 +38,21 @@ raw matrix the bound is degree-distorted.
 The asymmetry/Hodge family runs on the **row-stochastic post-softmax attention P**, with
 `A = (P − Pᵀ)/2`, **not** on the degree-normalized M. Reasons:
 
-1. **Asymmetric normalization distorts the antisymmetric structure.** `M = D_Q^{-1/2}(·)D_K^{-1/2}`
-   with `D_Q ≠ D_K` is an *asymmetric* scaling. *Beyond Hodge* shows that symmetric scaling
-   `D·A·D` preserves antisymmetry, whereas asymmetric `D₁AD₂` (`D₁ ≠ D₂`) does not, and can inflate
-   the rank of the antisymmetric part (`rem:asymmetric_scaling`). P (no normalization) keeps the
-   clean rank-2 gradient.
+1. **Degree normalization contaminates the antisymmetric channel.** For row-stochastic P
+   (`D_Q = I`), `M = P·D_K^{-1/2}`, and entry-wise
+
+   ```
+   M_asym(i,j) = P_asym(i,j)·σ(i,j) + P_sym(i,j)·δ(i,j)
+   σ(i,j) = (dᵢ^{-1/2} + dⱼ^{-1/2}) / 2      (symmetric  — carries the directional signal)
+   δ(i,j) = (dⱼ^{-1/2} − dᵢ^{-1/2}) / 2      (antisymmetric — injects the contamination)
+   ```
+
+   where `d` = key degrees. Whenever key degrees differ (`dᵢ ≠ dⱼ`) the *symmetric* routing
+   `P_sym` leaks into `M_asym` with weight δ, so the gradient/curl split of `M_asym` mixes genuine
+   directionality with degree heterogeneity. No vertex/edge reweighting of M recovers P's split —
+   the contamination is in the *flow*, not the metric — so the split is only faithful on P. (This
+   asymmetric scaling `D₁AD₂`, `D₁ ≠ D₂`, can additionally inflate the antisymmetric rank,
+   `rem:asymmetric_scaling`; a symmetric scaling `D·A·D` would preserve it.)
 2. **Clean interpretation on P.** The Hodge gradient on P is exactly the in-degree imbalance:
    `A_grad(i,j) = m(i) − m(j)`, `m(i) ∝ (1 − cᵢ)`, `cᵢ = Σⱼ Pⱼᵢ`. The curl is the divergence-free
    residual — the **solenoidal / row-mean projection** (*Beyond Hodge*: `A = A_pot + A_sol`,
@@ -59,13 +69,13 @@ found exactly this for GPT-2 / Pythia; the sign tournament is transitive ⇒ `|T
 asymmetry axis therefore carries limited diagnostic power for decoder-only models — interpret G
 accordingly. It is genuinely informative for *non-causal* attention (encoder / cross-attention).
 
-**G on M vs P.** `G = ‖M_asym‖_F/‖M‖_F` on M is the well-posed *Beyond Hodge* circulation ratio
-(Thm 3.1) — fine as a scalar transpose-sensitivity *feature* in the conductance bundle (this is
-what `zero-shot-cheeger` and the `routing` signal report, where it is named **`asym_index`**).
-What is **not** well-posed on M is the gradient/curl *split*: the asymmetric scaling inflates the
-antisymmetric rank, so `routing` deliberately reports only the scalar `asym_index` and **no**
-`Γ`/`C`. The dedicated **`asymmetry` signal computes the full `G`/`Γ`/`C` split on P**, the
-operator of the Hodge/circulation program.
+**G on M vs P.** The scalar `‖M_asym‖_F/‖M‖_F` on M is well-posed — a degree-invariant
+transpose-sensitivity *feature* in the conductance bundle (this is what `zero-shot-cheeger` and the
+`routing` signal report, where it is named **`asym_index`**). What is **not** well-posed on M is the
+gradient/curl *split*: by the entry-wise identity above, `M_asym` blends `P_asym` with the symmetric
+`P_sym`, and no reweighting of M recovers P's decomposition — so `routing` deliberately reports only
+the scalar `asym_index` and **no** `Γ`/`C`. The dedicated **`asymmetry` signal computes the full
+`G`/`Γ`/`C` split on P**, the operator of the Hodge/circulation program.
 
 ## Orientation family → pre-softmax S
 
@@ -91,8 +101,9 @@ of the same antisymmetric preference structure `qᵢ·kⱼ − qⱼ·kᵢ`:
 
 SHADE papers:
 
-- *beyond-hodge* — Hodge decomposition of attention operators, normalization invariance, the
-  circulation ratio (Thm 3.1), and the gradient/curl energy split `G² = Γ² + C²`.
+- *beyond-hodge* — Hodge decomposition of attention operators, normalization invariance
+  (symmetric scaling `D·A·D` preserves antisymmetry; asymmetric scaling need not —
+  `rem:asymmetric_scaling`), and the gradient/curl energy split `G² = Γ² + C²`.
 - *streaming-asym-operators* — Hodge decomposition on the row-stochastic P.
 - *zero-shot-cheeger* — conductance on M; asymmetry-is-mask-artifact under causal masking.
 - *streaming-cyclic-triangles* — cyclic-triangle tournament on the pre-softmax q·k scores.
