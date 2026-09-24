@@ -6,27 +6,7 @@ Two paths controlled by a sequence-length threshold:
   - Matrix-free  (L >  threshold): blocked-streaming matvecs, O(Ld) memory.
 
 Features: SVD spectrum, phi_hat (Cheeger conductance), and the normalized asymmetry index
-asym_index = ||M_asym||_F / ||M||_F — a degree-invariant transpose-sensitivity scalar in
-the conductance bundle (the paper's asymmetry coefficient G, evaluated on M).
-
-No Hodge gradient/curl split, and no other M_asym-derived feature, is computed here.
-Degree normalization M = D_Q^{-1/2} P D_K^{-1/2} is an *asymmetric* scaling: for softmax
-attention D_Q = I, so M = P D_K^{-1/2} and, entry-wise (d = key degrees),
-
-    M_asym(i,j) = P_asym(i,j)*sigma(i,j) + P_sym(i,j)*delta(i,j),
-        sigma(i,j) = (d_i^{-1/2} + d_j^{-1/2})/2   (symmetric  — carries the signal)
-        delta(i,j) = (d_j^{-1/2} - d_i^{-1/2})/2   (antisymmetric — injects contamination)
-
-so whenever key degrees differ (d_i != d_j) the *symmetric* routing P_sym leaks into the
-antisymmetric channel. The gradient/curl split of M_asym therefore mixes genuine
-directionality with degree heterogeneity and loses its P-interpretation; no edge/vertex
-reweighting of M recovers the split of P (the contamination is in the flow, not the
-metric). The Hodge program (G, Gamma, C) is run on the row-stochastic attention P
-instead — the ``asymmetry`` signal (glassbox/diagnostics/asymmetry.py); see
-docs/operator-choice.md.
-
-The scalar asym_index is unaffected: ||M_asym||_F / ||M||_F is a well-posed
-degree-invariant transpose-sensitivity measure regardless of the split.
+asym_index = ||M_asym||_F / ||M||_F.
 """
 
 from __future__ import annotations
@@ -187,8 +167,6 @@ def compute_routing_features_matrix_free(
 
     Returns a RoutingFeatures with singular_values, spectral features, and the normalized
     asymmetry index (asym_index = ||M_asym||_F / ||M||_F, exact via blocked streaming).
-    No Hodge gradient/curl split or other M_asym-derived feature is computed on M — see
-    the module docstring and the ``asymmetry`` signal.
     """
     L = Q.shape[0]
     device = Q.device
@@ -261,8 +239,7 @@ def compute_routing_features_materialized(M, rank, svd_method="randomized") -> R
     """All routing features from materialized M.
 
     Returns a RoutingFeatures with singular_values, spectral features, and the normalized
-    asymmetry index populated. No Hodge gradient/curl split or other M_asym-derived feature
-    is computed on M — see the module docstring and the ``asymmetry`` signal.
+    asymmetry index populated.
 
     Used when L <= threshold. Dense tensor ops are much faster than
     iterative matvec approaches at small sequence lengths.
