@@ -7,16 +7,16 @@ SHADE papers (see References).
 
 ## TL;DR
 
-| Diagnostic family | Operator | glassbox signal | Why | What it gives |
+| Diagnostic family | Matrix | glassbox signal | Why | What it gives |
 |---|---|---|---|---|
 | Conductance / bottleneck | **M** = degree-normalized post-softmax | `cheeger`, `routing` | Cheeger σ₂ bracket is a theorem about the *normalized* operator | transport bottleneck bracket `(1−σ₂)/2 ≤ φ ≤ √(2(1−σ₂))`; plus `routing`'s `asym_index` transpose-sensitivity scalar |
 | Normalized asymmetry index | **M** = degree-normalized post-softmax | `routing` (`asym_index`) | measures asymmetry of the degree-normalized operator | normalized asymmetry `‖M_asym‖_F/‖M‖_F` |
 | Hodge asymmetry / gradient–curl | **P** = row-stochastic post-softmax | `asymmetry` | decomposes the original attention flow | total asymmetry G, gradient (hierarchical) vs curl (circulatory) split, per-token witness |
-| Orientation / tournament (discrete) | **S = QKᵀ** pre-softmax (unmasked) | `cyclic` (`\|T_cyc\|`, #42) | causal post-softmax is transitive ⇒ `\|T_cyc\|=0`; the real tournament is in the raw scores | count of non-transitive (cyclic) attention triangles |
-| Orientation / frustration (spectral) | **S = QKᵀ** pre-softmax (unmasked) | `magnetic` (λ₁ + phase-curl, #41/#68) | same post-softmax vacuity; magnetic Laplacian `L_φ=D−A⊙e^{iθ}` encodes the preference orientation as a U(1) phase | spectral frustration `λ₁` (0 ⟺ balanced) + streamable phase-curl energy |
+| Orientation / tournament (discrete) | **S = QKᵀ** pre-softmax (unmasked) | `cyclic` (`\|T_cyc\|`) | causal post-softmax is transitive ⇒ `\|T_cyc\|=0`; the real tournament is in the raw scores | count of non-transitive (cyclic) attention triangles |
+| Orientation / frustration (spectral) | **S = QKᵀ** pre-softmax (unmasked) | `magnetic` (λ₁ + phase-curl) | same post-softmax vacuity; magnetic Laplacian `L_φ=D−A⊙e^{iθ}` encodes the preference orientation as a U(1) phase | spectral frustration `λ₁` (0 ⟺ balanced) + streamable phase-curl energy |
 | Score geometry / rank | **S = QKᵀ** pre-softmax | `spectral` | pre-activation spectrum | singular-value structure of the scores |
 
-## The three operators
+## The 3 matrices
 
 - **Pre-softmax scores** `S = QKᵀ/√d` — full, **not** causally masked (the mask is applied inside
   the softmax, not to the raw scores). The directional asymmetry `sgn(qᵢ·kⱼ − qⱼ·kᵢ)` and the
