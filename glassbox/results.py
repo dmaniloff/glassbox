@@ -86,8 +86,7 @@ class RoutingFeatures(BaseModel):
     asym_index: float | None = Field(
         None,
         description=(
-            "Normalized asymmetry index ||M_asym||_F / ||M||_F on the degree-normalized "
-            "operator M."
+            "Normalized asymmetry index ||M_asym||_F / ||M||_F on the degree-normalized operator M."
         ),
     )
 
