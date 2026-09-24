@@ -1,7 +1,8 @@
 # Operator choice: which attention matrix each diagnostic uses
 
-Attention exposes three matrices, and **each diagnostic family must run on the one its
-mathematics requires** — they are not interchangeable. Using the wrong operator silently
+Glassbox computes diagnostics on three matrices: pre-softmax scores S, post-softmax
+attention P, and degree-normalized attention M. **Each diagnostic family must run on the
+one its mathematics requires** — they are not interchangeable. Using the wrong operator silently
 changes (or destroys) the quantity being measured. The choices below are grounded in the
 SHADE papers (see References).
 
