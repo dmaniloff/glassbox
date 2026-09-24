@@ -87,9 +87,7 @@ class RoutingFeatures(BaseModel):
         None,
         description=(
             "Normalized asymmetry index ||M_asym||_F / ||M||_F on the degree-normalized "
-            "operator. Degree-invariant transpose sensitivity; a conductance-bundle scalar "
-            "alongside phi_hat. The gradient/curl Hodge split lives in the asymmetry signal "
-            "(G/Gamma/C on the row-stochastic P), not on M."
+            "operator M."
         ),
     )
 
