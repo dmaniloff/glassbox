@@ -63,14 +63,6 @@ class RoutingFeatures(BaseModel):
     Single source of truth: singular_values are stored directly, and
     spectral features (sv1, sv_ratio, sv_entropy) are derived from them
     automatically on construction.
-
-    Note: the Hodge gradient/curl split (Gamma, C) is deliberately NOT computed
-    here. Degree normalization injects the symmetric routing P_sym into the
-    antisymmetric channel entry-wise (M_asym = P_asym*sigma + P_sym*delta whenever
-    key degrees differ), and no reweighting of M recovers P's split — so the split
-    is run on the row-stochastic attention P instead (the ``asymmetry`` signal; see
-    docs/operator-choice.md). On M we keep only the scalar asymmetry index
-    ``asym_index``, which stays well-posed as a transpose-sensitivity feature.
     """
 
     model_config = ConfigDict(frozen=True)
