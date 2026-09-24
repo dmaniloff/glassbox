@@ -61,7 +61,7 @@ These come from the singular values and asymmetry analysis of the normalized ope
 | `sv_entropy` | `-Σ pᵢ log pᵢ`, with `pᵢ = σᵢ / Σⱼ σⱼ` | Entropy of the normalized singular-value distribution. Spread of routing mass across modes |
 | `sigma2` | `σ₂(M)` | Second singular value of `M`. Raw spectral-gap measure and persistence of non-dominant routing structure |
 | `phi_hat` | `1 - σ₂(M)` | Conductance-like bottleneck score. High `φ̂` means attention concentrates through a single dominant mode; low `φ̂` means multiple competing routing paths |
-| `asym_index` | `‖M_asym‖_F / ‖M‖_F` | Normalized asymmetry index, where `M_asym = (M - Mᵀ) / 2`. Degree-invariant transpose-sensitivity — a conductance-bundle scalar alongside `phi_hat`. **Not** the Hodge gradient/curl split: degree normalization injects the symmetric routing into the antisymmetric channel entry-wise (`M_asym(i,j) = P_asym·σ + P_sym·δ` when key degrees differ), so `Γ`/`C` are computed only in the `asymmetry` signal on `P` — see [operator-choice](docs/operator-choice.md) |
+| `asym_index` | `‖M_asym‖_F / ‖M‖_F` | Normalized asymmetry index, where `M_asym = (M - Mᵀ) / 2`. |
 
 The routing metrics live in `glassbox/hodge.py`. The feature schemas are defined in `glassbox/results.py`.
 
