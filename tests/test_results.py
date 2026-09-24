@@ -64,14 +64,12 @@ class TestRoutingFeatures:
         f = RoutingFeatures(
             singular_values=[1.0, 0.5],
             phi_hat=0.31,
-            G=0.15,
-            curl_ratio=0.42,
+            asym_index=0.15,
         )
         assert f.sv1 == 1.0
         assert f.sv_ratio == pytest.approx(2.0)
         assert f.phi_hat == 0.31
-        assert f.G == 0.15
-        assert f.curl_ratio == 0.42
+        assert f.asym_index == 0.15
         assert f.sigma2 is None  # not passed
 
 
@@ -155,7 +153,7 @@ class TestSVDSnapshot:
         features = RoutingFeatures(
             singular_values=[1.0, 0.5],
             phi_hat=0.3,
-            G=0.15,
+            asym_index=0.15,
         )
         snap = self._make_snapshot(
             signal="routing",

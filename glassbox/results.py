@@ -58,7 +58,7 @@ class SpectralFeatures(BaseModel):
 
 
 class RoutingFeatures(BaseModel):
-    """Features from SVD + Hodge decomposition of degree-normalized M.
+    """Features from the SVD + asymmetry analysis of the degree-normalized operator M.
 
     Single source of truth: singular_values are stored directly, and
     spectral features (sv1, sv_ratio, sv_entropy) are derived from them
@@ -83,22 +83,10 @@ class RoutingFeatures(BaseModel):
         description="Cheeger conductance via bipartite sweep cut.",
     )
     sigma2: float | None = Field(None, description="Second singular value of M.")
-    G: float | None = Field(None, description="Total asymmetry: ||M_asym||_F / ||M||_F.")
-    Gamma: float | None = Field(
-        None, description="Gradient coefficient: potential-driven portion of asymmetry."
-    )
-    C: float | None = Field(
-        None,
-        description="Curl coefficient: circulatory portion of asymmetry (triangle-sampled).",
-    )
-    curl_ratio: float | None = Field(
-        None, description="C / (G + eps). Share of asymmetry that is circulatory."
-    )
-    sigma2_asym: float | None = Field(None, description="Second singular value of M_asym.")
-    commutator_norm: float | None = Field(
+    asym_index: float | None = Field(
         None,
         description=(
-            "||[M_sym, M_asym]||_F / ||M||_F. Entanglement of symmetric and antisymmetric parts."
+            "Normalized asymmetry index ||M_asym||_F / ||M||_F on the degree-normalized operator M."
         ),
     )
 
@@ -111,13 +99,8 @@ class RoutingFeatures(BaseModel):
         return values
 
     @field_validator(
-        "G",
-        "Gamma",
-        "C",
-        "curl_ratio",
+        "asym_index",
         "sigma2",
-        "sigma2_asym",
-        "commutator_norm",
         "phi_hat",
         "sv1",
         "sv_ratio",

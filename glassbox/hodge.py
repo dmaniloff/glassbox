@@ -1,22 +1,15 @@
 """
-Hodge decomposition features for the degree-normalized cross-operator M.
+Routing features for the degree-normalized cross-operator M.
 
 Two paths controlled by a sequence-length threshold:
   - Materialized (L <= threshold): dense tensor ops on the L×L matrix M.
   - Matrix-free  (L >  threshold): blocked-streaming matvecs, O(Ld) memory.
 
-Features: asymmetry coefficient G, the Hodge gradient/curl split (Gamma, C) computed
-exactly from the row-sum identity ||A_grad||^2 = 2||r||^2/L (r = M_asym @ 1), sigma2_asym,
-commutator_norm, and curl_ratio. The Pythagorean split G^2 = Gamma^2 + C^2 is genuine.
-
-References:
-    Lim (2020): Hodge Laplacians on Graphs (SIAM Review)
-    Jiang et al (2011): HodgeRank (Mathematical Programming)
+Features: SVD spectrum, phi_hat (Cheeger conductance), and the normalized asymmetry index
+asym_index = ||M_asym||_F / ||M||_F.
 """
 
 from __future__ import annotations
-
-import math
 
 import torch
 
@@ -167,20 +160,13 @@ def compute_routing_features_matrix_free(
     rank,
     svd_method="randomized",
     block_size=256,
-    seed=42,
-    n_hutchinson=10,
     causal=False,
     matvec_strategy="batched",
 ):
-    """Compute all Hodge routing features matrix-free.
+    """Compute all routing features matrix-free.
 
-    Returns a RoutingFeatures with singular_values, spectral
-    features, and Hodge decomposition features populated.
-
-    The Pythagorean identity G^2 = Gamma^2 + C^2 is a genuine split: G is exact (blocked
-    streaming), and Gamma/C are both derived from the exact row-sum r = M_asym @ 1 (one
-    matvec) via the Hodge identity ||A_grad||^2 = 2||r||^2/L. ``seed`` / ``n_hutchinson``
-    feed only the commutator-norm estimator.
+    Returns a RoutingFeatures with singular_values, spectral features, and the normalized
+    asymmetry index (asym_index = ||M_asym||_F / ||M||_F, exact via blocked streaming).
     """
     L = Q.shape[0]
     device = Q.device
@@ -224,36 +210,14 @@ def compute_routing_features_matrix_free(
     else:
         phi_hat = 0.0
 
-    # --- G and ||M||_F in one fused blocked pass (compute_G already returns ||M||_F) ---
-    G, M_fro_val = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
-
-    # --- Exact Hodge gradient/curl split via the row-sum r = M_asym @ 1 (one matvec; #55) ---
-    ones = torch.ones(L, device=device, dtype=Q.dtype)
-    r = matvec_Masym_blocked(Q, K, ones, d_k_inv_sqrt, scale, block_size, causal=causal)
-    M_asym_fro_sq = (G * M_fro_val) ** 2  # ||M_asym||^2 = (G * ||M||)^2
-    Gamma, C = _gradient_curl_split(M_asym_fro_sq, r, L, M_fro_val)
-    curl_ratio = C / (G + EPSILON)
-
-    # --- sigma2_asym (matrix-free) ---
-    sigma2_asym = compute_sigma2_asym_matrix_free(
-        Q, K, d_k_inv_sqrt, scale, block_size, svd_method, causal=causal
-    )
-
-    # --- commutator_norm (Hutchinson, matrix-free) ---
-    commutator_norm = estimate_commutator_norm_matrix_free(
-        Q, K, d_k_inv_sqrt, scale, M_fro_val, block_size, n_hutchinson, seed, causal=causal
-    )
+    # --- asym_index and ||M||_F in one fused blocked pass (compute_G returns ||M||_F too) ---
+    asym_index, _ = compute_G_matrix_free(Q, K, d_k_inv_sqrt, scale, block_size, causal=causal)
 
     return RoutingFeatures(
         singular_values=S_sorted[:k].cpu().tolist(),
         phi_hat=phi_hat,
         sigma2=sigma2,
-        G=G,
-        Gamma=Gamma,
-        C=C,
-        curl_ratio=curl_ratio,
-        sigma2_asym=sigma2_asym,
-        commutator_norm=commutator_norm,
+        asym_index=asym_index,
     )
 
 
@@ -271,29 +235,11 @@ def compute_G_materialized(M):
     return G, M_fro.item()
 
 
-def _gradient_curl_split(asym_fro_sq: float, r: torch.Tensor, n: int, fro: float) -> tuple:
-    """Exact Hodge gradient/curl split of an antisymmetric part from its row-sum r = A_asym @ 1.
-
-    ``||A_grad||^2 = 2||r||^2 / n`` (potential phi = r/n); Gamma = ||A_grad||/||M|| (gradient,
-    hierarchical) and the curl is the divergence-free residual
-    ``C = sqrt(||A_asym||^2 - ||A_grad||^2)/||M||`` (circulatory). Both are derived from r, so
-    ``G^2 = Gamma^2 + C^2`` is a genuine split — not the tautology of defining Gamma as
-    sqrt(G^2 - C^2). C is the Pythagorean residual of the exact gradient energy (no triangle
-    count enters); the gradient identity is the load-bearing part, shared with the asymmetry
-    signal.
-    """
-    grad_energy = 2.0 * float((r * r).sum().item()) / n
-    den = fro + EPSILON
-    gamma = math.sqrt(max(grad_energy, 0.0)) / den
-    c = math.sqrt(max(asym_fro_sq - grad_energy, 0.0)) / den
-    return gamma, c
-
-
 def compute_routing_features_materialized(M, rank, svd_method="randomized") -> RoutingFeatures:
     """All routing features from materialized M.
 
-    Returns a RoutingFeatures with singular_values, spectral
-    features, and Hodge decomposition features populated.
+    Returns a RoutingFeatures with singular_values, spectral features, and the normalized
+    asymmetry index populated.
 
     Used when L <= threshold. Dense tensor ops are much faster than
     iterative matvec approaches at small sequence lengths.
@@ -315,34 +261,13 @@ def compute_routing_features_materialized(M, rank, svd_method="randomized") -> R
     else:
         phi_hat = 0.0
 
-    G, M_fro = compute_G_materialized(M)
-
-    M_sym = (M + M.T) / 2.0
-    M_asym = (M - M.T) / 2.0
-    sigma_asym = torch.linalg.svdvals(M_asym)
-    sigma2_asym = sigma_asym[1].item() if len(sigma_asym) > 1 else 0.0
-
-    comm = M_sym @ M_asym - M_asym @ M_sym
-    commutator_norm = torch.linalg.norm(comm, "fro").item() / (M_fro + EPSILON)
-
-    # Exact Hodge gradient/curl split via the row-sum identity (issue #55), replacing the
-    # mis-normalized triangle-RMS curl. r = M_asym @ 1; Gamma/C both derived from it.
-    # ||M_asym||^2 is taken as (G*||M||)^2 (consistent with G) so G^2 = Gamma^2 + C^2 is exact.
-    r = M_asym.sum(dim=1)
-    M_asym_fro_sq = (G * M_fro) ** 2
-    Gamma, C = _gradient_curl_split(M_asym_fro_sq, r, M.shape[0], M_fro)
-    curl_ratio = C / (G + EPSILON)
+    asym_index, _ = compute_G_materialized(M)
 
     return RoutingFeatures(
         singular_values=sigma[:k].cpu().tolist(),
         phi_hat=phi_hat,
         sigma2=sigma2,
-        G=G,
-        Gamma=Gamma,
-        C=C,
-        curl_ratio=curl_ratio,
-        sigma2_asym=sigma2_asym,
-        commutator_norm=commutator_norm,
+        asym_index=asym_index,
     )
 
 

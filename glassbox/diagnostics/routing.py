@@ -1,4 +1,4 @@
-"""Routing diagnostic: SVD + Hodge decomposition of degree-normalized M."""
+"""Routing diagnostic: SVD + asymmetry index of the degree-normalized operator M."""
 
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ class RoutingDiagnostic:
         self.threshold = config.threshold
         self.block_size = config.block_size
         self.causal = config.causal
-        self.hodge_seed = config.hodge_seed
 
     def reduce(self, Qh: torch.Tensor, Kh: torch.Tensor, L: int, **ctx: Any) -> dict:
         scale = 1.0 / math.sqrt(Qh.shape[1])
@@ -60,7 +59,6 @@ class RoutingDiagnostic:
                 rank=k,
                 svd_method=self.method,
                 block_size=self.block_size,
-                seed=self.hodge_seed,
                 causal=self.causal,
                 matvec_strategy=ctx.get("matvec_strategy", "batched"),
             )

@@ -204,9 +204,6 @@ class SpectralConfig(SVDParams, SignalConfigBase):
 class RoutingConfig(SVDParams, ThresholdParams, CausalMode, SignalConfigBase):
     """SVD of post-softmax degree-normalized operator M = D_Q^{-1/2} A D_K^{-1/2}."""
 
-    # Seed for the matrix-free commutator-norm Hutchinson estimator.
-    hodge_seed: int = 42
-
 
 class CyclicTrianglesConfig(IncrementalMode, SignalConfigBase):
     """Cyclic-triangle count |T_cyc| of the pre-softmax sign tournament ω(QKᵀ).
